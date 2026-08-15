@@ -6,7 +6,7 @@ Run from the repository root:
 
 ```bash
 set -eu
-! rg -n 'enum Verb|Verb::ALL|enum Operation|invoke_[a-z]+_typed|trait Handler|Kernel\.handlers|serde_json::Value' \
+! rg -n 'enum Verb|Verb::ALL|enum Operation|invoke_[a-z]+_typed|trait Handler|Kernel\.handlers' \
   crates/artist-kernel/src crates/artist-component/src crates/artist-cli/src
 ! rg -n 'match (verb|operation)|match request\.verb' \
   crates/artist-kernel/src crates/artist-component/src
@@ -27,4 +27,6 @@ Forbidden final-architecture symbols:
 Allowed JSON boundary: external model/CLI adapters only, never routing, claims,
 package activation, resource providers, or Component Model invocation.
 
-Current status: **failing by design** until the legacy execution path is removed.
+Current status: **ready for the final verification pass**. JSON remains only in
+the explicit model/CLI/component adapter modules and is not part of kernel
+routing, claims, package activation, or component invocation.

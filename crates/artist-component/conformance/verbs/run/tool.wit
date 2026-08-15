@@ -1,0 +1,6 @@
+package artist:tool@1.0.0;
+interface run {
+    use artist:%resource/types@1.0.0.{run-request, uri, error};
+    run: func(requests: list<run-request>) -> list<result<uri, error>>;
+}
+world tool-world { export run; }

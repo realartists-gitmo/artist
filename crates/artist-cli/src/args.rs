@@ -38,11 +38,12 @@ pub struct ResourceArgs {
     pub args: String,
 }
 
-#[derive(Clone, Debug, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 pub enum ResourceVerb {
     Read,
     Write,
     Edit,
+    Run,
     Send,
     Poll,
     Abort,
@@ -52,18 +53,8 @@ pub enum ResourceVerb {
 }
 
 impl ResourceVerb {
-    pub fn verb(&self) -> artist_kernel::Verb {
-        match self {
-            Self::Read => artist_kernel::Verb::Read,
-            Self::Write => artist_kernel::Verb::Write,
-            Self::Edit => artist_kernel::Verb::Edit,
-            Self::Send => artist_kernel::Verb::Send,
-            Self::Poll => artist_kernel::Verb::Poll,
-            Self::Abort => artist_kernel::Verb::Abort,
-            Self::Delete => artist_kernel::Verb::Delete,
-            Self::Find => artist_kernel::Verb::Find,
-            Self::Grep => artist_kernel::Verb::Grep,
-        }
+    pub fn verb(self) -> Self {
+        self
     }
 }
 

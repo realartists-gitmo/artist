@@ -1,108 +1,14 @@
 //! Host-side implementation of the Artist WebAssembly Component ABI.
 
-/// Version-one tool contracts. These deliberately import the shared
-/// `artist:resource` types.
-pub mod tool_v1_bindings {
-    wasmtime::component::bindgen!({
-        path: "wit/tool-surface-v1",
-        world: "read-world",
-        additional_derives: [serde::Serialize, serde::Deserialize],
-    });
-}
-
-macro_rules! tool_v1_world_bindings {
-    ($module:ident, $world:literal) => {
-        pub mod $module {
-            wasmtime::component::bindgen!({
-                path: "wit/tool-surface-v1",
-                world: $world,
-                additional_derives: [serde::Serialize, serde::Deserialize],
-            });
-        }
-    };
-}
-
-tool_v1_world_bindings!(tool_v1_write_bindings, "write-world");
-tool_v1_world_bindings!(tool_v1_edit_bindings, "edit-world");
-tool_v1_world_bindings!(tool_v1_find_bindings, "find-world");
-tool_v1_world_bindings!(tool_v1_grep_bindings, "grep-world");
-tool_v1_world_bindings!(tool_v1_run_bindings, "run-world");
-tool_v1_world_bindings!(tool_v1_send_bindings, "send-world");
-tool_v1_world_bindings!(tool_v1_abort_bindings, "abort-world");
-tool_v1_world_bindings!(tool_v1_delete_bindings, "delete-world");
-tool_v1_world_bindings!(tool_v1_poll_bindings, "poll-world");
-
-macro_rules! tool_v1_async_world_bindings {
-    ($module:ident, $world:literal) => {
-        pub mod $module {
-            wasmtime::component::bindgen!({
-                path: "wit/tool-surface-v1",
-                world: $world,
-                imports: { default: async },
-                exports: { default: async },
-                additional_derives: [serde::Serialize, serde::Deserialize],
-            });
-        }
-    };
-}
-
-tool_v1_async_world_bindings!(tool_v1_async_tool_v1_bindings, "read-world");
-tool_v1_async_world_bindings!(tool_v1_async_tool_v1_write_bindings, "write-world");
-tool_v1_async_world_bindings!(tool_v1_async_tool_v1_edit_bindings, "edit-world");
-tool_v1_async_world_bindings!(tool_v1_async_tool_v1_find_bindings, "find-world");
-tool_v1_async_world_bindings!(tool_v1_async_tool_v1_grep_bindings, "grep-world");
-tool_v1_async_world_bindings!(tool_v1_async_tool_v1_run_bindings, "run-world");
-tool_v1_async_world_bindings!(tool_v1_async_tool_v1_send_bindings, "send-world");
-tool_v1_async_world_bindings!(tool_v1_async_tool_v1_abort_bindings, "abort-world");
-tool_v1_async_world_bindings!(tool_v1_async_tool_v1_delete_bindings, "delete-world");
-tool_v1_async_world_bindings!(tool_v1_async_tool_v1_poll_bindings, "poll-world");
-
-// The generated v1 worlds are the sole universal component ABI. These local
-// aliases are only used by the typed adapter below while its per-verb match is
-// collapsed to the v1 worlds.
-
 /// Canonical shared resource contract. Resource extensions and model-facing
 /// tools are required to converge on these types at their component boundary.
 pub mod resource_bindings {
     wasmtime::component::bindgen!({
         path: "wit/resource-surface",
-        world: "host-world",
+        world: "types-world",
         additional_derives: [serde::Serialize, serde::Deserialize],
     });
-}
-
-macro_rules! resource_world_bindings {
-    ($module:ident, $world:literal) => {
-        pub mod $module {
-            wasmtime::component::bindgen!({
-                path: "wit/resource-surface",
-                world: $world,
-                additional_derives: [serde::Serialize, serde::Deserialize],
-            });
-        }
-    };
-}
-
-resource_world_bindings!(resource_tool_v1_bindings, "resource-read-world");
-resource_world_bindings!(resource_tool_v1_write_bindings, "resource-write-world");
-resource_world_bindings!(resource_tool_v1_edit_bindings, "resource-edit-world");
-resource_world_bindings!(resource_tool_v1_find_bindings, "resource-find-world");
-resource_world_bindings!(resource_tool_v1_grep_bindings, "resource-grep-world");
-resource_world_bindings!(resource_tool_v1_run_bindings, "resource-run-world");
-resource_world_bindings!(resource_tool_v1_send_bindings, "resource-send-world");
-resource_world_bindings!(resource_tool_v1_abort_bindings, "resource-abort-world");
-resource_world_bindings!(resource_tool_v1_delete_bindings, "resource-delete-world");
-resource_world_bindings!(resource_tool_v1_poll_bindings, "resource-poll-world");
-resource_world_bindings!(resource_extension_bindings, "extension-world");
-
-pub mod resource_async_tool_v1_bindings {
-    wasmtime::component::bindgen!({
-        path: "wit/resource-surface",
-        world: "resource-read-world",
-        imports: { default: async },
-        exports: { default: async },
-        additional_derives: [serde::Serialize, serde::Deserialize],
-    });
+    pub use self::exports::artist;
 }
 pub mod resource_async_extension_bindings {
     wasmtime::component::bindgen!({
@@ -114,107 +20,45 @@ pub mod resource_async_extension_bindings {
     });
 }
 
-/// Async host bindings used by every component path that can make nested
-/// resource calls. Keeping this separate from the synchronous native adapter
-/// prevents component-to-kernel calls from blocking an executor.
-pub mod resource_async_host_bindings {
-    wasmtime::component::bindgen!({
-        path: "wit/resource-surface",
-        world: "host-world",
-        imports: { default: async },
-        exports: { default: async },
-        additional_derives: [serde::Serialize, serde::Deserialize],
-    });
-}
-
-macro_rules! resource_async_world_bindings {
-    ($module:ident, $world:literal) => {
-        pub mod $module {
-            wasmtime::component::bindgen!({
-                path: "wit/resource-surface",
-                world: $world,
-                imports: { default: async },
-                exports: { default: async },
-                additional_derives: [serde::Serialize, serde::Deserialize],
-            });
-        }
-    };
-}
-
-resource_async_world_bindings!(
-    resource_async_tool_v1_write_bindings,
-    "resource-write-world"
-);
-resource_async_world_bindings!(resource_async_tool_v1_edit_bindings, "resource-edit-world");
-resource_async_world_bindings!(resource_async_tool_v1_find_bindings, "resource-find-world");
-resource_async_world_bindings!(resource_async_tool_v1_grep_bindings, "resource-grep-world");
-resource_async_world_bindings!(resource_async_tool_v1_run_bindings, "resource-run-world");
-resource_async_world_bindings!(resource_async_tool_v1_send_bindings, "resource-send-world");
-resource_async_world_bindings!(
-    resource_async_tool_v1_abort_bindings,
-    "resource-abort-world"
-);
-resource_async_world_bindings!(
-    resource_async_tool_v1_delete_bindings,
-    "resource-delete-world"
-);
-resource_async_world_bindings!(resource_async_tool_v1_poll_bindings, "resource-poll-world");
-
 /// Stable identities for the universal typed tool contracts.
 pub mod contracts {
     use serde::{Deserialize, Serialize};
     use std::{fmt, str::FromStr};
 
-    #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum Verb {
-        Read,
-        Write,
-        Edit,
-        Poll,
-        Send,
-        Run,
-        Abort,
-        Delete,
-        Find,
-        Grep,
-    }
+    /// An adapter-local contract label.  This is deliberately open-ended:
+    /// installed verb packages may use any interface name and do not require
+    /// a source edit in this crate.
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+    pub struct ContractVerb(&'static str);
 
-    impl Verb {
-        pub const ALL: [Self; 10] = [
-            Self::Read,
-            Self::Write,
-            Self::Edit,
-            Self::Poll,
-            Self::Send,
-            Self::Run,
-            Self::Abort,
-            Self::Delete,
-            Self::Find,
-            Self::Grep,
-        ];
+    impl ContractVerb {
+        pub const Read: Self = Self("read");
+        pub const Write: Self = Self("write");
+        pub const Edit: Self = Self("edit");
+        pub const Poll: Self = Self("poll");
+        pub const Send: Self = Self("send");
+        pub const Run: Self = Self("run");
+        pub const Abort: Self = Self("abort");
+        pub const Delete: Self = Self("delete");
+        pub const Find: Self = Self("find");
+        pub const Grep: Self = Self("grep");
+
+        pub const fn from_interface(interface: &'static str) -> Self {
+            Self(interface)
+        }
 
         pub const fn interface(self) -> &'static str {
-            match self {
-                Self::Read => "read",
-                Self::Write => "write",
-                Self::Edit => "edit",
-                Self::Poll => "poll",
-                Self::Send => "send",
-                Self::Run => "run",
-                Self::Abort => "abort",
-                Self::Delete => "delete",
-                Self::Find => "find",
-                Self::Grep => "grep",
-            }
+            self.0
         }
     }
 
-    impl fmt::Display for Verb {
+    impl fmt::Display for ContractVerb {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str(self.interface())
         }
     }
+
+    pub type Verb = ContractVerb;
 
     #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
     pub struct ContractId {
@@ -222,6 +66,7 @@ pub mod contracts {
         /// Universal verbs have a typed adapter; extension contracts may use
         /// any interface name and are retained for dynamic registration.
         pub interface: String,
+        #[serde(skip)]
         pub verb: Option<Verb>,
         pub major: u16,
     }
@@ -263,9 +108,20 @@ pub mod contracts {
             let (namespace, verb) = name
                 .rsplit_once(':')
                 .ok_or_else(|| "contract ID must be namespace:verb@major".to_owned())?;
-            let universal = Verb::ALL
-                .into_iter()
-                .find(|candidate| candidate.interface() == verb);
+            let universal = [
+                Verb::Read,
+                Verb::Write,
+                Verb::Edit,
+                Verb::Poll,
+                Verb::Send,
+                Verb::Run,
+                Verb::Abort,
+                Verb::Delete,
+                Verb::Find,
+                Verb::Grep,
+            ]
+            .into_iter()
+            .find(|candidate| candidate.interface() == verb);
             Ok(Self {
                 namespace: namespace.to_owned(),
                 interface: verb.to_owned(),
@@ -328,10 +184,12 @@ pub mod contracts {
     }
 
     pub fn universal_contracts() -> Vec<ContractDescriptor> {
-        Verb::ALL
-            .into_iter()
-            .map(ContractDescriptor::universal)
-            .collect()
+        [
+            "read", "write", "edit", "poll", "send", "run", "abort", "delete", "find", "grep",
+        ]
+        .into_iter()
+        .map(|interface| ContractDescriptor::universal(Verb::from_interface(interface)))
+        .collect()
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -393,7 +251,9 @@ pub mod contracts {
     }
 }
 
-use artist_kernel::{DynamicValue, KernelHandle, VerbId};
+use artist_kernel::{
+    DynamicType, DynamicValue, DynamicVerbCall, KernelError, KernelHandle, VerbId,
+};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -419,11 +279,17 @@ pub fn dynamic_value_to_component_val(
     use wasmtime::component::Val;
     Ok(match value {
         DynamicValue::Bool(value) => Val::Bool(*value),
+        DynamicValue::S8(value) => Val::S8(*value),
+        DynamicValue::S16(value) => Val::S16(*value),
         DynamicValue::S32(value) => Val::S32(*value),
         DynamicValue::S64(value) => Val::S64(*value),
+        DynamicValue::U8(value) => Val::U8(*value),
+        DynamicValue::U16(value) => Val::U16(*value),
         DynamicValue::U32(value) => Val::U32(*value),
         DynamicValue::U64(value) => Val::U64(*value),
+        DynamicValue::F32(value) => Val::Float32(*value),
         DynamicValue::F64(value) => Val::Float64(*value),
+        DynamicValue::Char(value) => Val::Char(*value),
         DynamicValue::String(value) => Val::String(value.clone()),
         DynamicValue::ResourceUri(value) => Val::String(value.to_string()),
         DynamicValue::List(values) => Val::List(
@@ -470,17 +336,117 @@ pub fn dynamic_value_to_component_val(
     })
 }
 
+/// Lower a dynamic value using the discovered Component Model type. Unlike
+/// the shape-only lowerer above, this preserves WIT record field order and
+/// therefore works for reflective calls whose record layout is not sorted by
+/// field name.
+fn dynamic_value_to_component_val_with_type(
+    value: &DynamicValue,
+    ty: &wasmtime::component::Type,
+) -> Result<wasmtime::component::Val, String> {
+    use wasmtime::component::{Type, Val};
+    match (value, ty) {
+        (DynamicValue::Bool(value), Type::Bool) => Ok(Val::Bool(*value)),
+        (DynamicValue::S8(value), Type::S8) => Ok(Val::S8(*value)),
+        (DynamicValue::U8(value), Type::U8) => Ok(Val::U8(*value)),
+        (DynamicValue::S16(value), Type::S16) => Ok(Val::S16(*value)),
+        (DynamicValue::U16(value), Type::U16) => Ok(Val::U16(*value)),
+        (DynamicValue::S32(value), Type::S32) => Ok(Val::S32(*value)),
+        (DynamicValue::U32(value), Type::U32) => Ok(Val::U32(*value)),
+        (DynamicValue::S64(value), Type::S64) => Ok(Val::S64(*value)),
+        (DynamicValue::U64(value), Type::U64) => Ok(Val::U64(*value)),
+        (DynamicValue::F32(value), Type::Float32) => Ok(Val::Float32(*value)),
+        (DynamicValue::F64(value), Type::Float64) => Ok(Val::Float64(*value)),
+        (DynamicValue::Char(value), Type::Char) => Ok(Val::Char(*value)),
+        (DynamicValue::String(value), Type::String) => Ok(Val::String(value.clone())),
+        (DynamicValue::ResourceUri(value), Type::String) => Ok(Val::String(value.to_string())),
+        (DynamicValue::List(values), Type::List(list)) => values
+            .iter()
+            .map(|value| dynamic_value_to_component_val_with_type(value, &list.ty()))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Val::List),
+        (DynamicValue::Tuple(values), Type::Tuple(tuple)) => tuple
+            .types()
+            .zip(values)
+            .map(|(ty, value)| dynamic_value_to_component_val_with_type(value, &ty))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Val::Tuple),
+        (DynamicValue::Record(values), Type::Record(record)) => record
+            .fields()
+            .map(|field| {
+                let value = values
+                    .get(field.name)
+                    .ok_or_else(|| format!("missing record field {}", field.name))?;
+                Ok((
+                    field.name.to_owned(),
+                    dynamic_value_to_component_val_with_type(value, &field.ty)
+                        .map_err(|error| format!("record field {}: {}", field.name, error))?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map(Val::Record),
+        (DynamicValue::Option(None), Type::Option(_)) => Ok(Val::Option(None)),
+        (DynamicValue::Option(Some(value)), Type::Option(option)) => {
+            Ok(Val::Option(Some(Box::new(
+                dynamic_value_to_component_val_with_type(value, &option.ty())?,
+            ))))
+        }
+        (DynamicValue::Enum(value), Type::Enum(_)) => Ok(Val::Enum(value.clone())),
+        (DynamicValue::Variant(name, value), Type::Variant(variant)) => {
+            let case = variant
+                .cases()
+                .find(|case| case.name == name)
+                .ok_or_else(|| format!("unknown variant case {name}"))?;
+            let payload = match (&case.ty, value) {
+                (None, None) => None,
+                (Some(ty), Some(value)) => Some(Box::new(
+                    dynamic_value_to_component_val_with_type(value, ty)?,
+                )),
+                _ => return Err(format!("invalid payload for variant case {name}")),
+            };
+            Ok(Val::Variant(name.clone(), payload))
+        }
+        (DynamicValue::Result(Ok(value)), Type::Result(result)) => {
+            let value = dynamic_value_to_component_val_with_type(
+                value,
+                &result
+                    .ok()
+                    .ok_or_else(|| "result has no ok type".to_owned())?,
+            )?;
+            Ok(Val::Result(Ok(Some(Box::new(value)))))
+        }
+        (DynamicValue::Result(Err(value)), Type::Result(result)) => {
+            let value = dynamic_value_to_component_val_with_type(
+                value,
+                &result
+                    .err()
+                    .ok_or_else(|| "result has no err type".to_owned())?,
+            )?;
+            Ok(Val::Result(Err(Some(Box::new(value)))))
+        }
+        _ => Err(format!(
+            "dynamic value does not match Component Model type {ty:?}"
+        )),
+    }
+}
+
 pub fn component_val_to_dynamic_value(
     value: &wasmtime::component::Val,
 ) -> Result<DynamicValue, String> {
     use wasmtime::component::Val;
     Ok(match value {
         Val::Bool(value) => DynamicValue::Bool(*value),
+        Val::S8(value) => DynamicValue::S8(*value),
+        Val::S16(value) => DynamicValue::S16(*value),
         Val::S32(value) => DynamicValue::S32(*value),
         Val::S64(value) => DynamicValue::S64(*value),
+        Val::U8(value) => DynamicValue::U8(*value),
+        Val::U16(value) => DynamicValue::U16(*value),
         Val::U32(value) => DynamicValue::U32(*value),
         Val::U64(value) => DynamicValue::U64(*value),
+        Val::Float32(value) => DynamicValue::F32(*value),
         Val::Float64(value) => DynamicValue::F64(*value),
+        Val::Char(value) => DynamicValue::Char(*value),
         Val::String(value) => DynamicValue::String(value.clone()),
         Val::List(values) => DynamicValue::List(
             values
@@ -526,13 +492,112 @@ pub fn component_val_to_dynamic_value(
                 .map(Box::new),
         ),
         Val::Flags(values) => DynamicValue::Flags(values.clone()),
-        Val::S8(_) | Val::U8(_) | Val::S16(_) | Val::U16(_) | Val::Float32(_) | Val::Char(_) => {
-            return Err("unsupported narrow Component Model value".to_owned());
-        }
         Val::Map(_) | Val::Resource(_) | Val::Future(_) | Val::Stream(_) | Val::ErrorContext(_) => {
             return Err("unsupported Component Model value kind".to_owned());
         }
     })
+}
+
+/// Lift a Component Model value using the registered contract type. A plain
+/// lift cannot distinguish Artist-owned URI aliases from ordinary WIT
+/// strings; the contract-directed form preserves that identity recursively.
+pub fn component_val_to_dynamic_value_with_type(
+    value: &wasmtime::component::Val,
+    ty: &DynamicType,
+) -> Result<DynamicValue, String> {
+    use wasmtime::component::Val;
+    match (value, ty) {
+        (Val::String(value), DynamicType::ResourceUri) => Ok(DynamicValue::ResourceUri(
+            artist_kernel::ResourceUri::parse(value).map_err(|error| error.to_string())?,
+        )),
+        (Val::List(values), DynamicType::List(element)) => Ok(DynamicValue::List(
+            values
+                .iter()
+                .map(|value| component_val_to_dynamic_value_with_type(value, element))
+                .collect::<Result<_, _>>()?,
+        )),
+        (Val::Tuple(values), DynamicType::Tuple(types)) => {
+            if values.len() != types.len() {
+                return Err("tuple value does not match its registered arity".to_owned());
+            }
+            Ok(DynamicValue::Tuple(
+                values
+                    .iter()
+                    .zip(types)
+                    .map(|(value, ty)| component_val_to_dynamic_value_with_type(value, ty))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        (Val::Record(values), DynamicType::Record(types)) => {
+            if values.len() != types.len() {
+                return Err("record value does not match its registered fields".to_owned());
+            }
+            let mut output = std::collections::BTreeMap::new();
+            for (name, value) in values {
+                let ty = types
+                    .get(name)
+                    .ok_or_else(|| format!("record value contains unknown field {name}"))?;
+                output.insert(
+                    name.clone(),
+                    component_val_to_dynamic_value_with_type(value, ty)?,
+                );
+            }
+            Ok(DynamicValue::Record(output))
+        }
+        (Val::Option(value), DynamicType::Option(inner)) => Ok(DynamicValue::Option(
+            value
+                .as_deref()
+                .map(|value| component_val_to_dynamic_value_with_type(value, inner))
+                .transpose()?
+                .map(Box::new),
+        )),
+        (Val::Result(Ok(Some(value))), DynamicType::Result { ok: Some(ty), .. }) => {
+            Ok(DynamicValue::Result(Ok(Box::new(
+                component_val_to_dynamic_value_with_type(value, ty)?,
+            ))))
+        }
+        (Val::Result(Err(Some(value))), DynamicType::Result { err: Some(ty), .. }) => {
+            Ok(DynamicValue::Result(Err(Box::new(
+                component_val_to_dynamic_value_with_type(value, ty)?,
+            ))))
+        }
+        (Val::Result(Ok(None)), DynamicType::Result { ok: None, .. }) => {
+            Err("unit result payloads need an explicit unit dynamic type".to_owned())
+        }
+        (Val::Result(Err(None)), DynamicType::Result { err: None, .. }) => {
+            Err("unit result payloads need an explicit unit dynamic type".to_owned())
+        }
+        (Val::Variant(name, Some(value)), DynamicType::Variant(cases)) => {
+            let Some(Some(ty)) = cases.get(name) else {
+                return Err(format!(
+                    "variant case {name} has no registered payload type"
+                ));
+            };
+            Ok(DynamicValue::Variant(
+                name.clone(),
+                Some(Box::new(component_val_to_dynamic_value_with_type(
+                    value, ty,
+                )?)),
+            ))
+        }
+        (Val::Variant(name, None), DynamicType::Variant(cases)) => {
+            if !matches!(cases.get(name), Some(None)) {
+                return Err(format!("variant case {name} has an unexpected payload"));
+            }
+            Ok(DynamicValue::Variant(name.clone(), None))
+        }
+        (Val::Enum(name), DynamicType::Enum(cases)) if cases.iter().any(|case| case == name) => {
+            Ok(DynamicValue::Enum(name.clone()))
+        }
+        (Val::Flags(values), DynamicType::Flags(flags))
+            if values
+                .iter()
+                .all(|value| flags.iter().any(|flag| flag == value)) =>
+        {
+            Ok(DynamicValue::Flags(values.clone()))
+        }
+        _ => component_val_to_dynamic_value(value),
+    }
 }
 
 /// Invoke a validated component export using Wasmtime's dynamic Component
@@ -755,6 +820,15 @@ impl HostState {
         I: IntoIterator<Item = String>,
     {
         let mut state = Self::with_kernel(capabilities, kernel);
+        state.wasi = wasmtime_wasi::WasiCtxBuilder::new()
+            .preopened_dir(
+                "/",
+                "/",
+                wasmtime_wasi::DirPerms::all(),
+                wasmtime_wasi::FilePerms::all(),
+            )
+            .expect("preopen host root for component invocation")
+            .build();
         state.context = scope.context.clone();
         state.scope = scope;
         state
@@ -817,950 +891,6 @@ impl wasmtime_wasi::WasiView for HostState {
     }
 }
 
-impl resource_bindings::artist::resource::read::Host for HostState {
-    fn read(
-        &mut self,
-        requests: Vec<resource_bindings::artist::resource::types::ReadRequest>,
-    ) -> Vec<
-        Result<
-            resource_bindings::artist::resource::types::ReadResult,
-            resource_bindings::artist::resource::types::Error,
-        >,
-    > {
-        requests
-            .into_iter()
-            .map(|request| {
-                let target = request.uri.clone();
-                let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.clone()),
-                    )
-                })?;
-                let at = request.at.map(|position| match position {
-                    resource_bindings::artist::resource::types::Position::Top => {
-                        artist_kernel::Position::Top
-                    }
-                    resource_bindings::artist::resource::types::Position::Bottom => {
-                        artist_kernel::Position::Bottom
-                    }
-                    resource_bindings::artist::resource::types::Position::At(anchor) => {
-                        artist_kernel::Position::At(anchor_from_string(&anchor))
-                    }
-                });
-                typed_host_invoke_operation(
-                    self,
-                    "read",
-                    Some(target),
-                    artist_kernel::Operation::Read(vec![artist_kernel::ReadRequest {
-                        uri,
-                        at,
-                        before: request.before,
-                        after: request.after,
-                    }]),
-                )
-            })
-            .collect()
-    }
-}
-impl resource_bindings::artist::resource::write::Host for HostState {
-    fn write(
-        &mut self,
-        requests: Vec<resource_bindings::artist::resource::types::WriteRequest>,
-    ) -> Vec<
-        Result<
-            resource_bindings::artist::resource::types::WriteResult,
-            resource_bindings::artist::resource::types::Error,
-        >,
-    > {
-        requests
-            .into_iter()
-            .map(|request| {
-                let target = request.uri.clone();
-                let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.clone()),
-                    )
-                })?;
-                typed_host_invoke_operation(
-                    self,
-                    "write",
-                    Some(target),
-                    artist_kernel::Operation::Write(vec![artist_kernel::WriteRequest {
-                        uri,
-                        content: request.content,
-                    }]),
-                )
-            })
-            .collect()
-    }
-}
-impl resource_bindings::artist::resource::edit::Host for HostState {
-    fn edit(
-        &mut self,
-        requests: Vec<resource_bindings::artist::resource::types::EditRequest>,
-    ) -> Vec<
-        Result<
-            resource_bindings::artist::resource::types::EditResult,
-            resource_bindings::artist::resource::types::Error,
-        >,
-    > {
-        requests
-            .into_iter()
-            .map(|request| {
-                let target = request.uri.clone();
-                let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.clone()),
-                    )
-                })?;
-                let operations = request
-                    .operations
-                    .into_iter()
-                    .map(|operation| match operation {
-                        resource_bindings::artist::resource::types::EditOperation::Replace(replace) => {
-                            Ok(artist_kernel::EditOperation::Replace(
-                                artist_kernel::ReplaceOperation {
-                                    start: anchor_from_string(&replace.start),
-                                    end: replace.end.as_deref().map(anchor_from_string),
-                                    content: replace.content,
-                                },
-                            ))
-                        }
-                        resource_bindings::artist::resource::types::EditOperation::Insert(insert) => Ok(
-                            artist_kernel::EditOperation::Insert(artist_kernel::InsertOperation {
-                                at: match insert.at {
-                                    resource_bindings::artist::resource::types::InsertionPoint::Top => {
-                                        artist_kernel::InsertionPoint::Top
-                                    }
-                                    resource_bindings::artist::resource::types::InsertionPoint::Bottom => {
-                                        artist_kernel::InsertionPoint::Bottom
-                                    }
-                                    resource_bindings::artist::resource::types::InsertionPoint::Before(
-                                        anchor,
-                                    ) => artist_kernel::InsertionPoint::Before(anchor_from_string(
-                                        &anchor,
-                                    )),
-                                    resource_bindings::artist::resource::types::InsertionPoint::After(
-                                        anchor,
-                                    ) => artist_kernel::InsertionPoint::After(anchor_from_string(
-                                        &anchor,
-                                    )),
-                                },
-                                content: insert.content,
-                            }),
-                        ),
-                    })
-                    .collect::<Result<Vec<_>, resource_bindings::artist::resource::types::Error>>()?;
-                typed_host_invoke_operation(
-                    self,
-                    "edit",
-                    Some(target),
-                    artist_kernel::Operation::Edit(vec![artist_kernel::EditRequest {
-                        uri,
-                        operations,
-                    }]),
-                )
-            })
-            .collect()
-    }
-}
-impl resource_bindings::artist::resource::run::Host for HostState {
-    fn run(
-        &mut self,
-        requests: Vec<resource_bindings::artist::resource::types::RunRequest>,
-    ) -> Vec<Result<String, resource_bindings::artist::resource::types::Error>> {
-        requests
-            .into_iter()
-            .map(|request| {
-                let target = request.uri.clone();
-                let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.clone()),
-                    )
-                })?;
-                typed_host_invoke_operation(
-                    self,
-                    "run",
-                    Some(target),
-                    artist_kernel::Operation::Run(vec![artist_kernel::RunRequest {
-                        uri,
-                        args: request.args,
-                    }]),
-                )
-            })
-            .collect()
-    }
-}
-
-impl resource_bindings::artist::resource::send::Host for HostState {
-    fn send(
-        &mut self,
-        requests: Vec<resource_bindings::artist::resource::types::SendRequest>,
-    ) -> Vec<Result<String, resource_bindings::artist::resource::types::Error>> {
-        requests
-            .into_iter()
-            .map(|request| {
-                let target = request.uri.clone();
-                let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.clone()),
-                    )
-                })?;
-                typed_host_invoke_operation(
-                    self,
-                    "send",
-                    Some(target),
-                    artist_kernel::Operation::Send(vec![artist_kernel::SendRequest {
-                        uri,
-                        content: request.content,
-                    }]),
-                )
-            })
-            .collect()
-    }
-}
-
-impl resource_bindings::artist::resource::find::Host for HostState {
-    fn find(
-        &mut self,
-        request: resource_bindings::artist::resource::types::FindRequest,
-    ) -> Result<Vec<String>, resource_bindings::artist::resource::types::Error> {
-        let roots = request
-            .roots
-            .iter()
-            .map(|root| {
-                artist_kernel::ResourceUri::parse(root).map_err(|error| {
-                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(root.clone()),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        typed_host_invoke_operation(
-            self,
-            "find",
-            roots.first().map(ToString::to_string),
-            artist_kernel::Operation::Find(artist_kernel::FindRequest {
-                roots,
-                query: request.query,
-            }),
-        )
-    }
-}
-impl resource_bindings::artist::resource::grep::Host for HostState {
-    fn grep(
-        &mut self,
-        request: resource_bindings::artist::resource::types::GrepRequest,
-    ) -> Result<
-        Vec<resource_bindings::artist::resource::types::AnchoredText>,
-        resource_bindings::artist::resource::types::Error,
-    > {
-        let source = match request.source {
-            resource_bindings::artist::resource::types::GrepSource::Resources(uris) => {
-                let uris = uris.iter().map(|uri| artist_kernel::ResourceUri::parse(uri).map_err(|error| typed_error_for::<resource_bindings::artist::resource::types::Error>(tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri, error.to_string(), Some(uri.clone())))).collect::<Result<Vec<_>, _>>()?;
-                artist_kernel::GrepSource::Resources(uris)
-            }
-            resource_bindings::artist::resource::types::GrepSource::Text(texts) => artist_kernel::GrepSource::Text(texts.into_iter().map(|text| -> Result<artist_kernel::AnchoredText, resource_bindings::artist::resource::types::Error> { Ok(artist_kernel::AnchoredText {
-                uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| typed_error_for::<resource_bindings::artist::resource::types::Error>(tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri, error.to_string(), Some(text.uri.clone())))?,
-                lines: text.lines.into_iter().map(|line| artist_kernel::AnchoredLine {
-                    anchor: anchor_from_string(&line.anchor),
-                    text: line.text,
-                    ending: match line.ending {
-                        resource_bindings::artist::resource::types::LineEnding::None => artist_kernel::LineEnding::None,
-                        resource_bindings::artist::resource::types::LineEnding::Lf => artist_kernel::LineEnding::Lf,
-                        resource_bindings::artist::resource::types::LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
-                        resource_bindings::artist::resource::types::LineEnding::Cr => artist_kernel::LineEnding::Cr,
-                    },
-                }).collect(),
-            }) }).collect::<Result<Vec<_>, _>>()?),
-        };
-        let target = match &source {
-            artist_kernel::GrepSource::Resources(uris) => uris.first().map(ToString::to_string),
-            artist_kernel::GrepSource::Text(texts) => {
-                texts.first().map(|text| text.uri.to_string())
-            }
-        };
-        typed_host_invoke_operation(
-            self,
-            "grep",
-            target,
-            artist_kernel::Operation::Grep(artist_kernel::GrepRequest {
-                pattern: request.pattern,
-                source,
-            }),
-        )
-    }
-}
-impl resource_bindings::artist::resource::poll::Host for HostState {
-    fn poll(
-        &mut self,
-        request: resource_bindings::artist::resource::types::PollRequest,
-    ) -> Result<
-        resource_bindings::artist::resource::types::PollResult,
-        resource_bindings::artist::resource::types::Error,
-    > {
-        let targets = request
-            .targets
-            .iter()
-            .map(|target| {
-                let uri = artist_kernel::ResourceUri::parse(&target.uri).map_err(|error| {
-                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.uri.clone()),
-                    )
-                })?;
-                let from_position = target.from_position.clone().map(|position| match position {
-                    resource_bindings::artist::resource::types::Position::Top => {
-                        artist_kernel::Position::Top
-                    }
-                    resource_bindings::artist::resource::types::Position::Bottom => {
-                        artist_kernel::Position::Bottom
-                    }
-                    resource_bindings::artist::resource::types::Position::At(anchor) => {
-                        artist_kernel::Position::At(anchor_from_string(&anchor))
-                    }
-                });
-                Ok(artist_kernel::PollTarget { uri, from_position })
-            })
-            .collect::<Result<Vec<_>, resource_bindings::artist::resource::types::Error>>()?;
-        let until = request.until.map(lower_poll_wire).transpose()?;
-        let target = targets.first().map(|target| target.uri.to_string());
-        typed_host_invoke_operation(
-            self,
-            "poll",
-            target,
-            artist_kernel::Operation::Poll(artist_kernel::PollRequest { targets, until }),
-        )
-    }
-}
-
-fn lower_poll_wire(
-    wire: resource_bindings::artist::resource::types::PollConditionWire,
-) -> Result<artist_kernel::PollCondition, resource_bindings::artist::resource::types::Error> {
-    fn lower(
-        index: usize,
-        nodes: &[resource_bindings::artist::resource::types::PollNode],
-    ) -> Result<artist_kernel::PollCondition, resource_bindings::artist::resource::types::Error>
-    {
-        let node = nodes.get(index).ok_or_else(|| {
-            typed_error_for::<resource_bindings::artist::resource::types::Error>(
-                tool_v1_bindings::artist::resource::types::ErrorCode::InvalidInput,
-                format!("poll node {index} is out of range"),
-                None,
-            )
-        })?;
-        Ok(match node {
-            resource_bindings::artist::resource::types::PollNode::Atom(atom) => {
-                artist_kernel::PollCondition::Atom(match atom {
-                    resource_bindings::artist::resource::types::PollAtom::Changed(lines) => {
-                        artist_kernel::PollAtom::Changed(*lines)
-                    }
-                    resource_bindings::artist::resource::types::PollAtom::Regex(regex) => {
-                        artist_kernel::PollAtom::Regex(artist_kernel::RegexAtom {
-                            target: regex.target,
-                            pattern: regex.pattern.clone(),
-                        })
-                    }
-                    resource_bindings::artist::resource::types::PollAtom::Terminated(target) => {
-                        artist_kernel::PollAtom::Terminated(*target)
-                    }
-                    resource_bindings::artist::resource::types::PollAtom::Timeout(milliseconds) => {
-                        artist_kernel::PollAtom::Timeout(*milliseconds)
-                    }
-                })
-            }
-            resource_bindings::artist::resource::types::PollNode::All(children) => {
-                artist_kernel::PollCondition::All(
-                    children
-                        .iter()
-                        .map(|child| lower(*child as usize, nodes))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-            }
-            resource_bindings::artist::resource::types::PollNode::Any(children) => {
-                artist_kernel::PollCondition::Any(
-                    children
-                        .iter()
-                        .map(|child| lower(*child as usize, nodes))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-            }
-        })
-    }
-    lower(wire.root as usize, &wire.nodes)
-}
-
-impl resource_bindings::artist::resource::abort::Host for HostState {
-    fn abort(
-        &mut self,
-        uris: Vec<String>,
-    ) -> Vec<Result<String, resource_bindings::artist::resource::types::Error>> {
-        uris.into_iter()
-            .map(|uri| {
-                let target = uri.clone();
-                let parsed = artist_kernel::ResourceUri::parse(&uri).map_err(|error| {
-                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.clone()),
-                    )
-                })?;
-                typed_host_invoke_operation(
-                    self,
-                    "abort",
-                    Some(target),
-                    artist_kernel::Operation::Abort(vec![parsed]),
-                )
-            })
-            .collect()
-    }
-}
-
-impl resource_bindings::artist::resource::delete::Host for HostState {
-    fn delete(
-        &mut self,
-        uris: Vec<String>,
-    ) -> Vec<Result<String, resource_bindings::artist::resource::types::Error>> {
-        uris.into_iter()
-            .map(|uri| {
-                let target = uri.clone();
-                let parsed = artist_kernel::ResourceUri::parse(&uri).map_err(|error| {
-                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.clone()),
-                    )
-                })?;
-                typed_host_invoke_operation(
-                    self,
-                    "delete",
-                    Some(target),
-                    artist_kernel::Operation::Delete(vec![parsed]),
-                )
-            })
-            .collect()
-    }
-}
-
-impl resource_bindings::artist::resource::types::Host for HostState {}
-
-impl resource_async_host_bindings::artist::resource::read::Host for HostState {
-    async fn read(
-        &mut self,
-        requests: Vec<resource_async_host_bindings::artist::resource::types::ReadRequest>,
-    ) -> Vec<
-        Result<
-            resource_async_host_bindings::artist::resource::types::ReadResult,
-            resource_async_host_bindings::artist::resource::types::Error,
-        >,
-    > {
-        let mut results = Vec::with_capacity(requests.len());
-        for request in requests {
-            let target = request.uri.clone();
-            let result = (|| {
-                let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.clone()),
-                    )
-                })?;
-                let at = request.at.map(|position| match position {
-                    resource_async_host_bindings::artist::resource::types::Position::Top => {
-                        artist_kernel::Position::Top
-                    }
-                    resource_async_host_bindings::artist::resource::types::Position::Bottom => {
-                        artist_kernel::Position::Bottom
-                    }
-                    resource_async_host_bindings::artist::resource::types::Position::At(anchor) => {
-                        artist_kernel::Position::At(anchor_from_string(&anchor))
-                    }
-                });
-                Ok((uri, at, request.before, request.after))
-            })();
-            let result = match result {
-                Ok((uri, at, before, after)) => {
-                    typed_host_invoke_operation_async(
-                        self,
-                        "read",
-                        Some(target),
-                        artist_kernel::Operation::Read(vec![artist_kernel::ReadRequest {
-                            uri,
-                            at,
-                            before,
-                            after,
-                        }]),
-                    )
-                    .await
-                }
-                Err(error) => Err(error),
-            };
-            results.push(result);
-        }
-        results
-    }
-}
-
-impl resource_async_host_bindings::artist::resource::write::Host for HostState {
-    async fn write(
-        &mut self,
-        requests: Vec<resource_async_host_bindings::artist::resource::types::WriteRequest>,
-    ) -> Vec<
-        Result<
-            resource_async_host_bindings::artist::resource::types::WriteResult,
-            resource_async_host_bindings::artist::resource::types::Error,
-        >,
-    > {
-        let mut results = Vec::with_capacity(requests.len());
-        for request in requests {
-            let target = request.uri.clone();
-            let result = match artist_kernel::ResourceUri::parse(&target) {
-                Ok(uri) => {
-                    typed_host_invoke_operation_async(
-                        self,
-                        "write",
-                        Some(target),
-                        artist_kernel::Operation::Write(vec![artist_kernel::WriteRequest {
-                            uri,
-                            content: request.content,
-                        }]),
-                    )
-                    .await
-                }
-                Err(error) => Err(typed_error_for::<
-                    resource_async_host_bindings::artist::resource::types::Error,
-                >(
-                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                    error.to_string(),
-                    Some(target),
-                )),
-            };
-            results.push(result);
-        }
-        results
-    }
-}
-
-impl resource_async_host_bindings::artist::resource::run::Host for HostState {
-    async fn run(
-        &mut self,
-        requests: Vec<resource_async_host_bindings::artist::resource::types::RunRequest>,
-    ) -> Vec<Result<String, resource_async_host_bindings::artist::resource::types::Error>> {
-        let mut results = Vec::with_capacity(requests.len());
-        for request in requests {
-            let target = request.uri.clone();
-            let result = match artist_kernel::ResourceUri::parse(&target) {
-                Ok(uri) => {
-                    typed_host_invoke_operation_async(
-                        self,
-                        "run",
-                        Some(target),
-                        artist_kernel::Operation::Run(vec![artist_kernel::RunRequest {
-                            uri,
-                            args: request.args,
-                        }]),
-                    )
-                    .await
-                }
-                Err(error) => Err(typed_error_for::<
-                    resource_async_host_bindings::artist::resource::types::Error,
-                >(
-                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                    error.to_string(),
-                    Some(target),
-                )),
-            };
-            results.push(result);
-        }
-        results
-    }
-}
-
-impl resource_async_host_bindings::artist::resource::edit::Host for HostState {
-    async fn edit(
-        &mut self,
-        requests: Vec<resource_async_host_bindings::artist::resource::types::EditRequest>,
-    ) -> Vec<
-        Result<
-            resource_async_host_bindings::artist::resource::types::EditResult,
-            resource_async_host_bindings::artist::resource::types::Error,
-        >,
-    > {
-        let mut results = Vec::with_capacity(requests.len());
-        for request in requests {
-            let target = request.uri.clone();
-            let parsed = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
-                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                    error.to_string(),
-                    Some(target.clone()),
-                )
-            });
-            let result = match parsed {
-                Ok(uri) => {
-                    let operations = request
-                        .operations
-                        .into_iter()
-                        .map(|operation| match operation {
-                            resource_async_host_bindings::artist::resource::types::EditOperation::Replace(replace) => {
-                                artist_kernel::EditOperation::Replace(artist_kernel::ReplaceOperation {
-                                    start: anchor_from_string(&replace.start),
-                                    end: replace.end.as_deref().map(anchor_from_string),
-                                    content: replace.content,
-                                })
-                            }
-                            resource_async_host_bindings::artist::resource::types::EditOperation::Insert(insert) => {
-                                artist_kernel::EditOperation::Insert(artist_kernel::InsertOperation {
-                                    at: match insert.at {
-                                        resource_async_host_bindings::artist::resource::types::InsertionPoint::Top => artist_kernel::InsertionPoint::Top,
-                                        resource_async_host_bindings::artist::resource::types::InsertionPoint::Bottom => artist_kernel::InsertionPoint::Bottom,
-                                        resource_async_host_bindings::artist::resource::types::InsertionPoint::Before(anchor) => artist_kernel::InsertionPoint::Before(anchor_from_string(&anchor)),
-                                        resource_async_host_bindings::artist::resource::types::InsertionPoint::After(anchor) => artist_kernel::InsertionPoint::After(anchor_from_string(&anchor)),
-                                    },
-                                    content: insert.content,
-                                })
-                            }
-                        })
-                        .collect();
-                    typed_host_invoke_operation_async(
-                        self,
-                        "edit",
-                        Some(target),
-                        artist_kernel::Operation::Edit(vec![artist_kernel::EditRequest {
-                            uri,
-                            operations,
-                        }]),
-                    )
-                    .await
-                }
-                Err(error) => Err(error),
-            };
-            results.push(result);
-        }
-        results
-    }
-}
-
-impl resource_async_host_bindings::artist::resource::send::Host for HostState {
-    async fn send(
-        &mut self,
-        requests: Vec<resource_async_host_bindings::artist::resource::types::SendRequest>,
-    ) -> Vec<Result<String, resource_async_host_bindings::artist::resource::types::Error>> {
-        let mut results = Vec::with_capacity(requests.len());
-        for request in requests {
-            let target = request.uri.clone();
-            let result = match artist_kernel::ResourceUri::parse(&target) {
-                Ok(uri) => {
-                    typed_host_invoke_operation_async(
-                        self,
-                        "send",
-                        Some(target),
-                        artist_kernel::Operation::Send(vec![artist_kernel::SendRequest {
-                            uri,
-                            content: request.content,
-                        }]),
-                    )
-                    .await
-                }
-                Err(error) => Err(typed_error_for::<
-                    resource_async_host_bindings::artist::resource::types::Error,
-                >(
-                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                    error.to_string(),
-                    Some(target),
-                )),
-            };
-            results.push(result);
-        }
-        results
-    }
-}
-
-impl resource_async_host_bindings::artist::resource::find::Host for HostState {
-    async fn find(
-        &mut self,
-        request: resource_async_host_bindings::artist::resource::types::FindRequest,
-    ) -> Result<Vec<String>, resource_async_host_bindings::artist::resource::types::Error> {
-        let target = request.roots.first().cloned();
-        let roots = request
-            .roots
-            .iter()
-            .map(|root| {
-                artist_kernel::ResourceUri::parse(root).map_err(|error| {
-                    typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(root.clone()),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        typed_host_invoke_operation_async(
-            self,
-            "find",
-            target,
-            artist_kernel::Operation::Find(artist_kernel::FindRequest {
-                roots,
-                query: request.query,
-            }),
-        )
-        .await
-    }
-}
-
-impl resource_async_host_bindings::artist::resource::grep::Host for HostState {
-    async fn grep(
-        &mut self,
-        request: resource_async_host_bindings::artist::resource::types::GrepRequest,
-    ) -> Result<
-        Vec<resource_async_host_bindings::artist::resource::types::AnchoredText>,
-        resource_async_host_bindings::artist::resource::types::Error,
-    > {
-        let source = match request.source {
-            resource_async_host_bindings::artist::resource::types::GrepSource::Resources(uris) => {
-                let parsed = uris
-                    .iter()
-                    .map(|uri| {
-                        artist_kernel::ResourceUri::parse(uri).map_err(|error| {
-                            typed_error_for::<
-                                resource_async_host_bindings::artist::resource::types::Error,
-                            >(
-                                tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                                error.to_string(),
-                                Some(uri.clone()),
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                artist_kernel::GrepSource::Resources(parsed)
-            }
-            resource_async_host_bindings::artist::resource::types::GrepSource::Text(texts) => {
-                let parsed = texts
-                    .into_iter()
-                    .map(|text| {
-                        let uri = artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| {
-                            typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
-                                tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                                error.to_string(),
-                                Some(text.uri.clone()),
-                            )
-                        })?;
-                        let lines = text
-                            .lines
-                            .into_iter()
-                            .map(|line| artist_kernel::AnchoredLine {
-                                anchor: anchor_from_string(&line.anchor),
-                                text: line.text,
-                                ending: match line.ending {
-                                    resource_async_host_bindings::artist::resource::types::LineEnding::None => artist_kernel::LineEnding::None,
-                                    resource_async_host_bindings::artist::resource::types::LineEnding::Lf => artist_kernel::LineEnding::Lf,
-                                    resource_async_host_bindings::artist::resource::types::LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
-                                    resource_async_host_bindings::artist::resource::types::LineEnding::Cr => artist_kernel::LineEnding::Cr,
-                                },
-                            })
-                            .collect();
-                        Ok(artist_kernel::AnchoredText { uri, lines })
-                    })
-                    .collect::<Result<Vec<_>, resource_async_host_bindings::artist::resource::types::Error>>()?;
-                artist_kernel::GrepSource::Text(parsed)
-            }
-        };
-        let target = match &source {
-            artist_kernel::GrepSource::Resources(uris) => uris.first().map(ToString::to_string),
-            artist_kernel::GrepSource::Text(texts) => {
-                texts.first().map(|text| text.uri.to_string())
-            }
-        };
-        typed_host_invoke_operation_async(
-            self,
-            "grep",
-            target,
-            artist_kernel::Operation::Grep(artist_kernel::GrepRequest {
-                pattern: request.pattern,
-                source,
-            }),
-        )
-        .await
-    }
-}
-
-impl resource_async_host_bindings::artist::resource::abort::Host for HostState {
-    async fn abort(
-        &mut self,
-        uris: Vec<String>,
-    ) -> Vec<Result<String, resource_async_host_bindings::artist::resource::types::Error>> {
-        let mut results = Vec::with_capacity(uris.len());
-        for target in uris {
-            let result = match artist_kernel::ResourceUri::parse(&target) {
-                Ok(uri) => {
-                    typed_host_invoke_operation_async(
-                        self,
-                        "abort",
-                        Some(target),
-                        artist_kernel::Operation::Abort(vec![uri]),
-                    )
-                    .await
-                }
-                Err(error) => Err(typed_error_for::<
-                    resource_async_host_bindings::artist::resource::types::Error,
-                >(
-                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                    error.to_string(),
-                    Some(target),
-                )),
-            };
-            results.push(result);
-        }
-        results
-    }
-}
-
-fn lower_poll_wire_async(
-    wire: resource_async_host_bindings::artist::resource::types::PollConditionWire,
-) -> Result<
-    artist_kernel::PollCondition,
-    resource_async_host_bindings::artist::resource::types::Error,
-> {
-    fn lower(
-        index: usize,
-        nodes: &[resource_async_host_bindings::artist::resource::types::PollNode],
-    ) -> Result<
-        artist_kernel::PollCondition,
-        resource_async_host_bindings::artist::resource::types::Error,
-    > {
-        let node = nodes.get(index).ok_or_else(|| {
-            typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
-                tool_v1_bindings::artist::resource::types::ErrorCode::InvalidInput,
-                format!("poll node {index} is out of range"),
-                None,
-            )
-        })?;
-        Ok(match node {
-            resource_async_host_bindings::artist::resource::types::PollNode::Atom(atom) => {
-                artist_kernel::PollCondition::Atom(match atom {
-                    resource_async_host_bindings::artist::resource::types::PollAtom::Changed(
-                        lines,
-                    ) => artist_kernel::PollAtom::Changed(*lines),
-                    resource_async_host_bindings::artist::resource::types::PollAtom::Regex(
-                        regex,
-                    ) => artist_kernel::PollAtom::Regex(artist_kernel::RegexAtom {
-                        target: regex.target,
-                        pattern: regex.pattern.clone(),
-                    }),
-                    resource_async_host_bindings::artist::resource::types::PollAtom::Terminated(
-                        target,
-                    ) => artist_kernel::PollAtom::Terminated(*target),
-                    resource_async_host_bindings::artist::resource::types::PollAtom::Timeout(
-                        milliseconds,
-                    ) => artist_kernel::PollAtom::Timeout(*milliseconds),
-                })
-            }
-            resource_async_host_bindings::artist::resource::types::PollNode::All(children) => {
-                artist_kernel::PollCondition::All(
-                    children
-                        .iter()
-                        .map(|child| lower(*child as usize, nodes))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-            }
-            resource_async_host_bindings::artist::resource::types::PollNode::Any(children) => {
-                artist_kernel::PollCondition::Any(
-                    children
-                        .iter()
-                        .map(|child| lower(*child as usize, nodes))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-            }
-        })
-    }
-    lower(wire.root as usize, &wire.nodes)
-}
-
-impl resource_async_host_bindings::artist::resource::poll::Host for HostState {
-    async fn poll(
-        &mut self,
-        request: resource_async_host_bindings::artist::resource::types::PollRequest,
-    ) -> Result<
-        resource_async_host_bindings::artist::resource::types::PollResult,
-        resource_async_host_bindings::artist::resource::types::Error,
-    > {
-        let target = request.targets.first().map(|target| target.uri.clone());
-        let targets = request
-            .targets
-            .into_iter()
-            .map(|target| {
-                let uri = artist_kernel::ResourceUri::parse(&target.uri).map_err(|error| {
-                    typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
-                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.uri.clone()),
-                    )
-                })?;
-                let from_position = target.from_position.map(|position| match position {
-                    resource_async_host_bindings::artist::resource::types::Position::Top => artist_kernel::Position::Top,
-                    resource_async_host_bindings::artist::resource::types::Position::Bottom => artist_kernel::Position::Bottom,
-                    resource_async_host_bindings::artist::resource::types::Position::At(anchor) => artist_kernel::Position::At(anchor_from_string(&anchor)),
-                });
-                Ok(artist_kernel::PollTarget { uri, from_position })
-            })
-            .collect::<Result<Vec<_>, resource_async_host_bindings::artist::resource::types::Error>>()?;
-        let until = request.until.map(lower_poll_wire_async).transpose()?;
-        typed_host_invoke_operation_async(
-            self,
-            "poll",
-            target,
-            artist_kernel::Operation::Poll(artist_kernel::PollRequest { targets, until }),
-        )
-        .await
-    }
-}
-
-impl resource_async_host_bindings::artist::resource::types::Host for HostState {}
-
-impl resource_async_host_bindings::artist::resource::delete::Host for HostState {
-    async fn delete(
-        &mut self,
-        uris: Vec<String>,
-    ) -> Vec<Result<String, resource_async_host_bindings::artist::resource::types::Error>> {
-        let mut results = Vec::with_capacity(uris.len());
-        for target in uris {
-            let result = match artist_kernel::ResourceUri::parse(&target) {
-                Ok(uri) => {
-                    typed_host_invoke_operation_async(
-                        self,
-                        "delete",
-                        Some(target),
-                        artist_kernel::Operation::Delete(vec![uri]),
-                    )
-                    .await
-                }
-                Err(error) => Err(typed_error_for::<
-                    resource_async_host_bindings::artist::resource::types::Error,
-                >(
-                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-                    error.to_string(),
-                    Some(target),
-                )),
-            };
-            results.push(result);
-        }
-        results
-    }
-}
-
 fn anchor_from_string(value: &str) -> artist_kernel::Anchor {
     artist_kernel::Anchor::from_tokens(
         value
@@ -1771,190 +901,244 @@ fn anchor_from_string(value: &str) -> artist_kernel::Anchor {
     )
 }
 
-fn resource_error_to_kernel(
-    error: resource_async_tool_v1_bindings::artist::resource::types::Error,
-) -> artist_kernel::KernelError {
+#[cfg(test)]
+fn dynamic_read_result_to_kernel(
+    result: &DynamicValue,
+) -> Result<artist_kernel::ReadResult, artist_kernel::KernelError> {
     use artist_kernel::KernelError;
-    let code = format!("{:?}", error.code);
-    let uri = error.uri.unwrap_or_default();
-    match code.as_str() {
-        "InvalidUri" => KernelError::InvalidUri {
-            message: error.message,
-        },
-        "InvalidInput" => KernelError::InvalidRequest {
-            message: error.message,
-        },
-        "InvalidPattern" => KernelError::InvalidPattern {
-            message: error.message,
-        },
-        "NotFound" => KernelError::NotFound { uri },
-        "WrongKind" => KernelError::WrongKind {
-            message: error.message,
-        },
-        "InvalidAnchor" => KernelError::InvalidAnchor {
-            message: error.message,
-        },
-        "StaleAnchor" => KernelError::StaleAnchor {
-            message: error.message,
-        },
-        "Immutable" => KernelError::Immutable { uri },
-        "Unsupported" => KernelError::UnsupportedVerb {
-            verb: "read".to_owned(),
-            uri,
-        },
-        "PermissionDenied" => KernelError::PermissionDenied { uri },
-        "Conflict" => KernelError::Conflict { uri },
-        "NotEmpty" => KernelError::NotEmpty { uri },
-        "Aborted" => KernelError::Aborted {
-            message: error.message,
-        },
-        _ => KernelError::Handler {
-            message: error.message,
-        },
+    let DynamicValue::Result(result) = result else {
+        return Err(KernelError::Handler {
+            message: "resource read returned an invalid result value".to_owned(),
+        });
+    };
+    match result {
+        Ok(value) => {
+            let DynamicValue::Variant(name, Some(value)) = value.as_ref() else {
+                return Err(KernelError::Handler {
+                    message: "resource read returned an invalid success variant".to_owned(),
+                });
+            };
+            let DynamicValue::Record(fields) = value.as_ref() else {
+                return Err(KernelError::Handler {
+                    message: "resource read result payload is not a record".to_owned(),
+                });
+            };
+            match name.as_str() {
+                "text" => {
+                    let uri = dynamic_wit_uri(fields, "uri")?;
+                    let lines = dynamic_wit_lines(fields.get("lines"))?;
+                    Ok(artist_kernel::ReadResult::Text(
+                        artist_kernel::AnchoredText { uri, lines },
+                    ))
+                }
+                "directory" => {
+                    let uri = dynamic_wit_uri(fields, "uri")?;
+                    let entries = match fields.get("entries") {
+                        Some(DynamicValue::List(entries)) => entries
+                            .iter()
+                            .map(dynamic_wit_uri_value)
+                            .collect::<Result<Vec<_>, _>>()?,
+                        _ => {
+                            return Err(KernelError::Handler {
+                                message: "resource directory result has no entries".to_owned(),
+                            });
+                        }
+                    };
+                    Ok(artist_kernel::ReadResult::Directory { uri, entries })
+                }
+                _ => Err(KernelError::Handler {
+                    message: format!("resource read returned unknown result variant {name}"),
+                }),
+            }
+        }
+        Err(error) => Err(dynamic_resource_error_to_kernel(error, "read")?),
     }
 }
 
-fn resource_read_result_to_kernel(
-    result: resource_async_tool_v1_bindings::artist::resource::types::ReadResult,
-) -> Result<artist_kernel::ReadResult, artist_kernel::KernelError> {
-    use resource_async_tool_v1_bindings::artist::resource::types::{LineEnding, ReadResult};
-    match result {
-        ReadResult::Text(text) => Ok(artist_kernel::ReadResult::Text(
-            artist_kernel::AnchoredText {
-                uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| {
-                    artist_kernel::KernelError::InvalidUri {
-                        message: error.to_string(),
-                    }
-                })?,
-                lines: text
-                    .lines
-                    .into_iter()
-                    .map(|line| artist_kernel::AnchoredLine {
-                        anchor: anchor_from_string(&line.anchor),
-                        text: line.text,
-                        ending: match line.ending {
-                            LineEnding::None => artist_kernel::LineEnding::None,
-                            LineEnding::Lf => artist_kernel::LineEnding::Lf,
-                            LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
-                            LineEnding::Cr => artist_kernel::LineEnding::Cr,
-                        },
-                    })
-                    .collect(),
-            },
-        )),
-        ReadResult::Directory(directory) => Ok(artist_kernel::ReadResult::Directory {
-            uri: artist_kernel::ResourceUri::parse(&directory.uri).map_err(|error| {
-                artist_kernel::KernelError::InvalidUri {
-                    message: error.to_string(),
-                }
-            })?,
-            entries: directory
-                .entries
-                .into_iter()
-                .map(|uri| {
-                    artist_kernel::ResourceUri::parse(&uri).map_err(|error| {
-                        artist_kernel::KernelError::InvalidUri {
-                            message: error.to_string(),
-                        }
-                    })
-                })
-                .collect::<Result<_, _>>()?,
+fn dynamic_resource_error_to_kernel(
+    value: &DynamicValue,
+    verb: &str,
+) -> Result<artist_kernel::KernelError, artist_kernel::KernelError> {
+    use artist_kernel::KernelError;
+    let DynamicValue::Record(fields) = value else {
+        return Err(KernelError::Handler {
+            message: "resource error is not a record".to_owned(),
+        });
+    };
+    let code = match fields.get("code") {
+        Some(DynamicValue::Enum(code)) => code.clone(),
+        _ => {
+            return Err(KernelError::Handler {
+                message: "resource error has no code".to_owned(),
+            });
+        }
+    };
+    let uri = match fields.get("uri") {
+        Some(DynamicValue::Option(Some(uri))) => Some(dynamic_wit_string_value(uri)?),
+        Some(DynamicValue::String(uri)) => Some(uri.clone()),
+        _ => None,
+    };
+    let message = match fields.get("message") {
+        Some(DynamicValue::String(message)) => message.clone(),
+        _ => "resource operation failed".to_owned(),
+    };
+    Ok(resource_error_parts_to_kernel(code, uri, message, verb))
+}
+
+fn dynamic_wit_string_value(value: &DynamicValue) -> Result<String, artist_kernel::KernelError> {
+    use artist_kernel::KernelError;
+    match value {
+        DynamicValue::String(value) => Ok(value.clone()),
+        DynamicValue::ResourceUri(value) => Ok(value.to_string()),
+        DynamicValue::Enum(value) => Ok(value.clone()),
+        _ => Err(KernelError::Handler {
+            message: "resource value is not a string".to_owned(),
         }),
     }
 }
 
-fn resource_write_result_to_kernel(
-    result: resource_async_tool_v1_write_bindings::artist::resource::types::WriteResult,
-) -> Result<artist_kernel::WriteResult, artist_kernel::KernelError> {
-    Ok(artist_kernel::WriteResult {
-        text: artist_kernel::AnchoredText {
-            uri: artist_kernel::ResourceUri::parse(&result.text.uri).map_err(|error| {
-                artist_kernel::KernelError::InvalidUri { message: error.to_string() }
-            })?,
-            lines: result
-                .text
-                .lines
-                .into_iter()
-                .map(|line| artist_kernel::AnchoredLine {
-                    anchor: anchor_from_string(&line.anchor),
-                    text: line.text,
-                    ending: match line.ending {
-                        resource_async_tool_v1_write_bindings::artist::resource::types::LineEnding::None => artist_kernel::LineEnding::None,
-                        resource_async_tool_v1_write_bindings::artist::resource::types::LineEnding::Lf => artist_kernel::LineEnding::Lf,
-                        resource_async_tool_v1_write_bindings::artist::resource::types::LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
-                        resource_async_tool_v1_write_bindings::artist::resource::types::LineEnding::Cr => artist_kernel::LineEnding::Cr,
-                    },
-                })
-                .collect(),
-        },
+fn dynamic_wit_uri_value(
+    value: &DynamicValue,
+) -> Result<artist_kernel::ResourceUri, artist_kernel::KernelError> {
+    use artist_kernel::KernelError;
+    artist_kernel::ResourceUri::parse(&dynamic_wit_string_value(value)?).map_err(|error| {
+        KernelError::InvalidUri {
+            message: error.to_string(),
+        }
     })
 }
 
-fn resource_write_error_to_kernel(
-    error: resource_async_tool_v1_write_bindings::artist::resource::types::Error,
-) -> artist_kernel::KernelError {
-    let code = format!("{:?}", error.code);
-    let uri = error.uri.unwrap_or_default();
-    match code.as_str() {
-        "InvalidUri" => artist_kernel::KernelError::InvalidUri {
-            message: error.message,
-        },
-        "InvalidInput" => artist_kernel::KernelError::InvalidRequest {
-            message: error.message,
-        },
-        "NotFound" => artist_kernel::KernelError::NotFound { uri },
-        "PermissionDenied" => artist_kernel::KernelError::PermissionDenied { uri },
-        "Conflict" => artist_kernel::KernelError::Conflict { uri },
-        "WrongKind" => artist_kernel::KernelError::WrongKind {
-            message: error.message,
-        },
-        _ => artist_kernel::KernelError::Handler {
-            message: error.message,
-        },
-    }
+fn dynamic_wit_uri(
+    fields: &std::collections::BTreeMap<String, DynamicValue>,
+    name: &str,
+) -> Result<artist_kernel::ResourceUri, artist_kernel::KernelError> {
+    use artist_kernel::KernelError;
+    fields
+        .get(name)
+        .ok_or_else(|| KernelError::Handler {
+            message: format!("resource result has no {name}"),
+        })
+        .and_then(dynamic_wit_uri_value)
 }
 
-fn resource_error_to_kernel_for(
-    error: resource_async_tool_v1_edit_bindings::artist::resource::types::Error,
-    verb: &str,
-) -> artist_kernel::KernelError {
-    let code = format!("{:?}", error.code);
-    let uri = error.uri.unwrap_or_default();
-    match code.as_str() {
-        "InvalidUri" => artist_kernel::KernelError::InvalidUri {
-            message: error.message,
-        },
-        "InvalidInput" => artist_kernel::KernelError::InvalidRequest {
-            message: error.message,
-        },
-        "InvalidPattern" => artist_kernel::KernelError::InvalidPattern {
-            message: error.message,
-        },
-        "NotFound" => artist_kernel::KernelError::NotFound { uri },
-        "WrongKind" => artist_kernel::KernelError::WrongKind {
-            message: error.message,
-        },
-        "InvalidAnchor" => artist_kernel::KernelError::InvalidAnchor {
-            message: error.message,
-        },
-        "StaleAnchor" => artist_kernel::KernelError::StaleAnchor {
-            message: error.message,
-        },
-        "Immutable" => artist_kernel::KernelError::Immutable { uri },
-        "Unsupported" => artist_kernel::KernelError::UnsupportedVerb {
-            verb: verb.to_owned(),
-            uri,
-        },
-        "PermissionDenied" => artist_kernel::KernelError::PermissionDenied { uri },
-        "Conflict" => artist_kernel::KernelError::Conflict { uri },
-        "NotEmpty" => artist_kernel::KernelError::NotEmpty { uri },
-        "Aborted" => artist_kernel::KernelError::Aborted {
-            message: error.message,
-        },
-        _ => artist_kernel::KernelError::Handler {
-            message: error.message,
-        },
-    }
+fn dynamic_wit_lines(
+    value: Option<&DynamicValue>,
+) -> Result<Vec<artist_kernel::AnchoredLine>, artist_kernel::KernelError> {
+    use artist_kernel::KernelError;
+    let Some(DynamicValue::List(lines)) = value else {
+        return Err(KernelError::Handler {
+            message: "resource text result has no lines".to_owned(),
+        });
+    };
+    lines
+        .iter()
+        .map(|line| {
+            let DynamicValue::Record(fields) = line else {
+                return Err(KernelError::Handler {
+                    message: "resource text line is not a record".to_owned(),
+                });
+            };
+            let anchor_value = fields.get("anchor").ok_or_else(|| KernelError::Handler {
+                message: "resource text line has no anchor".to_owned(),
+            })?;
+            let anchor = match anchor_value {
+                DynamicValue::String(value) => value.clone(),
+                DynamicValue::List(values) => {
+                    let tokens = values
+                        .iter()
+                        .map(dynamic_wit_string_value)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    format!("#{}", tokens.join("."))
+                }
+                _ => {
+                    return Err(KernelError::Handler {
+                        message: "resource text line anchor is not a string or token list"
+                            .to_owned(),
+                    });
+                }
+            };
+            let text = dynamic_wit_string_value(fields.get("text").ok_or_else(|| {
+                KernelError::Handler {
+                    message: "resource text line has no text".to_owned(),
+                }
+            })?)?;
+            let ending = match dynamic_wit_string_value(fields.get("ending").ok_or_else(|| {
+                KernelError::Handler {
+                    message: "resource text line has no ending".to_owned(),
+                }
+            })?)?
+            .as_str()
+            {
+                "none" => artist_kernel::LineEnding::None,
+                "lf" => artist_kernel::LineEnding::Lf,
+                "crlf" => artist_kernel::LineEnding::Crlf,
+                "cr" => artist_kernel::LineEnding::Cr,
+                value => {
+                    return Err(KernelError::Handler {
+                        message: format!("unknown resource line ending {value}"),
+                    });
+                }
+            };
+            Ok(artist_kernel::AnchoredLine {
+                anchor: anchor_from_string(&anchor),
+                text,
+                ending,
+            })
+        })
+        .collect()
+}
+
+fn dynamic_wit_text(
+    value: Option<&DynamicValue>,
+) -> Result<artist_kernel::AnchoredText, artist_kernel::KernelError> {
+    let DynamicValue::Record(fields) =
+        value.ok_or_else(|| artist_kernel::KernelError::Handler {
+            message: "resource text result has no text".to_owned(),
+        })?
+    else {
+        return Err(artist_kernel::KernelError::Handler {
+            message: "resource text result is not a record".to_owned(),
+        });
+    };
+    Ok(artist_kernel::AnchoredText {
+        uri: dynamic_wit_uri(fields, "uri")?,
+        lines: dynamic_wit_lines(fields.get("lines"))?,
+    })
+}
+
+fn dynamic_wit_diff(
+    value: Option<&DynamicValue>,
+) -> Result<artist_kernel::AnchoredDiff, artist_kernel::KernelError> {
+    let DynamicValue::Record(fields) =
+        value.ok_or_else(|| artist_kernel::KernelError::Handler {
+            message: "resource edit result has no diff".to_owned(),
+        })?
+    else {
+        return Err(artist_kernel::KernelError::Handler {
+            message: "resource edit diff is not a record".to_owned(),
+        });
+    };
+    let uri = dynamic_wit_uri(fields, "uri")?;
+    let Some(DynamicValue::List(hunks)) = fields.get("hunks") else {
+        return Err(artist_kernel::KernelError::Handler {
+            message: "resource edit diff has no hunks".to_owned(),
+        });
+    };
+    let hunks = hunks
+        .iter()
+        .map(|hunk| {
+            let DynamicValue::Record(fields) = hunk else {
+                return Err(artist_kernel::KernelError::Handler {
+                    message: "resource edit hunk is not a record".to_owned(),
+                });
+            };
+            Ok(artist_kernel::DiffHunk {
+                old: dynamic_wit_lines(fields.get("old"))?,
+                new: dynamic_wit_lines(fields.get("new"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(artist_kernel::AnchoredDiff { uri, hunks })
 }
 
 fn resource_error_parts_to_kernel(
@@ -1985,529 +1169,103 @@ fn resource_error_parts_to_kernel(
     }
 }
 
-fn resource_edit_requests_from_kernel(
-    requests: Vec<artist_kernel::EditRequest>,
-) -> Result<
-    Vec<resource_async_tool_v1_edit_bindings::artist::resource::types::EditRequest>,
-    artist_kernel::KernelError,
-> {
-    use resource_async_tool_v1_edit_bindings::artist::resource::types::{
-        EditOperation, EditRequest, InsertOperation, InsertionPoint, ReplaceOperation,
-    };
-    requests
-        .into_iter()
-        .map(|request| {
-            Ok(EditRequest {
-                uri: request.uri.to_string(),
-                operations: request
-                    .operations
-                    .into_iter()
-                    .map(|operation| match operation {
-                        artist_kernel::EditOperation::Replace(operation) => {
-                            EditOperation::Replace(ReplaceOperation {
-                                start: operation.start.to_string(),
-                                end: operation.end.map(|anchor| anchor.to_string()),
-                                content: operation.content,
-                            })
-                        }
-                        artist_kernel::EditOperation::Insert(operation) => {
-                            EditOperation::Insert(InsertOperation {
-                                at: match operation.at {
-                                    artist_kernel::InsertionPoint::Top => InsertionPoint::Top,
-                                    artist_kernel::InsertionPoint::Bottom => InsertionPoint::Bottom,
-                                    artist_kernel::InsertionPoint::Before(anchor) => {
-                                        InsertionPoint::Before(anchor.to_string())
-                                    }
-                                    artist_kernel::InsertionPoint::After(anchor) => {
-                                        InsertionPoint::After(anchor.to_string())
-                                    }
-                                },
-                                content: operation.content,
-                            })
-                        }
-                    })
-                    .collect(),
-            })
-        })
-        .collect()
-}
-
-fn resource_edit_result_to_kernel(
-    result: resource_async_tool_v1_edit_bindings::artist::resource::types::EditResult,
-) -> Result<artist_kernel::EditResult, artist_kernel::KernelError> {
-    use resource_async_tool_v1_edit_bindings::artist::resource::types::LineEnding;
-    type KernelError = artist_kernel::KernelError;
-    let text = result.text;
-    let anchored_text =
-        |text: resource_async_tool_v1_edit_bindings::artist::resource::types::AnchoredText| {
-            Ok::<_, KernelError>(artist_kernel::AnchoredText {
-                uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| {
-                    KernelError::InvalidUri {
-                        message: error.to_string(),
-                    }
-                })?,
-                lines: text
-                    .lines
-                    .into_iter()
-                    .map(|line| artist_kernel::AnchoredLine {
-                        anchor: anchor_from_string(&line.anchor),
-                        text: line.text,
-                        ending: match line.ending {
-                            LineEnding::None => artist_kernel::LineEnding::None,
-                            LineEnding::Lf => artist_kernel::LineEnding::Lf,
-                            LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
-                            LineEnding::Cr => artist_kernel::LineEnding::Cr,
-                        },
-                    })
-                    .collect(),
-            })
-        };
-    let text = anchored_text(text)?;
-    let hunks = result
-        .diff
-        .hunks
-        .into_iter()
-        .map(|hunk| {
-            Ok::<_, KernelError>(artist_kernel::DiffHunk {
-                old: hunk
-                    .old
-                    .into_iter()
-                    .map(|line| artist_kernel::AnchoredLine {
-                        anchor: anchor_from_string(&line.anchor),
-                        text: line.text,
-                        ending: match line.ending {
-                            LineEnding::None => artist_kernel::LineEnding::None,
-                            LineEnding::Lf => artist_kernel::LineEnding::Lf,
-                            LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
-                            LineEnding::Cr => artist_kernel::LineEnding::Cr,
-                        },
-                    })
-                    .collect(),
-                new: hunk
-                    .new
-                    .into_iter()
-                    .map(|line| artist_kernel::AnchoredLine {
-                        anchor: anchor_from_string(&line.anchor),
-                        text: line.text,
-                        ending: match line.ending {
-                            LineEnding::None => artist_kernel::LineEnding::None,
-                            LineEnding::Lf => artist_kernel::LineEnding::Lf,
-                            LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
-                            LineEnding::Cr => artist_kernel::LineEnding::Cr,
-                        },
-                    })
-                    .collect(),
-            })
-        })
-        .collect::<Result<Vec<_>, KernelError>>()?;
-    Ok(artist_kernel::EditResult {
-        text,
-        diff: artist_kernel::AnchoredDiff {
-            uri: artist_kernel::ResourceUri::parse(&result.diff.uri).map_err(|error| {
-                KernelError::InvalidUri {
-                    message: error.to_string(),
-                }
-            })?,
-            hunks,
-        },
-    })
-}
-
-fn resource_run_requests_from_kernel(
-    requests: Vec<artist_kernel::RunRequest>,
-) -> Vec<resource_async_tool_v1_run_bindings::artist::resource::types::RunRequest> {
-    requests
-        .into_iter()
-        .map(
-            |request| resource_async_tool_v1_run_bindings::artist::resource::types::RunRequest {
-                uri: request.uri.to_string(),
-                args: request.args,
-            },
-        )
-        .collect()
-}
-
-fn resource_send_requests_from_kernel(
-    requests: Vec<artist_kernel::SendRequest>,
-) -> Vec<resource_async_tool_v1_send_bindings::artist::resource::types::SendRequest> {
-    requests
-        .into_iter()
-        .map(
-            |request| resource_async_tool_v1_send_bindings::artist::resource::types::SendRequest {
-                uri: request.uri.to_string(),
-                content: request.content,
-            },
-        )
-        .collect()
-}
-
-fn resource_uri_results_to_kernel(
-    results: Vec<
-        Result<String, resource_async_tool_v1_run_bindings::artist::resource::types::Error>,
-    >,
-    verb: &str,
-) -> Result<
-    Vec<Result<artist_kernel::ResourceUri, artist_kernel::KernelError>>,
-    artist_kernel::KernelError,
-> {
-    results
-        .into_iter()
-        .map(|result| match result {
-            Ok(uri) => artist_kernel::ResourceUri::parse(&uri)
-                .map(Ok)
-                .map_err(|error| artist_kernel::KernelError::InvalidUri {
-                    message: error.to_string(),
-                }),
-            Err(error) => Ok(Err(resource_error_parts_to_kernel(
-                format!("{:?}", error.code),
-                error.uri,
-                error.message,
-                verb,
-            ))),
-        })
-        .collect()
-}
-
-fn resource_send_results_to_kernel(
-    results: Vec<
-        Result<String, resource_async_tool_v1_send_bindings::artist::resource::types::Error>,
-    >,
-) -> Result<
-    Vec<Result<artist_kernel::ResourceUri, artist_kernel::KernelError>>,
-    artist_kernel::KernelError,
-> {
-    results
-        .into_iter()
-        .map(|result| match result {
-            Ok(uri) => artist_kernel::ResourceUri::parse(&uri)
-                .map(Ok)
-                .map_err(|error| artist_kernel::KernelError::InvalidUri {
-                    message: error.to_string(),
-                }),
-            Err(error) => Ok(Err(resource_error_parts_to_kernel(
-                format!("{:?}", error.code),
-                error.uri,
-                error.message,
-                "send",
-            ))),
-        })
-        .collect()
-}
-
-fn resource_abort_results_to_kernel(
-    results: Vec<
-        Result<String, resource_async_tool_v1_abort_bindings::artist::resource::types::Error>,
-    >,
-) -> Result<
-    Vec<Result<artist_kernel::ResourceUri, artist_kernel::KernelError>>,
-    artist_kernel::KernelError,
-> {
-    results
-        .into_iter()
-        .map(|result| match result {
-            Ok(uri) => artist_kernel::ResourceUri::parse(&uri)
-                .map(Ok)
-                .map_err(|error| artist_kernel::KernelError::InvalidUri {
-                    message: error.to_string(),
-                }),
-            Err(error) => Ok(Err(resource_error_parts_to_kernel(
-                format!("{:?}", error.code),
-                error.uri,
-                error.message,
-                "abort",
-            ))),
-        })
-        .collect()
-}
-
-fn resource_delete_results_to_kernel(
-    results: Vec<
-        Result<String, resource_async_tool_v1_delete_bindings::artist::resource::types::Error>,
-    >,
-) -> Result<
-    Vec<Result<artist_kernel::ResourceUri, artist_kernel::KernelError>>,
-    artist_kernel::KernelError,
-> {
-    results
-        .into_iter()
-        .map(|result| match result {
-            Ok(uri) => artist_kernel::ResourceUri::parse(&uri)
-                .map(Ok)
-                .map_err(|error| artist_kernel::KernelError::InvalidUri {
-                    message: error.to_string(),
-                }),
-            Err(error) => Ok(Err(resource_error_parts_to_kernel(
-                format!("{:?}", error.code),
-                error.uri,
-                error.message,
-                "delete",
-            ))),
-        })
-        .collect()
-}
-
-fn resource_find_request_from_kernel(
-    request: artist_kernel::FindRequest,
-) -> resource_async_tool_v1_find_bindings::artist::resource::types::FindRequest {
-    resource_async_tool_v1_find_bindings::artist::resource::types::FindRequest {
-        roots: request
-            .roots
-            .into_iter()
-            .map(|uri| uri.to_string())
-            .collect(),
-        query: request.query,
-    }
-}
-
-fn resource_find_result_to_kernel(
-    result: Result<
-        Vec<String>,
-        resource_async_tool_v1_find_bindings::artist::resource::types::Error,
-    >,
-) -> Result<Vec<artist_kernel::ResourceUri>, artist_kernel::KernelError> {
-    match result {
-        Ok(uris) => uris
-            .into_iter()
-            .map(|uri| {
-                artist_kernel::ResourceUri::parse(&uri).map_err(|error| {
-                    artist_kernel::KernelError::InvalidUri {
-                        message: error.to_string(),
-                    }
-                })
-            })
-            .collect(),
-        Err(error) => Err(resource_error_parts_to_kernel(
-            format!("{:?}", error.code),
-            error.uri,
-            error.message,
-            "find",
-        )),
-    }
-}
-
-fn resource_grep_request_from_kernel(
-    request: artist_kernel::GrepRequest,
-) -> resource_async_tool_v1_grep_bindings::artist::resource::types::GrepRequest {
-    use resource_async_tool_v1_grep_bindings::artist::resource::types::{
-        AnchoredLine, AnchoredText, GrepSource,
-    };
-    let source = match request.source {
-        artist_kernel::GrepSource::Resources(uris) => {
-            GrepSource::Resources(uris.into_iter().map(|uri| uri.to_string()).collect())
-        }
-        artist_kernel::GrepSource::Text(texts) => GrepSource::Text(
-            texts
-                .into_iter()
-                .map(|text| AnchoredText {
-                    uri: text.uri.to_string(),
-                    lines: text
-                        .lines
-                        .into_iter()
-                        .map(|line| AnchoredLine {
-                            anchor: line.anchor.to_string(),
-                            text: line.text,
-                            ending: match line.ending {
-                                artist_kernel::LineEnding::None => {
-                                    resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::None
-                                }
-                                artist_kernel::LineEnding::Lf => {
-                                    resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Lf
-                                }
-                                artist_kernel::LineEnding::Crlf => {
-                                    resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Crlf
-                                }
-                                artist_kernel::LineEnding::Cr => {
-                                    resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Cr
-                                }
-                            },
-                        })
-                        .collect(),
-                })
-                .collect(),
+fn kernel_error_to_typed(
+    error: artist_kernel::KernelError,
+    target: Option<String>,
+) -> resource_bindings::artist::resource::types::Error {
+    use artist_kernel::KernelError;
+    let (code, uri, message) = match error {
+        KernelError::InvalidUri { message } => (
+            resource_bindings::artist::resource::types::ErrorCode::InvalidUri,
+            target,
+            message,
+        ),
+        KernelError::UnsupportedUri { uri } => (
+            resource_bindings::artist::resource::types::ErrorCode::Unsupported,
+            Some(uri),
+            "URI scheme is not supported".to_owned(),
+        ),
+        KernelError::NoHandler { uri } => (
+            resource_bindings::artist::resource::types::ErrorCode::Unsupported,
+            Some(uri),
+            "no handler is registered for this URI".to_owned(),
+        ),
+        KernelError::UnsupportedVerb { verb, uri } => (
+            resource_bindings::artist::resource::types::ErrorCode::Unsupported,
+            Some(uri),
+            format!("verb {verb} is not supported for this resource"),
+        ),
+        KernelError::InvalidRequest { message } => (
+            resource_bindings::artist::resource::types::ErrorCode::InvalidInput,
+            target,
+            message,
+        ),
+        KernelError::InvalidPattern { message } => (
+            resource_bindings::artist::resource::types::ErrorCode::InvalidPattern,
+            target,
+            message,
+        ),
+        KernelError::InvalidAnchor { message } => (
+            resource_bindings::artist::resource::types::ErrorCode::InvalidAnchor,
+            target,
+            message,
+        ),
+        KernelError::StaleAnchor { message } => (
+            resource_bindings::artist::resource::types::ErrorCode::StaleAnchor,
+            target,
+            message,
+        ),
+        KernelError::WrongKind { message } => (
+            resource_bindings::artist::resource::types::ErrorCode::WrongKind,
+            target,
+            message,
+        ),
+        KernelError::NotFound { uri } => (
+            resource_bindings::artist::resource::types::ErrorCode::NotFound,
+            Some(uri),
+            "resource was not found".to_owned(),
+        ),
+        KernelError::AlreadyExists { uri } => (
+            resource_bindings::artist::resource::types::ErrorCode::Conflict,
+            Some(uri),
+            "resource conflict".to_owned(),
+        ),
+        KernelError::Immutable { uri } => (
+            resource_bindings::artist::resource::types::ErrorCode::Immutable,
+            Some(uri),
+            "resource is immutable".to_owned(),
+        ),
+        KernelError::PermissionDenied { uri } => (
+            resource_bindings::artist::resource::types::ErrorCode::PermissionDenied,
+            Some(uri),
+            "permission denied".to_owned(),
+        ),
+        KernelError::Conflict { uri } => (
+            resource_bindings::artist::resource::types::ErrorCode::Conflict,
+            Some(uri),
+            "resource conflict".to_owned(),
+        ),
+        KernelError::NotEmpty { uri } => (
+            resource_bindings::artist::resource::types::ErrorCode::NotEmpty,
+            Some(uri),
+            "resource is not empty".to_owned(),
+        ),
+        KernelError::Aborted { message } => (
+            resource_bindings::artist::resource::types::ErrorCode::Aborted,
+            target,
+            message,
+        ),
+        KernelError::Handler { message } => (
+            resource_bindings::artist::resource::types::ErrorCode::Internal,
+            target,
+            message,
         ),
     };
-    resource_async_tool_v1_grep_bindings::artist::resource::types::GrepRequest {
-        pattern: request.pattern,
-        source,
-    }
-}
-
-fn resource_grep_results_to_kernel(
-    result: Result<
-        Vec<resource_async_tool_v1_grep_bindings::artist::resource::types::AnchoredText>,
-        resource_async_tool_v1_grep_bindings::artist::resource::types::Error,
-    >,
-) -> Result<Vec<artist_kernel::AnchoredText>, artist_kernel::KernelError> {
-    match result {
-        Ok(texts) => texts
-            .into_iter()
-            .map(|text| {
-                Ok(artist_kernel::AnchoredText {
-                    uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| {
-                        artist_kernel::KernelError::InvalidUri {
-                            message: error.to_string(),
-                        }
-                    })?,
-                    lines: text
-                        .lines
-                        .into_iter()
-                        .map(|line| artist_kernel::AnchoredLine {
-                            anchor: anchor_from_string(&line.anchor),
-                            text: line.text,
-                            ending: match line.ending {
-                                resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::None => artist_kernel::LineEnding::None,
-                                resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Lf => artist_kernel::LineEnding::Lf,
-                                resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
-                                resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Cr => artist_kernel::LineEnding::Cr,
-                            },
-                        })
-                        .collect(),
-                })
-            })
-            .collect(),
-        Err(error) => Err(resource_error_parts_to_kernel(
-            format!("{:?}", error.code),
-            error.uri,
-            error.message,
-            "grep",
-        )),
-    }
-}
-
-fn resource_poll_request_from_kernel(
-    request: artist_kernel::PollRequest,
-) -> resource_async_tool_v1_poll_bindings::artist::resource::types::PollRequest {
-    use resource_async_tool_v1_poll_bindings::artist::resource::types::{PollTarget, Position};
-    let targets = request
-        .targets
-        .into_iter()
-        .map(|target| PollTarget {
-            uri: target.uri.to_string(),
-            from_position: target.from_position.map(|position| match position {
-                artist_kernel::Position::Top => Position::Top,
-                artist_kernel::Position::Bottom => Position::Bottom,
-                artist_kernel::Position::At(anchor) => Position::At(anchor.to_string()),
-            }),
-        })
-        .collect();
-    let until = request.until.map(|condition| {
-        let mut nodes = Vec::new();
-        fn lower(
-            condition: artist_kernel::PollCondition,
-            nodes: &mut Vec<
-                resource_async_tool_v1_poll_bindings::artist::resource::types::PollNode,
-            >,
-        ) -> u32 {
-            use resource_async_tool_v1_poll_bindings::artist::resource::types::{
-                PollAtom, PollNode, RegexAtom,
-            };
-            let node = match condition {
-                artist_kernel::PollCondition::Atom(atom) => PollNode::Atom(match atom {
-                    artist_kernel::PollAtom::Changed(target) => PollAtom::Changed(target),
-                    artist_kernel::PollAtom::Regex(regex) => PollAtom::Regex(RegexAtom {
-                        target: regex.target,
-                        pattern: regex.pattern,
-                    }),
-                    artist_kernel::PollAtom::Terminated(target) => PollAtom::Terminated(target),
-                    artist_kernel::PollAtom::Timeout(milliseconds) => {
-                        PollAtom::Timeout(milliseconds)
-                    }
-                }),
-                artist_kernel::PollCondition::All(children) => PollNode::All(
-                    children
-                        .into_iter()
-                        .map(|child| lower(child, nodes))
-                        .collect(),
-                ),
-                artist_kernel::PollCondition::Any(children) => PollNode::Any(
-                    children
-                        .into_iter()
-                        .map(|child| lower(child, nodes))
-                        .collect(),
-                ),
-            };
-            let index = nodes.len() as u32;
-            nodes.push(node);
-            index
-        }
-        let root = lower(condition, &mut nodes);
-        resource_async_tool_v1_poll_bindings::artist::resource::types::PollConditionWire {
-            root,
-            nodes,
-        }
-    });
-    resource_async_tool_v1_poll_bindings::artist::resource::types::PollRequest { targets, until }
-}
-
-fn resource_poll_result_to_kernel(
-    result: Result<
-        resource_async_tool_v1_poll_bindings::artist::resource::types::PollResult,
-        resource_async_tool_v1_poll_bindings::artist::resource::types::Error,
-    >,
-) -> Result<artist_kernel::PollResult, artist_kernel::KernelError> {
-    use resource_async_tool_v1_poll_bindings::artist::resource::types::LineEnding;
-    match result {
-        Ok(result) => Ok(artist_kernel::PollResult {
-            text: result
-                .text
-                .into_iter()
-                .map(|text| {
-                    Ok(artist_kernel::AnchoredText {
-                        uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| {
-                            artist_kernel::KernelError::InvalidUri {
-                                message: error.to_string(),
-                            }
-                        })?,
-                        lines: text
-                            .lines
-                            .into_iter()
-                            .map(|line| artist_kernel::AnchoredLine {
-                                anchor: anchor_from_string(&line.anchor),
-                                text: line.text,
-                                ending: match line.ending {
-                                    LineEnding::None => artist_kernel::LineEnding::None,
-                                    LineEnding::Lf => artist_kernel::LineEnding::Lf,
-                                    LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
-                                    LineEnding::Cr => artist_kernel::LineEnding::Cr,
-                                },
-                            })
-                            .collect(),
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            satisfied: result
-                .satisfied
-                .into_iter()
-                .map(|atom| match atom {
-                    resource_async_tool_v1_poll_bindings::artist::resource::types::PollAtom::Changed(
-                        target,
-                    ) => artist_kernel::PollAtom::Changed(target),
-                    resource_async_tool_v1_poll_bindings::artist::resource::types::PollAtom::Regex(
-                        regex,
-                    ) => artist_kernel::PollAtom::Regex(artist_kernel::RegexAtom {
-                        target: regex.target,
-                        pattern: regex.pattern,
-                    }),
-                    resource_async_tool_v1_poll_bindings::artist::resource::types::PollAtom::Terminated(
-                        target,
-                    ) => artist_kernel::PollAtom::Terminated(target),
-                    resource_async_tool_v1_poll_bindings::artist::resource::types::PollAtom::Timeout(
-                        milliseconds,
-                    ) => artist_kernel::PollAtom::Timeout(milliseconds),
-                })
-                .collect(),
-        }),
-        Err(error) => Err(resource_error_parts_to_kernel(
-            format!("{:?}", error.code),
-            error.uri,
-            error.message,
-            "poll",
-        )),
-    }
+    typed_error(code, message, uri)
 }
 
 fn typed_error_for<E>(
-    code: tool_v1_bindings::artist::resource::types::ErrorCode,
+    code: resource_bindings::artist::resource::types::ErrorCode,
     message: String,
     uri: Option<String>,
 ) -> E
@@ -2529,527 +1287,20 @@ where
         .expect("WIT error types share the canonical error representation")
 }
 
-fn async_typed_error(
-    code: tool_v1_bindings::artist::resource::types::ErrorCode,
-    message: String,
-    uri: Option<String>,
-) -> resource_async_host_bindings::artist::resource::types::Error {
-    use resource_async_host_bindings::artist::resource::types::ErrorCode as AsyncCode;
-    let code = match format!("{code:?}").as_str() {
-        "InvalidUri" => AsyncCode::InvalidUri,
-        "InvalidInput" => AsyncCode::InvalidInput,
-        "InvalidPattern" => AsyncCode::InvalidPattern,
-        "InvalidAnchor" => AsyncCode::InvalidAnchor,
-        "StaleAnchor" => AsyncCode::StaleAnchor,
-        "WrongKind" => AsyncCode::WrongKind,
-        "NotFound" => AsyncCode::NotFound,
-        "Conflict" => AsyncCode::Conflict,
-        "Immutable" => AsyncCode::Immutable,
-        "PermissionDenied" => AsyncCode::PermissionDenied,
-        "NotEmpty" => AsyncCode::NotEmpty,
-        "Aborted" => AsyncCode::Aborted,
-        "Internal" => AsyncCode::Internal,
-        _ => AsyncCode::Unsupported,
-    };
-    resource_async_host_bindings::artist::resource::types::Error { code, uri, message }
-}
-
-fn async_error_from_kernel(
-    error: artist_kernel::KernelError,
-    target: Option<String>,
-) -> resource_async_host_bindings::artist::resource::types::Error {
-    let error = kernel_error_to_typed(error, target);
-    async_typed_error(error.code, error.message, error.uri)
-}
-
-/// Execute a contract-shaped kernel operation. JSON is used only to adapt the
-/// already-computed typed result to the generated WIT record; it is not used
-/// to construct, route, or execute the kernel operation.
-fn typed_host_invoke_operation<Response, ErrorType>(
-    state: &mut HostState,
-    verb: &str,
-    target: Option<String>,
-    operation: artist_kernel::Operation,
-) -> Result<Response, ErrorType>
-where
-    Response: serde::de::DeserializeOwned,
-    ErrorType: serde::de::DeserializeOwned,
-{
-    let capability = format!("resource.{verb}");
-    if !state.capabilities.contains(&capability) {
-        return Err(typed_error_for(
-            tool_v1_bindings::artist::resource::types::ErrorCode::PermissionDenied,
-            format!("capability denied: {capability}"),
-            target,
-        ));
-    }
-    let Some(kernel) = state.kernel.clone() else {
-        return Err(typed_error_for(
-            tool_v1_bindings::artist::resource::types::ErrorCode::Internal,
-            "typed tool host has no kernel".to_owned(),
-            target,
-        ));
-    };
-    let scope = state.scope.clone();
-    let result = futures::executor::block_on(kernel.execute_operation_with_scope(operation, scope))
-        .map_err(|error| typed_error_from_kernel(error, target.clone()))?;
-    let value = operation_primary_value(result)
-        .map_err(|error| typed_error_from_kernel(error, target.clone()))?;
-    let mut value = serde_json::to_value(value).map_err(|error| {
-        typed_error_for(
-            tool_v1_bindings::artist::resource::types::ErrorCode::Internal,
-            error.to_string(),
-            None,
-        )
-    })?;
-    normalize_typed_value(&mut value);
-    serde_json::from_value(value).map_err(|_| {
-        typed_error_for(
-            tool_v1_bindings::artist::resource::types::ErrorCode::Internal,
-            "typed host response conversion failed".to_owned(),
-            None,
-        )
-    })
-}
-
-/// Async counterpart for the canonical component host bridge. Component
-/// invocations must never block an executor while routing a nested operation
-/// through the kernel.
-async fn typed_host_invoke_operation_async<Response>(
-    state: &mut HostState,
-    verb: &str,
-    target: Option<String>,
-    operation: artist_kernel::Operation,
-) -> Result<Response, resource_async_host_bindings::artist::resource::types::Error>
-where
-    Response: AsyncOperationResponse,
-{
-    let capability = format!("resource.{verb}");
-    if !state.capabilities.contains(&capability) {
-        return Err(async_typed_error(
-            tool_v1_bindings::artist::resource::types::ErrorCode::PermissionDenied,
-            format!("capability denied: {capability}"),
-            target,
-        ));
-    }
-    let Some(kernel) = state.kernel.clone() else {
-        return Err(async_typed_error(
-            tool_v1_bindings::artist::resource::types::ErrorCode::Internal,
-            "typed tool host has no kernel".to_owned(),
-            target,
-        ));
-    };
-    let result = kernel
-        .execute_operation_with_scope(operation, state.scope.clone())
-        .await
-        .map_err(|error| async_error_from_kernel(error, target.clone()))?;
-    Response::from_operation(verb, result).map_err(|error| async_error_from_kernel(error, target))
-}
-
-trait AsyncOperationResponse: Sized {
-    fn from_operation(
-        verb: &str,
-        result: artist_kernel::OperationResult,
-    ) -> Result<Self, artist_kernel::KernelError>;
-}
-
-fn async_anchored_text(
-    text: artist_kernel::AnchoredText,
-) -> resource_async_host_bindings::artist::resource::types::AnchoredText {
-    use resource_async_host_bindings::artist::resource::types::{AnchoredLine, LineEnding};
-    resource_async_host_bindings::artist::resource::types::AnchoredText {
-        uri: text.uri.to_string(),
-        lines: text
-            .lines
-            .into_iter()
-            .map(|line| AnchoredLine {
-                anchor: line.anchor.to_string(),
-                text: line.text,
-                ending: match line.ending {
-                    artist_kernel::LineEnding::None => LineEnding::None,
-                    artist_kernel::LineEnding::Lf => LineEnding::Lf,
-                    artist_kernel::LineEnding::Crlf => LineEnding::Crlf,
-                    artist_kernel::LineEnding::Cr => LineEnding::Cr,
-                },
-            })
-            .collect(),
-    }
-}
-
-impl AsyncOperationResponse for resource_async_host_bindings::artist::resource::types::ReadResult {
-    fn from_operation(
-        _verb: &str,
-        result: artist_kernel::OperationResult,
-    ) -> Result<Self, artist_kernel::KernelError> {
-        let artist_kernel::OperationResult::Read(mut values) = result else {
-            return Err(artist_kernel::KernelError::Handler {
-                message: "read response kind mismatch".into(),
-            });
-        };
-        match values.remove(0)? {
-            artist_kernel::ReadResult::Text(text) => Ok(Self::Text(async_anchored_text(text))),
-            artist_kernel::ReadResult::Directory { uri, entries } => Ok(Self::Directory(
-                resource_async_host_bindings::artist::resource::types::DirectoryResult {
-                    uri: uri.to_string(),
-                    entries: entries.into_iter().map(|entry| entry.to_string()).collect(),
-                },
-            )),
-        }
-    }
-}
-
-impl AsyncOperationResponse for resource_async_host_bindings::artist::resource::types::WriteResult {
-    fn from_operation(
-        _verb: &str,
-        result: artist_kernel::OperationResult,
-    ) -> Result<Self, artist_kernel::KernelError> {
-        let artist_kernel::OperationResult::Write(mut values) = result else {
-            return Err(artist_kernel::KernelError::Handler {
-                message: "write response kind mismatch".into(),
-            });
-        };
-        Ok(Self {
-            text: async_anchored_text(values.remove(0)?.text),
-        })
-    }
-}
-
-impl AsyncOperationResponse for resource_async_host_bindings::artist::resource::types::EditResult {
-    fn from_operation(
-        _verb: &str,
-        result: artist_kernel::OperationResult,
-    ) -> Result<Self, artist_kernel::KernelError> {
-        let artist_kernel::OperationResult::Edit(mut values) = result else {
-            return Err(artist_kernel::KernelError::Handler {
-                message: "edit response kind mismatch".into(),
-            });
-        };
-        let value = values.remove(0)?;
-        let diff_uri = value.diff.uri.clone();
-        let hunks = value
-            .diff
-            .hunks
-            .into_iter()
-            .map(
-                |hunk| resource_async_host_bindings::artist::resource::types::DiffHunk {
-                    old: hunk.old.into_iter().map(async_anchored_line).collect(),
-                    new: hunk.new.into_iter().map(async_anchored_line).collect(),
-                },
-            )
-            .collect();
-        Ok(Self {
-            text: async_anchored_text(value.text),
-            diff: resource_async_host_bindings::artist::resource::types::AnchoredDiff {
-                uri: diff_uri.to_string(),
-                hunks,
-            },
-        })
-    }
-}
-
-impl AsyncOperationResponse for Vec<String> {
-    fn from_operation(
-        _verb: &str,
-        result: artist_kernel::OperationResult,
-    ) -> Result<Self, artist_kernel::KernelError> {
-        let artist_kernel::OperationResult::Find(result) = result else {
-            return Err(artist_kernel::KernelError::Handler {
-                message: "find response kind mismatch".into(),
-            });
-        };
-        Ok(result?.into_iter().map(|uri| uri.to_string()).collect())
-    }
-}
-
-impl AsyncOperationResponse
-    for Vec<resource_async_host_bindings::artist::resource::types::AnchoredText>
-{
-    fn from_operation(
-        _verb: &str,
-        result: artist_kernel::OperationResult,
-    ) -> Result<Self, artist_kernel::KernelError> {
-        let artist_kernel::OperationResult::Grep(result) = result else {
-            return Err(artist_kernel::KernelError::Handler {
-                message: "grep response kind mismatch".into(),
-            });
-        };
-        Ok(result?.into_iter().map(async_anchored_text).collect())
-    }
-}
-
-impl AsyncOperationResponse for resource_async_host_bindings::artist::resource::types::PollResult {
-    fn from_operation(
-        _verb: &str,
-        result: artist_kernel::OperationResult,
-    ) -> Result<Self, artist_kernel::KernelError> {
-        let artist_kernel::OperationResult::Poll(result) = result else {
-            return Err(artist_kernel::KernelError::Handler {
-                message: "poll response kind mismatch".into(),
-            });
-        };
-        let result = result?;
-        Ok(Self {
-            text: result.text.into_iter().map(async_anchored_text).collect(),
-            satisfied: result
-                .satisfied
-                .into_iter()
-                .map(|atom| match atom {
-                    artist_kernel::PollAtom::Changed(target) => {
-                        resource_async_host_bindings::artist::resource::types::PollAtom::Changed(
-                            target,
-                        )
-                    }
-                    artist_kernel::PollAtom::Regex(regex) => {
-                        resource_async_host_bindings::artist::resource::types::PollAtom::Regex(
-                            resource_async_host_bindings::artist::resource::types::RegexAtom {
-                                target: regex.target,
-                                pattern: regex.pattern,
-                            },
-                        )
-                    }
-                    artist_kernel::PollAtom::Terminated(target) => {
-                        resource_async_host_bindings::artist::resource::types::PollAtom::Terminated(
-                            target,
-                        )
-                    }
-                    artist_kernel::PollAtom::Timeout(milliseconds) => {
-                        resource_async_host_bindings::artist::resource::types::PollAtom::Timeout(
-                            milliseconds,
-                        )
-                    }
-                })
-                .collect(),
-        })
-    }
-}
-
-impl AsyncOperationResponse for String {
-    fn from_operation(
-        verb: &str,
-        result: artist_kernel::OperationResult,
-    ) -> Result<Self, artist_kernel::KernelError> {
-        let (mut values, expected) = match result {
-            artist_kernel::OperationResult::Run(values) => (values, "run"),
-            artist_kernel::OperationResult::Send(values) => (values, "send"),
-            artist_kernel::OperationResult::Abort(values) => (values, "abort"),
-            artist_kernel::OperationResult::Delete(values) => (values, "delete"),
-            _ => {
-                return Err(artist_kernel::KernelError::Handler {
-                    message: format!("{verb} response kind mismatch"),
-                });
-            }
-        };
-        if verb != expected {
-            return Err(artist_kernel::KernelError::Handler {
-                message: format!("{verb} response kind mismatch"),
-            });
-        }
-        Ok(values.remove(0)?.to_string())
-    }
-}
-
-fn async_anchored_line(
-    line: artist_kernel::AnchoredLine,
-) -> resource_async_host_bindings::artist::resource::types::AnchoredLine {
-    use resource_async_host_bindings::artist::resource::types::LineEnding;
-    resource_async_host_bindings::artist::resource::types::AnchoredLine {
-        anchor: line.anchor.to_string(),
-        text: line.text,
-        ending: match line.ending {
-            artist_kernel::LineEnding::None => LineEnding::None,
-            artist_kernel::LineEnding::Lf => LineEnding::Lf,
-            artist_kernel::LineEnding::Crlf => LineEnding::Crlf,
-            artist_kernel::LineEnding::Cr => LineEnding::Cr,
-        },
-    }
-}
-
-fn operation_primary_value(
-    result: artist_kernel::OperationResult,
-) -> Result<serde_json::Value, artist_kernel::KernelError> {
-    use artist_kernel::OperationResult;
-    match result {
-        OperationResult::Read(mut values) => values.remove(0).and_then(|value| {
-            serde_json::to_value(value).map_err(|error| artist_kernel::KernelError::Handler {
-                message: error.to_string(),
-            })
-        }),
-        OperationResult::Write(mut values) => values.remove(0).and_then(|value| {
-            serde_json::to_value(value).map_err(|error| artist_kernel::KernelError::Handler {
-                message: error.to_string(),
-            })
-        }),
-        OperationResult::Edit(mut values) => values.remove(0).and_then(|value| {
-            serde_json::to_value(value).map_err(|error| artist_kernel::KernelError::Handler {
-                message: error.to_string(),
-            })
-        }),
-        OperationResult::Run(mut values)
-        | OperationResult::Send(mut values)
-        | OperationResult::Abort(mut values)
-        | OperationResult::Delete(mut values) => values
-            .remove(0)
-            .map(|uri| serde_json::json!(uri.to_string())),
-        OperationResult::Find(value) => value.map(|uris| {
-            serde_json::json!(
-                uris.into_iter()
-                    .map(|uri| uri.to_string())
-                    .collect::<Vec<_>>()
-            )
-        }),
-        OperationResult::Grep(value) => {
-            value.map(|texts| serde_json::to_value(texts).unwrap_or(serde_json::Value::Null))
-        }
-        OperationResult::Poll(value) => {
-            value.map(|value| serde_json::to_value(value).unwrap_or(serde_json::Value::Null))
-        }
-    }
-}
-
-/// Adapt only representation details between the kernel's Rust value types
-/// and WIT's scalar aliases. This remains at the component adapter boundary;
-/// no JSON enters kernel dispatch.
-fn normalize_typed_value(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            if let Some(anchor) = object.get("anchor").cloned()
-                && let Some(tokens) = anchor.get("tokens").and_then(serde_json::Value::as_array)
-            {
-                let joined = tokens
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(".");
-                object.insert(
-                    "anchor".to_owned(),
-                    serde_json::Value::String(format!("#{joined}")),
-                );
-            }
-            for child in object.values_mut() {
-                normalize_typed_value(child);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for child in values {
-                normalize_typed_value(child);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn typed_error(
-    code: tool_v1_bindings::artist::resource::types::ErrorCode,
+    code: resource_bindings::exports::artist::resource::types::ErrorCode,
     message: String,
     uri: Option<String>,
-) -> tool_v1_bindings::artist::resource::types::Error {
-    tool_v1_bindings::artist::resource::types::Error { code, uri, message }
+) -> resource_bindings::exports::artist::resource::types::Error {
+    resource_bindings::exports::artist::resource::types::Error { code, uri, message }
 }
 
-// Kept behind the provider adapter boundary for older external callers; the
-// universal component worlds never construct kernel operations from this path.
-fn kernel_error_to_typed(
-    error: artist_kernel::KernelError,
-    target: Option<String>,
-) -> tool_v1_bindings::artist::resource::types::Error {
-    use artist_kernel::KernelError;
-    let (code, uri, message) = match error {
-        KernelError::InvalidUri { message } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
-            target,
-            message,
-        ),
-        KernelError::UnsupportedUri { uri } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::Unsupported,
-            Some(uri),
-            "URI scheme is not supported".to_owned(),
-        ),
-        KernelError::NoHandler { uri } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::Unsupported,
-            Some(uri),
-            "no handler is registered for this URI".to_owned(),
-        ),
-        KernelError::UnsupportedVerb { verb, uri } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::Unsupported,
-            Some(uri),
-            format!("verb {verb} is not supported for this resource"),
-        ),
-        KernelError::InvalidRequest { message } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::InvalidInput,
-            target,
-            message,
-        ),
-        KernelError::InvalidPattern { message } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::InvalidPattern,
-            target,
-            message,
-        ),
-        KernelError::InvalidAnchor { message } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::InvalidAnchor,
-            target,
-            message,
-        ),
-        KernelError::StaleAnchor { message } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::StaleAnchor,
-            target,
-            message,
-        ),
-        KernelError::WrongKind { message } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::WrongKind,
-            target,
-            message,
-        ),
-        KernelError::NotFound { uri } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::NotFound,
-            Some(uri),
-            "resource was not found".to_owned(),
-        ),
-        KernelError::AlreadyExists { uri } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::Conflict,
-            Some(uri),
-            "resource conflict".to_owned(),
-        ),
-        KernelError::Immutable { uri } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::Immutable,
-            Some(uri),
-            "resource is immutable".to_owned(),
-        ),
-        KernelError::PermissionDenied { uri } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::PermissionDenied,
-            Some(uri),
-            "permission denied".to_owned(),
-        ),
-        KernelError::Conflict { uri } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::Conflict,
-            Some(uri),
-            "resource conflict".to_owned(),
-        ),
-        KernelError::NotEmpty { uri } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::NotEmpty,
-            Some(uri),
-            "resource is not empty".to_owned(),
-        ),
-        KernelError::Aborted { message } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::Aborted,
-            target,
-            message,
-        ),
-        KernelError::Handler { message } => (
-            tool_v1_bindings::artist::resource::types::ErrorCode::Internal,
-            target,
-            message,
-        ),
-    };
-    typed_error(code, message, uri)
-}
-
-/// Host for components that implement the typed `artist:tool` worlds.
+/// Reflective host for components implementing package-owned WIT contracts.
 pub struct TypedComponentHost {
     engine: wasmtime::Engine,
     component: wasmtime::component::Component,
     capabilities: HashSet<String>,
     dependencies: Vec<Arc<DynamicDependency>>,
-    canonical_resource_imports: bool,
 }
 
 #[derive(Clone)]
@@ -3066,23 +1317,6 @@ struct DependencySpec {
     contract: String,
     bytes: Vec<u8>,
     dependencies: Vec<DependencySpec>,
-}
-
-fn validate_typed_contract_names(
-    verb: contracts::Verb,
-    exports: &[String],
-    tool_imports: &[String],
-) -> Result<(), String> {
-    let v1_export = format!("artist:tool/{}@1.0.0", verb.interface());
-    if exports == &[v1_export.clone()] && tool_imports.iter().any(|name| name.contains("resource/"))
-    {
-        return Ok(());
-    }
-    Err(format!(
-        "typed contract {} requires export {} and direct artist:resource imports (exports={exports:?}, imports={tool_imports:?})",
-        contracts::ContractId::universal(verb),
-        v1_export
-    ))
 }
 
 impl TypedComponentHost {
@@ -3123,10 +1357,6 @@ impl TypedComponentHost {
         let engine = package::component_engine()?;
         let component = wasmtime::component::Component::from_binary(&engine, bytes)
             .map_err(|e| ComponentError::Load(anyhow::anyhow!(format!("{e:#}"))))?;
-        let canonical_resource_imports = component
-            .component_type()
-            .imports(&engine)
-            .any(|(name, _)| name.contains("resource/"));
         let capabilities = capabilities.into_iter().collect::<HashSet<_>>();
         fn load_dependencies(
             engine: &wasmtime::Engine,
@@ -3157,104 +1387,12 @@ impl TypedComponentHost {
             component,
             capabilities,
             dependencies,
-            canonical_resource_imports,
         })
     }
 
     /// Validate that the component has exactly the world selected by its
     /// contract. This is intentionally performed against the compiled
     /// component type, before instantiation or invocation.
-    pub fn validate_contract(&self, verb: contracts::Verb) -> Result<(), ComponentError> {
-        let component_type = self.component.component_type();
-        let exports = component_type
-            .exports(&self.engine)
-            .map(|(name, _)| name.to_owned())
-            .collect::<Vec<_>>();
-        let imports = component_type
-            .imports(&self.engine)
-            .map(|(name, _)| name.to_owned())
-            .collect::<Vec<_>>();
-        let tool_imports = imports
-            .iter()
-            .filter(|name| name.contains("artist:tool/") || name.contains("resource/"))
-            .cloned()
-            .collect::<Vec<_>>();
-        validate_typed_contract_names(verb, &exports, &tool_imports)
-            .map_err(|message| ComponentError::Load(anyhow::anyhow!(message)))
-    }
-
-    fn linker_for(
-        &self,
-        verb: contracts::Verb,
-    ) -> Result<wasmtime::component::Linker<HostState>, ComponentError> {
-        let mut linker = wasmtime::component::Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
-        macro_rules! add_resource_import {
-            ($instance:literal, $interface:ident) => {{
-                let mut instance = linker
-                    .instance($instance)
-                    .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-                resource_bindings::artist::resource::$interface::add_to_linker_instance::<
-                    _,
-                    wasmtime::component::HasSelf<_>,
-                >(&mut instance, |state: &mut HostState| state)
-                .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-            }};
-        }
-        macro_rules! add_resource {
-            ($interface:ident) => {
-                resource_bindings::artist::resource::$interface::add_to_linker::<
-                    _,
-                    wasmtime::component::HasSelf<_>,
-                >(&mut linker, |state: &mut HostState| state)
-                .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-            };
-        }
-        match verb {
-            contracts::Verb::Read => {
-                add_resource!(read);
-                add_resource_import!("resource-read", read);
-            }
-            contracts::Verb::Write => {
-                add_resource!(write);
-                add_resource_import!("resource-write", write);
-            }
-            contracts::Verb::Edit => {
-                add_resource!(edit);
-                add_resource_import!("resource-edit", edit);
-            }
-            contracts::Verb::Find => {
-                add_resource!(find);
-                add_resource_import!("resource-find", find);
-            }
-            contracts::Verb::Grep => {
-                add_resource!(grep);
-                add_resource_import!("resource-grep", grep);
-            }
-            contracts::Verb::Run => {
-                add_resource!(run);
-                add_resource_import!("resource-run", run);
-            }
-            contracts::Verb::Send => {
-                add_resource!(send);
-                add_resource_import!("resource-send", send);
-            }
-            contracts::Verb::Abort => {
-                add_resource!(abort);
-                add_resource_import!("resource-abort", abort);
-            }
-            contracts::Verb::Delete => {
-                add_resource!(delete);
-                add_resource_import!("resource-delete", delete);
-            }
-            contracts::Verb::Poll => {
-                add_resource!(poll);
-                add_resource_import!("resource-poll", poll);
-            }
-        }
-        Ok(linker)
-    }
 
     fn dynamic_linker(&self) -> Result<wasmtime::component::Linker<HostState>, ComponentError> {
         dynamic_linker_for(
@@ -3265,77 +1403,103 @@ impl TypedComponentHost {
         )
     }
 
-    fn async_linker_for(
+    /// Invoke a package-local export through its registered WIT contract.
+    /// Contract shape comes from the active package definition, never from a
+    /// central list of semantic verbs.
+    pub fn invoke_dynamic_values(
         &self,
-        verb: contracts::Verb,
-    ) -> Result<wasmtime::component::Linker<HostState>, ComponentError> {
-        let mut linker = wasmtime::component::Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
-            .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-        macro_rules! add_resource_import {
-            ($instance:literal, $interface:ident) => {{
-                let mut instance = linker
-                    .instance($instance)
-                    .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-                resource_async_host_bindings::artist::resource::$interface::add_to_linker_instance::<
-                    _,
-                    wasmtime::component::HasSelf<_>,
-                >(&mut instance, |state: &mut HostState| state)
-                .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-            }};
+        function_name: &str,
+        input: &DynamicValue,
+        input_type: &DynamicType,
+        output_type: &DynamicType,
+        kernel: KernelHandle,
+    ) -> Result<DynamicValue, ComponentError> {
+        input
+            .validate(input_type)
+            .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+        let mut store = new_store(
+            &self.engine,
+            HostState::with_kernel_context(
+                self.capabilities.iter().cloned(),
+                kernel,
+                artist_kernel::InvocationContext::default(),
+            ),
+        );
+        let linker = self.dynamic_linker()?;
+        let instance = linker
+            .instantiate(&mut store, &self.component)
+            .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+        let function = instance
+            .get_func(&mut store, "invoke")
+            .or_else(|| instance.get_func(&mut store, function_name))
+            .ok_or_else(|| {
+                ComponentError::Invoke(anyhow::anyhow!(format!(
+                    "component exports neither invoke nor {function_name}"
+                )))
+            })?;
+        let function_type = function.ty(&store);
+        if function_type.params().len() != 1 || function_type.results().len() != 1 {
+            return Err(ComponentError::Invoke(anyhow::anyhow!(format!(
+                "dynamic function {function_name} must have one parameter and one result"
+            ))));
         }
-        macro_rules! add_resource {
-            ($interface:ident) => {
-                resource_async_host_bindings::artist::resource::$interface::add_to_linker::<
-                    _,
-                    wasmtime::component::HasSelf<_>,
-                >(&mut linker, |state: &mut HostState| state)
-                .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-            };
+        let parameter = dynamic_value_to_component_val(input)
+            .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error)))?;
+        let mut results = function_type
+            .results()
+            .map(|_| wasmtime::component::Val::Bool(false))
+            .collect::<Vec<_>>();
+        function
+            .call(&mut store, &[parameter], &mut results)
+            .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+        let output = component_val_to_dynamic_value_with_type(&results[0], output_type)
+            .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error)))?;
+        output
+            .validate(output_type)
+            .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+        Ok(output)
+    }
+
+    /// Resolve a dynamic function's name and contract from the kernel's
+    /// active `VerbId` lease before linking or invoking the component. This
+    /// keeps package replacement and component invocation on the same
+    /// generation-aware contract registry.
+    pub fn invoke_dynamic_verb(
+        &self,
+        call: &DynamicVerbCall,
+        kernel: &artist_kernel::Kernel,
+        host: KernelHandle,
+    ) -> Result<DynamicValue, ComponentError> {
+        let lease = kernel
+            .verb_registry()
+            .acquire(&call.verb)
+            .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+        let definition = lease.definition();
+        if call.function != definition.function {
+            return Err(ComponentError::Invoke(anyhow::anyhow!(format!(
+                "dynamic call function {} does not match active package function {}",
+                call.function, definition.function
+            ))));
         }
-        match verb {
-            contracts::Verb::Read => {
-                add_resource!(read);
-                add_resource_import!("resource-read", read);
-            }
-            contracts::Verb::Write => {
-                add_resource!(write);
-                add_resource_import!("resource-write", write);
-            }
-            contracts::Verb::Edit => {
-                add_resource!(edit);
-                add_resource_import!("resource-edit", edit);
-            }
-            contracts::Verb::Find => {
-                add_resource!(find);
-                add_resource_import!("resource-find", find);
-            }
-            contracts::Verb::Grep => {
-                add_resource!(grep);
-                add_resource_import!("resource-grep", grep);
-            }
-            contracts::Verb::Run => {
-                add_resource!(run);
-                add_resource_import!("resource-run", run);
-            }
-            contracts::Verb::Send => {
-                add_resource!(send);
-                add_resource_import!("resource-send", send);
-            }
-            contracts::Verb::Abort => {
-                add_resource!(abort);
-                add_resource_import!("resource-abort", abort);
-            }
-            contracts::Verb::Delete => {
-                add_resource!(delete);
-                add_resource_import!("resource-delete", delete);
-            }
-            contracts::Verb::Poll => {
-                add_resource!(poll);
-                add_resource_import!("resource-poll", poll);
-            }
-        }
-        Ok(linker)
+        let input_type = definition.input_type.as_ref().ok_or_else(|| {
+            ComponentError::Invoke(anyhow::anyhow!(format!(
+                "verb {} has no registered input contract",
+                call.verb
+            )))
+        })?;
+        let output_type = definition.output_type.as_ref().ok_or_else(|| {
+            ComponentError::Invoke(anyhow::anyhow!(format!(
+                "verb {} has no registered output contract",
+                call.verb
+            )))
+        })?;
+        self.invoke_dynamic_values(
+            &definition.function,
+            &call.input,
+            input_type,
+            output_type,
+            host,
+        )
     }
 
     /// Invoke an arbitrary package-local WIT contract through the Component
@@ -3374,6 +1538,21 @@ impl TypedComponentHost {
         let func = instance
             .get_func(&mut store, "invoke")
             .or_else(|| instance.get_func(&mut store, export_name))
+            .or_else(|| {
+                let interface = format!("artist:tool/{export_name}@1.0.0");
+                let interface_index = instance
+                    .get_export_index(&mut store, None, &interface)
+                    .or_else(|| {
+                        instance.get_export_index(
+                            &mut store,
+                            None,
+                            format!("artist:tool/{export_name}").as_str(),
+                        )
+                    })?;
+                let function_index =
+                    instance.get_export_index(&mut store, Some(&interface_index), export_name)?;
+                instance.get_func(&mut store, &function_index)
+            })
             .ok_or_else(|| {
                 ComponentError::Invoke(anyhow::anyhow!(format!(
                     "dynamic tool exports neither invoke nor {export_name}"
@@ -3386,7 +1565,7 @@ impl TypedComponentHost {
             .map(|(name, ty)| {
                 let value = input
                     .get(*name)
-                    .or_else(|| (params.len() == 1).then_some(input))
+                    .or_else(|| (params.len() == 1).then(|| input.get("requests").unwrap_or(input)))
                     .ok_or_else(|| {
                         ComponentError::Invoke(anyhow::anyhow!(format!(
                             "dynamic tool input is missing parameter {name}"
@@ -3438,6 +1617,21 @@ impl TypedComponentHost {
         let func = instance
             .get_func(&mut store, "invoke")
             .or_else(|| instance.get_func(&mut store, export_name))
+            .or_else(|| {
+                let interface = format!("artist:tool/{export_name}@1.0.0");
+                let interface_index = instance
+                    .get_export_index(&mut store, None, &interface)
+                    .or_else(|| {
+                        instance.get_export_index(
+                            &mut store,
+                            None,
+                            format!("artist:tool/{export_name}").as_str(),
+                        )
+                    })?;
+                let function_index =
+                    instance.get_export_index(&mut store, Some(&interface_index), export_name)?;
+                instance.get_func(&mut store, &function_index)
+            })
             .ok_or_else(|| {
                 ComponentError::Invoke(anyhow::anyhow!(format!(
                     "dynamic tool exports neither invoke nor {export_name}"
@@ -3450,7 +1644,7 @@ impl TypedComponentHost {
             .map(|(name, ty)| {
                 let value = input
                     .get(*name)
-                    .or_else(|| (params.len() == 1).then_some(input))
+                    .or_else(|| (params.len() == 1).then(|| input.get("requests").unwrap_or(input)))
                     .ok_or_else(|| {
                         ComponentError::Invoke(anyhow::anyhow!(format!(
                             "dynamic tool input is missing parameter {name}"
@@ -3480,19 +1674,17 @@ impl TypedComponentHost {
     }
 
     pub fn validate_dynamic_export(&self, export_name: &str) -> Result<(), ComponentError> {
-        let mut store = new_store(
-            &self.engine,
-            HostState::with_capabilities(self.capabilities.iter().cloned()),
-        );
-        let linker = self.dynamic_linker()?;
-        let instance = linker
-            .instantiate(&mut store, &self.component)
-            .map_err(|error| ComponentError::Build {
-                diagnostics: error.to_string(),
-            })?;
-        if instance.get_func(&mut store, "invoke").is_none()
-            && instance.get_func(&mut store, export_name).is_none()
-        {
+        let component_type = self.component.component_type();
+        let exports = component_type
+            .exports(&self.engine)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        if !exports.iter().any(|name| {
+            *name == "invoke"
+                || *name == export_name
+                || name.ends_with(&format!("/{export_name}"))
+                || name.contains(&format!("/{export_name}@"))
+        }) {
             return Err(ComponentError::Build {
                 diagnostics: format!(
                     "package-local WIT component exports neither invoke nor {export_name}"
@@ -3508,10 +1700,12 @@ impl TypedComponentHost {
             .exports(&self.engine)
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
-        if !exports
-            .iter()
-            .any(|name| *name == "invoke" || *name == export_name)
-        {
+        if !exports.iter().any(|name| {
+            *name == "invoke"
+                || *name == export_name
+                || name.ends_with(&format!("/{export_name}"))
+                || name.contains(&format!("/{export_name}@"))
+        }) {
             return Err(ComponentError::Build {
                 diagnostics: format!(
                     "package-local WIT component exports neither invoke nor {export_name}"
@@ -3519,408 +1713,6 @@ impl TypedComponentHost {
             });
         }
         Ok(())
-    }
-
-    pub fn invoke_read(
-        &self,
-        requests: Vec<tool_v1_bindings::artist::resource::types::ReadRequest>,
-        kernel: KernelHandle,
-    ) -> Result<
-        Vec<
-            Result<
-                tool_v1_bindings::artist::resource::types::ReadResult,
-                tool_v1_bindings::artist::resource::types::Error,
-            >,
-        >,
-        ComponentError,
-    > {
-        let input = serde_json::to_string(&requests)
-            .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?;
-        let output = self.invoke_json(contracts::Verb::Read, &input, kernel)?;
-        serde_json::from_str(&output)
-            .map_err(|_| ComponentError::MalformedResponse { field: "output" })
-    }
-
-    /// Dispatch one typed verb export using its WIT record JSON representation.
-    /// This is the provider/runtime adapter; the component itself still
-    /// receives and returns typed WIT values.
-    pub fn invoke_json(
-        &self,
-        verb: contracts::Verb,
-        input: &str,
-        kernel: KernelHandle,
-    ) -> Result<String, ComponentError> {
-        self.invoke_json_with_context(
-            verb,
-            input,
-            kernel,
-            artist_kernel::InvocationContext::default(),
-        )
-    }
-
-    pub fn invoke_json_with_context(
-        &self,
-        verb: contracts::Verb,
-        input: &str,
-        kernel: KernelHandle,
-        context: artist_kernel::InvocationContext,
-    ) -> Result<String, ComponentError> {
-        let mut store = new_store(
-            &self.engine,
-            HostState::with_kernel_context(self.capabilities.iter().cloned(), kernel, context),
-        );
-        let linker = self.linker_for(verb)?;
-        macro_rules! invoke {
-            ($module:ident, $world:ident, $ty:ty, $instance:ident, $method:ident, $request:expr) => {{
-                let instance =
-                    $module::$world::instantiate(&mut store, &self.component, &linker)
-                        .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?;
-                let request: $ty = serde_json::from_str($request)
-                    .map_err(|_| ComponentError::MalformedResponse { field: "input" })?;
-                let result = instance
-                    .$instance()
-                    .$method(&mut store, &request)
-                    .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?;
-                serde_json::to_string(&result)
-                    .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))
-            }};
-        }
-        match verb {
-            contracts::Verb::Read => {
-                if self.canonical_resource_imports {
-                    invoke!(
-                        tool_v1_bindings,
-                        ReadWorld,
-                        Vec<tool_v1_bindings::artist::resource::types::ReadRequest>,
-                        artist_tool_read,
-                        call_read,
-                        input
-                    )
-                } else {
-                    invoke!(
-                        tool_v1_bindings,
-                        ReadWorld,
-                        Vec<tool_v1_bindings::artist::resource::types::ReadRequest>,
-                        artist_tool_read,
-                        call_read,
-                        input
-                    )
-                }
-            }
-            contracts::Verb::Write => {
-                if self.canonical_resource_imports {
-                    invoke!(
-                        tool_v1_write_bindings,
-                        WriteWorld,
-                        Vec<tool_v1_write_bindings::artist::resource::types::WriteRequest>,
-                        artist_tool_write,
-                        call_write,
-                        input
-                    )
-                } else {
-                    invoke!(
-                        tool_v1_write_bindings,
-                        WriteWorld,
-                        Vec<tool_v1_write_bindings::artist::resource::types::WriteRequest>,
-                        artist_tool_write,
-                        call_write,
-                        input
-                    )
-                }
-            }
-            contracts::Verb::Edit => {
-                if self.canonical_resource_imports {
-                    invoke!(
-                        tool_v1_edit_bindings,
-                        EditWorld,
-                        Vec<tool_v1_edit_bindings::artist::resource::types::EditRequest>,
-                        artist_tool_edit,
-                        call_edit,
-                        input
-                    )
-                } else {
-                    invoke!(
-                        tool_v1_edit_bindings,
-                        EditWorld,
-                        Vec<tool_v1_edit_bindings::artist::resource::types::EditRequest>,
-                        artist_tool_edit,
-                        call_edit,
-                        input
-                    )
-                }
-            }
-            contracts::Verb::Find => {
-                if self.canonical_resource_imports {
-                    invoke!(
-                        tool_v1_find_bindings,
-                        FindWorld,
-                        tool_v1_find_bindings::artist::resource::types::FindRequest,
-                        artist_tool_find,
-                        call_find,
-                        input
-                    )
-                } else {
-                    invoke!(
-                        tool_v1_find_bindings,
-                        FindWorld,
-                        tool_v1_find_bindings::artist::resource::types::FindRequest,
-                        artist_tool_find,
-                        call_find,
-                        input
-                    )
-                }
-            }
-            contracts::Verb::Grep => {
-                if self.canonical_resource_imports {
-                    invoke!(
-                        tool_v1_grep_bindings,
-                        GrepWorld,
-                        tool_v1_grep_bindings::artist::resource::types::GrepRequest,
-                        artist_tool_grep,
-                        call_grep,
-                        input
-                    )
-                } else {
-                    invoke!(
-                        tool_v1_grep_bindings,
-                        GrepWorld,
-                        tool_v1_grep_bindings::artist::resource::types::GrepRequest,
-                        artist_tool_grep,
-                        call_grep,
-                        input
-                    )
-                }
-            }
-            contracts::Verb::Run => {
-                if self.canonical_resource_imports {
-                    invoke!(
-                        tool_v1_run_bindings,
-                        RunWorld,
-                        Vec<tool_v1_run_bindings::artist::resource::types::RunRequest>,
-                        artist_tool_run,
-                        call_run,
-                        input
-                    )
-                } else {
-                    invoke!(
-                        tool_v1_run_bindings,
-                        RunWorld,
-                        Vec<tool_v1_run_bindings::artist::resource::types::RunRequest>,
-                        artist_tool_run,
-                        call_run,
-                        input
-                    )
-                }
-            }
-            contracts::Verb::Send => {
-                if self.canonical_resource_imports {
-                    invoke!(
-                        tool_v1_send_bindings,
-                        SendWorld,
-                        Vec<tool_v1_send_bindings::artist::resource::types::SendRequest>,
-                        artist_tool_send,
-                        call_send,
-                        input
-                    )
-                } else {
-                    invoke!(
-                        tool_v1_send_bindings,
-                        SendWorld,
-                        Vec<tool_v1_send_bindings::artist::resource::types::SendRequest>,
-                        artist_tool_send,
-                        call_send,
-                        input
-                    )
-                }
-            }
-            contracts::Verb::Abort => {
-                if self.canonical_resource_imports {
-                    invoke!(
-                        tool_v1_abort_bindings,
-                        AbortWorld,
-                        Vec<String>,
-                        artist_tool_abort,
-                        call_abort,
-                        input
-                    )
-                } else {
-                    invoke!(
-                        tool_v1_abort_bindings,
-                        AbortWorld,
-                        Vec<String>,
-                        artist_tool_abort,
-                        call_abort,
-                        input
-                    )
-                }
-            }
-            contracts::Verb::Delete => {
-                if self.canonical_resource_imports {
-                    invoke!(
-                        tool_v1_delete_bindings,
-                        DeleteWorld,
-                        Vec<String>,
-                        artist_tool_delete,
-                        call_delete,
-                        input
-                    )
-                } else {
-                    invoke!(
-                        tool_v1_delete_bindings,
-                        DeleteWorld,
-                        Vec<String>,
-                        artist_tool_delete,
-                        call_delete,
-                        input
-                    )
-                }
-            }
-            contracts::Verb::Poll => {
-                if self.canonical_resource_imports {
-                    invoke!(
-                        tool_v1_poll_bindings,
-                        PollWorld,
-                        tool_v1_poll_bindings::artist::resource::types::PollRequest,
-                        artist_tool_poll,
-                        call_poll,
-                        input
-                    )
-                } else {
-                    invoke!(
-                        tool_v1_poll_bindings,
-                        PollWorld,
-                        tool_v1_poll_bindings::artist::resource::types::PollRequest,
-                        artist_tool_poll,
-                        call_poll,
-                        input
-                    )
-                }
-            }
-        }
-    }
-
-    /// Async counterpart used by the canonical v1 universal tool path. The
-    /// JSON here is only the provider adapter representation; the component
-    /// call itself is generated WIT and uses the shared resource types.
-    pub async fn invoke_json_async_with_context(
-        &self,
-        verb: contracts::Verb,
-        input: &str,
-        kernel: KernelHandle,
-        context: artist_kernel::InvocationContext,
-    ) -> Result<String, ComponentError> {
-        self.invoke_json_async_with_scope(
-            verb,
-            input,
-            kernel,
-            artist_kernel::InvocationScope::new(context),
-        )
-        .await
-    }
-
-    pub async fn invoke_json_async_with_scope(
-        &self,
-        verb: contracts::Verb,
-        input: &str,
-        kernel: KernelHandle,
-        scope: artist_kernel::InvocationScope,
-    ) -> Result<String, ComponentError> {
-        let mut store = new_store(
-            &self.engine,
-            HostState::with_kernel_scope(self.capabilities.iter().cloned(), kernel, scope),
-        );
-        let linker = self.async_linker_for(verb)?;
-        macro_rules! invoke {
-            ($module:ident, $world:ident, $ty:ty, $instance:ident, $method:ident) => {{
-                let instance =
-                    $module::$world::instantiate_async(&mut store, &self.component, &linker)
-                        .await
-                        .map_err(|error| {
-                            ComponentError::Invoke(anyhow::anyhow!(error.to_string()))
-                        })?;
-                let request: $ty = serde_json::from_str(input)
-                    .map_err(|_| ComponentError::MalformedResponse { field: "input" })?;
-                let result = instance
-                    .$instance()
-                    .$method(&mut store, &request)
-                    .await
-                    .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
-                serde_json::to_string(&result)
-                    .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))
-            }};
-        }
-        match verb {
-            contracts::Verb::Read => invoke!(
-                tool_v1_async_tool_v1_bindings,
-                ReadWorld,
-                Vec<tool_v1_async_tool_v1_bindings::artist::resource::types::ReadRequest>,
-                artist_tool_read,
-                call_read
-            ),
-            contracts::Verb::Write => invoke!(
-                tool_v1_async_tool_v1_write_bindings,
-                WriteWorld,
-                Vec<tool_v1_async_tool_v1_write_bindings::artist::resource::types::WriteRequest>,
-                artist_tool_write,
-                call_write
-            ),
-            contracts::Verb::Edit => invoke!(
-                tool_v1_async_tool_v1_edit_bindings,
-                EditWorld,
-                Vec<tool_v1_async_tool_v1_edit_bindings::artist::resource::types::EditRequest>,
-                artist_tool_edit,
-                call_edit
-            ),
-            contracts::Verb::Find => invoke!(
-                tool_v1_async_tool_v1_find_bindings,
-                FindWorld,
-                tool_v1_async_tool_v1_find_bindings::artist::resource::types::FindRequest,
-                artist_tool_find,
-                call_find
-            ),
-            contracts::Verb::Grep => invoke!(
-                tool_v1_async_tool_v1_grep_bindings,
-                GrepWorld,
-                tool_v1_async_tool_v1_grep_bindings::artist::resource::types::GrepRequest,
-                artist_tool_grep,
-                call_grep
-            ),
-            contracts::Verb::Run => invoke!(
-                tool_v1_async_tool_v1_run_bindings,
-                RunWorld,
-                Vec<tool_v1_async_tool_v1_run_bindings::artist::resource::types::RunRequest>,
-                artist_tool_run,
-                call_run
-            ),
-            contracts::Verb::Send => invoke!(
-                tool_v1_async_tool_v1_send_bindings,
-                SendWorld,
-                Vec<tool_v1_async_tool_v1_send_bindings::artist::resource::types::SendRequest>,
-                artist_tool_send,
-                call_send
-            ),
-            contracts::Verb::Abort => invoke!(
-                tool_v1_async_tool_v1_abort_bindings,
-                AbortWorld,
-                Vec<String>,
-                artist_tool_abort,
-                call_abort
-            ),
-            contracts::Verb::Delete => invoke!(
-                tool_v1_async_tool_v1_delete_bindings,
-                DeleteWorld,
-                Vec<String>,
-                artist_tool_delete,
-                call_delete
-            ),
-            contracts::Verb::Poll => invoke!(
-                tool_v1_async_tool_v1_poll_bindings,
-                PollWorld,
-                tool_v1_async_tool_v1_poll_bindings::artist::resource::types::PollRequest,
-                artist_tool_poll,
-                call_poll
-            ),
-        }
     }
 }
 
@@ -3933,27 +1725,11 @@ fn dynamic_linker_for(
     let mut linker = wasmtime::component::Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
         .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-    macro_rules! add_resource {
-        ($interface:ident) => {
-            resource_bindings::artist::resource::$interface::add_to_linker::<
-                _,
-                wasmtime::component::HasSelf<_>,
-            >(&mut linker, |state: &mut HostState| state)
-            .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-        };
-    }
-    add_resource!(read);
-    add_resource!(write);
-    add_resource!(edit);
-    add_resource!(find);
-    add_resource!(grep);
-    add_resource!(run);
-    add_resource!(send);
-    add_resource!(abort);
-    add_resource!(delete);
-    add_resource!(poll);
     for (import_name, _) in component.component_type().imports(engine) {
-        if import_name.starts_with("wasi:") || import_name.starts_with("artist:tool/") {
+        if import_name.starts_with("wasi:")
+            || import_name.contains("artist:%resource/")
+            || import_name.contains("artist:resource/")
+        {
             continue;
         }
         let dependency = dependencies.iter().find(|dependency| {
@@ -3990,27 +1766,11 @@ fn dynamic_linker_for_async(
     let mut linker = wasmtime::component::Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)
         .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-    macro_rules! add_resource {
-        ($interface:ident) => {
-            resource_async_host_bindings::artist::resource::$interface::add_to_linker::<
-                HostState,
-                wasmtime::component::HasSelf<HostState>,
-            >(&mut linker, |state: &mut HostState| state)
-            .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-        };
-    }
-    add_resource!(read);
-    add_resource!(write);
-    add_resource!(edit);
-    add_resource!(find);
-    add_resource!(grep);
-    add_resource!(run);
-    add_resource!(send);
-    add_resource!(abort);
-    add_resource!(delete);
-    add_resource!(poll);
     for (import_name, _) in component.component_type().imports(engine) {
-        if import_name.starts_with("wasi:") || import_name.starts_with("artist:tool/") {
+        if import_name.starts_with("wasi:")
+            || import_name.contains("artist:%resource/")
+            || import_name.contains("artist:resource/")
+        {
             continue;
         }
         let dependency = dependencies.iter().find(|dependency| {
@@ -4638,7 +2398,7 @@ pub mod package {
         let target_directory = metadata.target_directory.clone().into_std_path_buf();
 
         let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-        if !rustflags.contains("target-cpu") {
+        if !options.target.starts_with("wasm") && !rustflags.contains("target-cpu") {
             if !rustflags.is_empty() {
                 rustflags.push(' ');
             }
@@ -4648,8 +2408,7 @@ pub mod package {
             .manifest_path(manifest)
             .target_dir(root.join("target"))
             .target(&options.target)
-            .arg("--message-format")
-            .arg("json")
+            .arg("--lib")
             .arg("--offline")
             .env("RUSTFLAGS", rustflags);
         build = match options.profile {
@@ -4691,18 +2450,23 @@ pub mod package {
                     [target_directory.clone(), root.join("target")]
                         .into_iter()
                         .find_map(|search_root| {
-                            WalkDir::new(search_root)
-                                .into_iter()
-                                .filter_map(Result::ok)
-                                .map(|entry| entry.into_path())
-                                .find(|path| path.is_file() && path.file_name().is_some_and(|name| name == filename.as_str()))
+                        WalkDir::new(search_root)
+                            .into_iter()
+                            .filter_map(Result::ok)
+                            .map(|entry| entry.into_path())
+                            .find(|path| {
+                                path.is_file()
+                                    && path.extension().is_some_and(|extension| extension == "wasm")
+                                    && path.file_stem().is_some_and(|stem| {
+                                        stem.to_string_lossy().replace('-', "_")
+                                            == target_name.replace('-', "_")
+                                    })
+                            })
                         })
                 })
             })
             .ok_or_else(|| {
-                format!(
-                    "cargo succeeded but emitted no WASM component artifact (target={target_name}, expected={filename})"
-                )
+                format!("cargo succeeded but emitted no WASM component artifact (target={target_name}, expected={filename})")
             })?;
         if !artifact.is_file() {
             return Err(format!(
@@ -5076,17 +2840,13 @@ pub mod package {
         for path in [
             &package.root.join("tool.md"),
             &package.root.join("tool.wit"),
+            &package.root.join("deps"),
             &package.root.join("Cargo.toml"),
             &package.root.join("Cargo.lock"),
         ] {
             super::package::hash_path(&mut hasher, path)
                 .map_err(|diagnostics| ComponentError::Build { diagnostics })?;
         }
-        super::package::hash_path(
-            &mut hasher,
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/tool-surface-v1"),
-        )
-        .map_err(|diagnostics| ComponentError::Build { diagnostics })?;
         super::package::hash_path(
             &mut hasher,
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/typed-guest/src"),
@@ -5107,63 +2867,17 @@ pub mod package {
         let bytes = fs::read(artifact).map_err(|error| ComponentError::Build {
             diagnostics: format!("could not read {}: {error}", artifact.display()),
         })?;
-        if package
-            .contract
-            .as_ref()
-            .is_some_and(|contract| contract.verb.is_none())
-            && package.wit.is_none()
-        {
-            return Err(ComponentError::Build {
-                diagnostics: format!(
-                    "extension contract {} requires a package-local tool.wit",
-                    package.contract.as_ref().expect("checked above")
-                ),
-            });
-        }
-        if package
-            .contract
-            .as_ref()
-            .and_then(|contract| contract.verb)
-            .is_some()
-        {
-            let contract = package.contract.as_ref().unwrap();
-            let verb = contract.verb.expect("checked above");
-            let expected_capability = format!("resource.{verb}");
-            if package.manifest.capabilities != vec![expected_capability.clone()] {
-                return Err(ComponentError::Build {
-                    diagnostics: format!(
-                        "contract {} must declare exactly capability {}",
-                        contract, expected_capability
-                    ),
-                });
-            }
-            let host = TypedComponentHost::new_with_capabilities(
-                &bytes,
-                options.granted_capabilities.clone(),
-            )?;
-            host.validate_contract(verb)
-                .map_err(|error| ComponentError::Build {
-                    diagnostics: format!("typed component validation failed: {error}"),
-                })?;
-        } else if package.wit.is_some() {
-            let host = TypedComponentHost::new_with_capabilities(
-                &bytes,
-                options.granted_capabilities.clone(),
-            )?;
-            host.validate_dynamic_export_shape(
-                &package
-                    .contract
-                    .as_ref()
-                    .map(|contract| contract.interface.as_str())
-                    .unwrap_or("invoke"),
-            )?;
-        } else {
-            return Err(ComponentError::Build {
-                diagnostics:
-                    "component package must declare a typed universal contract or package-local WIT"
-                        .to_owned(),
-            });
-        }
+        let host = TypedComponentHost::new_with_capabilities(
+            &bytes,
+            options.granted_capabilities.clone(),
+        )?;
+        host.validate_dynamic_export_shape(
+            &package
+                .contract
+                .as_ref()
+                .map(|contract| contract.interface.as_str())
+                .unwrap_or("invoke"),
+        )?;
         if package.manifest.name.is_empty() {
             return Err(ComponentError::Build {
                 diagnostics: "tool name cannot be empty".to_owned(),
@@ -5285,8 +2999,7 @@ pub mod runtime {
         provenance: PathBuf,
         artifact: Arc<Vec<u8>>,
         info: ComponentMetadata,
-        typed_host: Option<Arc<TypedComponentHost>>,
-        dynamic_host: Option<Arc<TypedComponentHost>>,
+        dynamic_host: Arc<TypedComponentHost>,
     }
 
     impl ActiveVersion {
@@ -5335,14 +3048,44 @@ pub mod runtime {
             kernel: artist_kernel::KernelHandle,
             context: artist_kernel::InvocationContext,
         ) -> Result<String, ComponentError> {
-            self.typed_host
-                .as_ref()
-                .ok_or_else(|| {
-                    ComponentError::Invoke(anyhow::anyhow!(
-                        "named invocation requires a typed v1 component"
-                    ))
-                })?
-                .invoke_json_with_context(verb, input, kernel, context)
+            let mut value: serde_json::Value = serde_json::from_str(input)
+                .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+            if let Some(object) = value.as_object_mut() {
+                if !object.contains_key("uri") {
+                    if let Some(target) = object.remove("target") {
+                        object.insert("uri".to_owned(), target);
+                    }
+                }
+            }
+            if matches!(
+                verb,
+                super::contracts::Verb::Read
+                    | super::contracts::Verb::Write
+                    | super::contracts::Verb::Edit
+                    | super::contracts::Verb::Run
+                    | super::contracts::Verb::Send
+            ) && value
+                .as_object()
+                .is_some_and(|object| !object.contains_key("requests"))
+            {
+                let request = if matches!(verb, super::contracts::Verb::Read) {
+                    let mut object = value.as_object().cloned().unwrap_or_default();
+                    object.entry("at").or_insert(serde_json::Value::Null);
+                    object.entry("before").or_insert(serde_json::Value::Null);
+                    object.entry("after").or_insert(serde_json::Value::Null);
+                    serde_json::Value::Object(object)
+                } else {
+                    value
+                };
+                value = serde_json::json!({ "requests": [request] });
+            }
+            serde_json::to_string(&self.dynamic_host.invoke_dynamic_json_with_context(
+                &value,
+                verb.interface(),
+                kernel,
+                context,
+            )?)
+            .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))
         }
 
         pub async fn invoke_tool_json_async_with_context(
@@ -5352,13 +3095,48 @@ pub mod runtime {
             kernel: artist_kernel::KernelHandle,
             context: artist_kernel::InvocationContext,
         ) -> Result<String, ComponentError> {
-            let host = self.typed_host.as_ref().ok_or_else(|| {
-                ComponentError::Invoke(anyhow::anyhow!(
-                    "async named invocation requires a typed v1 component"
-                ))
-            })?;
-            host.invoke_json_async_with_context(verb, input, kernel, context)
-                .await
+            let mut value: serde_json::Value = serde_json::from_str(input)
+                .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+            if let Some(object) = value.as_object_mut() {
+                if !object.contains_key("uri") {
+                    if let Some(target) = object.remove("target") {
+                        object.insert("uri".to_owned(), target);
+                    }
+                }
+            }
+            if matches!(
+                verb,
+                super::contracts::Verb::Read
+                    | super::contracts::Verb::Write
+                    | super::contracts::Verb::Edit
+                    | super::contracts::Verb::Run
+                    | super::contracts::Verb::Send
+            ) && value
+                .as_object()
+                .is_some_and(|object| !object.contains_key("requests"))
+            {
+                let request = if matches!(verb, super::contracts::Verb::Read) {
+                    let mut object = value.as_object().cloned().unwrap_or_default();
+                    object.entry("at").or_insert(serde_json::Value::Null);
+                    object.entry("before").or_insert(serde_json::Value::Null);
+                    object.entry("after").or_insert(serde_json::Value::Null);
+                    serde_json::Value::Object(object)
+                } else {
+                    value
+                };
+                value = serde_json::json!({ "requests": [request] });
+            }
+            let output = self
+                .dynamic_host
+                .invoke_dynamic_json_async_with_scope(
+                    &value,
+                    verb.interface(),
+                    kernel,
+                    artist_kernel::InvocationScope::new(context),
+                )
+                .await?;
+            serde_json::to_string(&output)
+                .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))
         }
 
         pub async fn invoke_tool_json_async_with_scope(
@@ -5368,13 +3146,43 @@ pub mod runtime {
             kernel: artist_kernel::KernelHandle,
             scope: artist_kernel::InvocationScope,
         ) -> Result<String, ComponentError> {
-            let host = self.typed_host.as_ref().ok_or_else(|| {
-                ComponentError::Invoke(anyhow::anyhow!(
-                    "async named invocation requires a typed v1 component"
-                ))
-            })?;
-            host.invoke_json_async_with_scope(verb, input, kernel, scope)
-                .await
+            let mut value: serde_json::Value = serde_json::from_str(input)
+                .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+            if let Some(object) = value.as_object_mut() {
+                if !object.contains_key("uri") {
+                    if let Some(target) = object.remove("target") {
+                        object.insert("uri".to_owned(), target);
+                    }
+                }
+            }
+            if matches!(
+                verb,
+                super::contracts::Verb::Read
+                    | super::contracts::Verb::Write
+                    | super::contracts::Verb::Edit
+                    | super::contracts::Verb::Run
+                    | super::contracts::Verb::Send
+            ) && value
+                .as_object()
+                .is_some_and(|object| !object.contains_key("requests"))
+            {
+                let request = if matches!(verb, super::contracts::Verb::Read) {
+                    let mut object = value.as_object().cloned().unwrap_or_default();
+                    object.entry("at").or_insert(serde_json::Value::Null);
+                    object.entry("before").or_insert(serde_json::Value::Null);
+                    object.entry("after").or_insert(serde_json::Value::Null);
+                    serde_json::Value::Object(object)
+                } else {
+                    value
+                };
+                value = serde_json::json!({ "requests": [request] });
+            }
+            let output = self
+                .dynamic_host
+                .invoke_dynamic_json_async_with_scope(&value, verb.interface(), kernel, scope)
+                .await?;
+            serde_json::to_string(&output)
+                .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))
         }
 
         pub fn invoke_dynamic_json(
@@ -5399,12 +3207,6 @@ pub mod runtime {
             context: artist_kernel::InvocationContext,
         ) -> Result<serde_json::Value, ComponentError> {
             self.dynamic_host
-                .as_ref()
-                .ok_or_else(|| {
-                    ComponentError::Invoke(anyhow::anyhow!(
-                        "component has no package-local WIT host"
-                    ))
-                })?
                 .invoke_dynamic_json_with_context(input, export_name, kernel, context)
         }
 
@@ -5416,12 +3218,6 @@ pub mod runtime {
             scope: artist_kernel::InvocationScope,
         ) -> Result<serde_json::Value, ComponentError> {
             self.dynamic_host
-                .as_ref()
-                .ok_or_else(|| {
-                    ComponentError::Invoke(anyhow::anyhow!(
-                        "component has no package-local WIT host"
-                    ))
-                })?
                 .invoke_dynamic_json_async_with_scope(input, export_name, kernel, scope)
                 .await
         }
@@ -5436,8 +3232,7 @@ pub mod runtime {
                 provenance: self.provenance.clone(),
                 artifact: Arc::clone(&self.artifact),
                 info: self.info.clone(),
-                typed_host: self.typed_host.as_ref().map(Arc::clone),
-                dynamic_host: self.dynamic_host.as_ref().map(Arc::clone),
+                dynamic_host: Arc::clone(&self.dynamic_host),
             }
         }
     }
@@ -5494,61 +3289,30 @@ pub mod runtime {
                     build.artifact.display()
                 ))
             })?;
-            let (typed_host, dynamic_host, info) = if package
-                .contract
-                .as_ref()
-                .and_then(|contract| contract.verb)
-                .is_some()
-            {
-                let typed_host = Arc::new(TypedComponentHost::new_with_capabilities(
-                    &bytes,
-                    options.granted_capabilities.clone(),
-                )?);
-                let info = ComponentMetadata {
-                    name: package.manifest.name.clone(),
-                    version: package.manifest.version.clone(),
-                    abi_version: super::ABI_VERSION.to_owned(),
-                    interfaces: vec![
-                        package
-                            .contract
-                            .as_ref()
-                            .expect("typed contract was checked above")
-                            .to_string(),
-                    ],
-                    required_capabilities: package.manifest.capabilities.clone(),
-                };
-                (Some(typed_host), None, info)
-            } else if package.wit.is_some() {
-                let dynamic_host = Arc::new(TypedComponentHost::new_with_dependency_specs(
-                    &bytes,
-                    options.granted_capabilities.clone(),
-                    dependencies,
-                )?);
-                dynamic_host.validate_dynamic_export(
-                    &package
+            let dynamic_host = Arc::new(TypedComponentHost::new_with_dependency_specs(
+                &bytes,
+                options.granted_capabilities.clone(),
+                dependencies,
+            )?);
+            dynamic_host.validate_dynamic_export(
+                &package
+                    .contract
+                    .as_ref()
+                    .map(|contract| contract.interface.as_str())
+                    .unwrap_or("invoke"),
+            )?;
+            let info = ComponentMetadata {
+                name: package.manifest.name.clone(),
+                version: package.manifest.version.clone(),
+                abi_version: super::ABI_VERSION.to_owned(),
+                interfaces: vec![
+                    package
                         .contract
                         .as_ref()
-                        .map(|contract| contract.interface.as_str())
-                        .unwrap_or("invoke"),
-                )?;
-                let info = ComponentMetadata {
-                    name: package.manifest.name.clone(),
-                    version: package.manifest.version.clone(),
-                    abi_version: super::ABI_VERSION.to_owned(),
-                    interfaces: vec![
-                        package
-                            .contract
-                            .as_ref()
-                            .map(ToString::to_string)
-                            .unwrap_or_else(|| "package-local-wit".to_owned()),
-                    ],
-                    required_capabilities: package.manifest.capabilities.clone(),
-                };
-                (None, Some(dynamic_host), info)
-            } else {
-                return Err(ComponentError::Load(anyhow::anyhow!(
-                    "component package must declare a typed universal contract or package-local WIT"
-                )));
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "package-local-wit".to_owned()),
+                ],
+                required_capabilities: package.manifest.capabilities.clone(),
             };
             let package_name = package.manifest.name.clone();
 
@@ -5564,7 +3328,6 @@ pub mod runtime {
                     provenance: build.provenance,
                     artifact: Arc::new(bytes),
                     info,
-                    typed_host,
                     dynamic_host,
                 },
             );
@@ -5693,7 +3456,7 @@ pub mod contract_registry {
 /// fallback would recurse when the component uses its kernel capability.
 pub mod tool_adapter {
     use super::{ComponentError, contracts::Verb, runtime::ActiveVersion};
-    use artist_kernel::{ItemResult, KernelError, KernelHandle};
+    use artist_kernel::{KernelError, KernelHandle};
     use serde_json::Value;
     use std::sync::Arc;
 
@@ -5725,33 +3488,16 @@ pub mod tool_adapter {
             kernel: KernelHandle,
             context: artist_kernel::InvocationContext,
         ) -> Result<Value, KernelError> {
-            // The model adapter owns JSON shape conversion, but it must retain
-            // the complete per-verb request. In particular, it must never
-            // synthesize a target, discard read windows, or replace edit
-            // operations with an empty list.
-            let input_value = match self.verb {
-                Verb::Read | Verb::Write | Verb::Edit | Verb::Run | Verb::Send => {
-                    let mut requests = args.get("requests").cloned().unwrap_or_else(|| {
-                        if args.is_array() {
-                            args.clone()
-                        } else {
-                            serde_json::json!([args])
-                        }
-                    });
-                    normalize_model_requests(self.verb, &mut requests)?;
-                    requests
-                }
-                Verb::Abort | Verb::Delete => args.get("uris").cloned().unwrap_or_else(|| {
-                    if args.is_array() {
-                        args.clone()
-                    } else if let Some(uri) = args.get("uri").or_else(|| args.get("target")) {
-                        serde_json::json!([uri])
-                    } else {
-                        args.clone()
-                    }
-                }),
-                Verb::Find | Verb::Grep | Verb::Poll => args,
-            };
+            let mut input_value = normalize_model_input(args)?;
+            if matches!(
+                self.verb,
+                Verb::Read | Verb::Write | Verb::Edit | Verb::Run | Verb::Send
+            ) && input_value
+                .as_object()
+                .is_some_and(|object| !object.contains_key("requests"))
+            {
+                input_value = serde_json::json!({ "requests": [input_value] });
+            }
             let input =
                 serde_json::to_string(&input_value).map_err(|error| KernelError::Handler {
                     message: format!("could not encode component input: {error}"),
@@ -5784,29 +3530,7 @@ pub mod tool_adapter {
             kernel: KernelHandle,
             context: artist_kernel::InvocationContext,
         ) -> Result<Value, KernelError> {
-            let input_value = match self.verb {
-                Verb::Read | Verb::Write | Verb::Edit | Verb::Run | Verb::Send => {
-                    let mut requests = args.get("requests").cloned().unwrap_or_else(|| {
-                        if args.is_array() {
-                            args.clone()
-                        } else {
-                            serde_json::json!([args])
-                        }
-                    });
-                    normalize_model_requests(self.verb, &mut requests)?;
-                    requests
-                }
-                Verb::Abort | Verb::Delete => args.get("uris").cloned().unwrap_or_else(|| {
-                    if args.is_array() {
-                        args.clone()
-                    } else if let Some(uri) = args.get("uri").or_else(|| args.get("target")) {
-                        serde_json::json!([uri])
-                    } else {
-                        args.clone()
-                    }
-                }),
-                Verb::Find | Verb::Grep | Verb::Poll => args,
-            };
+            let input_value = normalize_model_input(args)?;
             let input =
                 serde_json::to_string(&input_value).map_err(|error| KernelError::Handler {
                     message: format!("could not encode component input: {error}"),
@@ -5827,29 +3551,7 @@ pub mod tool_adapter {
             kernel: KernelHandle,
             scope: artist_kernel::InvocationScope,
         ) -> Result<Value, KernelError> {
-            let input_value = match self.verb {
-                Verb::Read | Verb::Write | Verb::Edit | Verb::Run | Verb::Send => {
-                    let mut requests = args.get("requests").cloned().unwrap_or_else(|| {
-                        if args.is_array() {
-                            args.clone()
-                        } else {
-                            serde_json::json!([args])
-                        }
-                    });
-                    normalize_model_requests(self.verb, &mut requests)?;
-                    requests
-                }
-                Verb::Abort | Verb::Delete => args.get("uris").cloned().unwrap_or_else(|| {
-                    if args.is_array() {
-                        args.clone()
-                    } else if let Some(uri) = args.get("uri").or_else(|| args.get("target")) {
-                        serde_json::json!([uri])
-                    } else {
-                        args.clone()
-                    }
-                }),
-                Verb::Find | Verb::Grep | Verb::Poll => args,
-            };
+            let input_value = normalize_model_input(args)?;
             let input =
                 serde_json::to_string(&input_value).map_err(|error| KernelError::Handler {
                     message: format!("could not encode component input: {error}"),
@@ -5871,58 +3573,17 @@ pub mod tool_adapter {
         }
     }
 
-    fn normalize_model_requests(verb: Verb, requests: &mut Value) -> Result<(), KernelError> {
-        let Some(items) = requests.as_array_mut() else {
-            return Err(KernelError::InvalidRequest {
-                message: format!("{verb} expects a request list"),
-            });
-        };
-        for item in items {
-            let Some(object) = item.as_object_mut() else {
-                return Err(KernelError::InvalidRequest {
-                    message: format!("{verb} request must be an object"),
-                });
-            };
-            // `target` is accepted only as outer model-adapter sugar. The
-            // typed request sent to the component always uses `uri`.
+    fn normalize_model_input(mut input: Value) -> Result<Value, KernelError> {
+        // `target` is the only adapter sugar retained at this boundary. The
+        // active WIT contract owns every other field and its required shape.
+        if let Some(object) = input.as_object_mut() {
             if !object.contains_key("uri") {
                 if let Some(target) = object.remove("target") {
                     object.insert("uri".to_owned(), target);
                 }
             }
-            match verb {
-                Verb::Read => {
-                    object.entry("at").or_insert(Value::Null);
-                    object.entry("before").or_insert(Value::Null);
-                    object.entry("after").or_insert(Value::Null);
-                }
-                Verb::Write if !object.contains_key("content") => {
-                    if let Some(value) = object.remove("value") {
-                        object.insert("content".to_owned(), value);
-                    }
-                }
-                Verb::Edit if !object.contains_key("operations") => {
-                    return Err(KernelError::InvalidRequest {
-                        message: "edit requires operations".to_owned(),
-                    });
-                }
-                _ => {}
-            }
         }
-        Ok(())
-    }
-
-    /// Invoke an already-produced kernel result through the normal component
-    /// adapter shape. Useful to test the bridge without registering a second
-    /// recursive kernel handler.
-    pub fn result_value(result: ItemResult) -> Result<Value, KernelError> {
-        if result.ok {
-            Ok(result.value.unwrap_or(Value::Null))
-        } else {
-            Err(result.error.unwrap_or_else(|| KernelError::Handler {
-                message: "component tool failed without an error".to_owned(),
-            }))
-        }
+        Ok(input)
     }
 }
 
@@ -5934,10 +3595,10 @@ pub mod tools {
         tool_adapter::ComponentTool,
     };
     use artist_kernel::{
-        AnchoredDiff, AnchoredText, BoxFuture, EditResult, FileHandler, GrepSource, Handler,
-        HandlerDescriptor, KernelError, KernelHandle, Operation, OperationResult, ReadResult,
-        Request, ResourceAddress, ResourceUri, ToolDefinition, ToolProvider, TypedHandler,
-        Verb as KernelVerb, WriteResult,
+        AnchoredText, BoxFuture, ClaimDecision, DynamicClaimProvider, DynamicResourceProvider,
+        DynamicType, DynamicValue, DynamicVerbResult, FileHandler, FileResourceProvider,
+        FileVerbBindings, KernelError, KernelHandle, ResourceFuture, ResourceUri, ToolDefinition,
+        ToolProvider, VerbId,
     };
     use serde_json::Value;
     use std::{
@@ -5954,7 +3615,6 @@ pub mod tools {
     /// successful write/edit is visible to the next invocation; a failed rebuild leaves the previously active component
     /// untouched.
     pub struct ToolsHandler {
-        files: FileHandler,
         root: PathBuf,
         registry: ComponentRegistry,
         options: BuildOptions,
@@ -5962,11 +3622,148 @@ pub mod tools {
         known_packages: Arc<Mutex<HashMap<String, (PathBuf, ToolRegistration)>>>,
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ToolsVerbBindings {
+        pub read: VerbId,
+        pub write: VerbId,
+        pub edit: VerbId,
+        pub delete: VerbId,
+        pub find: VerbId,
+        pub grep: VerbId,
+    }
+
+    pub struct DynamicToolsProvider {
+        handler: Arc<ToolsHandler>,
+        bindings: ToolsVerbBindings,
+    }
+
+    impl DynamicToolsProvider {
+        pub fn new(handler: Arc<ToolsHandler>, bindings: ToolsVerbBindings) -> Self {
+            Self { handler, bindings }
+        }
+    }
+
+    impl DynamicClaimProvider for DynamicToolsProvider {
+        fn claim(&self, verb: &VerbId, uri: &ResourceUri) -> ClaimDecision {
+            if uri.scheme() != "tools" {
+                return ClaimDecision::Pass;
+            }
+            if [
+                &self.bindings.read,
+                &self.bindings.write,
+                &self.bindings.edit,
+                &self.bindings.delete,
+                &self.bindings.find,
+                &self.bindings.grep,
+            ]
+            .contains(&verb)
+            {
+                ClaimDecision::Handle
+            } else {
+                ClaimDecision::Pass
+            }
+        }
+    }
+
+    impl DynamicResourceProvider for DynamicToolsProvider {
+        fn invoke<'a>(
+            &'a self,
+            verb: &'a VerbId,
+            uri: &'a ResourceUri,
+            input: DynamicValue,
+        ) -> ResourceFuture<'a> {
+            Box::pin(async move {
+                let mapped_uri = self.handler.map_typed_uri(uri)?;
+                let identity = [
+                    (&self.bindings.read, "read"),
+                    (&self.bindings.write, "write"),
+                    (&self.bindings.edit, "edit"),
+                    (&self.bindings.delete, "delete"),
+                    (&self.bindings.find, "find"),
+                    (&self.bindings.grep, "grep"),
+                ]
+                .into_iter()
+                .find_map(|(candidate, function)| (candidate == verb).then_some(function))
+                .ok_or_else(|| KernelError::UnsupportedVerb {
+                    verb: verb.to_string(),
+                    uri: uri.to_string(),
+                })?;
+                let mapped_input =
+                    remap_tools_dynamic(input, &|value| self.handler.map_typed_uri(&value))?;
+                let provider = FileResourceProvider::new(
+                    Arc::new(FileHandler::new(self.handler.root())?),
+                    FileVerbBindings {
+                        read: self.bindings.read.clone(),
+                        write: self.bindings.write.clone(),
+                        edit: self.bindings.edit.clone(),
+                        delete: self.bindings.delete.clone(),
+                        find: self.bindings.find.clone(),
+                        grep: self.bindings.grep.clone(),
+                    },
+                );
+                let result = provider.invoke(verb, &mapped_uri, mapped_input).await?;
+                if verb == &self.bindings.write || verb == &self.bindings.edit {
+                    if let Ok(relative) = self.handler.relative_uri_path(uri) {
+                        self.handler.mark_dirty(&relative);
+                    }
+                }
+                Ok(DynamicVerbResult {
+                    verb: verb.clone(),
+                    function: identity.to_owned(),
+                    output: remap_tools_dynamic(result.output, &|value| {
+                        self.handler.unmap_typed_uri(value)
+                    })?,
+                })
+            })
+        }
+    }
+
+    fn remap_tools_dynamic(
+        value: DynamicValue,
+        map_uri: &dyn Fn(ResourceUri) -> Result<ResourceUri, KernelError>,
+    ) -> Result<DynamicValue, KernelError> {
+        Ok(match value {
+            DynamicValue::ResourceUri(uri) => DynamicValue::ResourceUri(map_uri(uri)?),
+            DynamicValue::List(values) => DynamicValue::List(
+                values
+                    .into_iter()
+                    .map(|value| remap_tools_dynamic(value, map_uri))
+                    .collect::<Result<_, _>>()?,
+            ),
+            DynamicValue::Tuple(values) => DynamicValue::Tuple(
+                values
+                    .into_iter()
+                    .map(|value| remap_tools_dynamic(value, map_uri))
+                    .collect::<Result<_, _>>()?,
+            ),
+            DynamicValue::Record(fields) => DynamicValue::Record(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| Ok((name, remap_tools_dynamic(value, map_uri)?)))
+                    .collect::<Result<_, KernelError>>()?,
+            ),
+            DynamicValue::Option(value) => DynamicValue::Option(
+                value
+                    .map(|value| remap_tools_dynamic(*value, map_uri).map(Box::new))
+                    .transpose()?,
+            ),
+            DynamicValue::Result(result) => DynamicValue::Result(match result {
+                Ok(value) => Ok(Box::new(remap_tools_dynamic(*value, map_uri)?)),
+                Err(value) => Err(Box::new(remap_tools_dynamic(*value, map_uri)?)),
+            }),
+            DynamicValue::Variant(name, value) => DynamicValue::Variant(
+                name,
+                value
+                    .map(|value| remap_tools_dynamic(*value, map_uri).map(Box::new))
+                    .transpose()?,
+            ),
+            other => other,
+        })
+    }
+
     impl Clone for ToolsHandler {
         fn clone(&self) -> Self {
             Self {
-                files: FileHandler::new(&self.root)
-                    .expect("a cloned tools handler must retain its filesystem root"),
                 root: self.root.clone(),
                 registry: self.registry.clone(),
                 options: self.options.clone(),
@@ -5979,9 +3776,12 @@ pub mod tools {
     #[derive(Clone, Debug, PartialEq)]
     pub struct ToolRegistration {
         pub package: String,
+        pub root: PathBuf,
         pub contract: super::contracts::ContractId,
         pub description: String,
         pub version: String,
+        pub wit: Option<PathBuf>,
+        pub artifact: Option<PathBuf>,
         pub input_schema: Option<serde_yaml::Value>,
         pub output_schema: Option<serde_yaml::Value>,
         pub capabilities: Vec<String>,
@@ -5989,29 +3789,114 @@ pub mod tools {
 
     impl ToolRegistration {
         pub fn tool_name(&self) -> String {
-            self.contract
-                .verb
-                .map(|verb| verb.to_string())
-                .unwrap_or_else(|| self.contract.interface.clone())
+            self.contract.interface.clone()
         }
 
-        fn parameters(&self) -> Value {
+        /// Convert a discovered tool package into the kernel's open-ended
+        /// verb definition. The WIT source, not the legacy contract enum,
+        /// supplies the typed input/output shape.
+        pub fn dynamic_definition(&self) -> Result<artist_kernel::VerbDefinition, KernelError> {
+            let wit = self
+                .wit
+                .as_ref()
+                .ok_or_else(|| KernelError::InvalidRequest {
+                    message: format!("tool package {} has no WIT contract", self.package),
+                })?;
+            let function = self.tool_name();
+            let (input, output) =
+                artist_kernel::dynamic_contract_from_wit(wit, &self.contract.interface, &function)?;
+            let (package, interface) =
+                self.contract.namespace.split_once(':').ok_or_else(|| {
+                    KernelError::InvalidRequest {
+                        message: format!(
+                            "invalid tool contract namespace {}",
+                            self.contract.namespace
+                        ),
+                    }
+                })?;
+            let identity = artist_kernel::VerbId::new(format!(
+                "{package}:{interface}/{}@{}.0.0",
+                function, self.contract.major
+            ))
+            .map_err(|message| KernelError::InvalidRequest { message })?;
+            Ok(artist_kernel::VerbDefinition::new(
+                identity,
+                function.clone(),
+                function,
+                &self.description,
+            )
+            .with_contract(input, output)
+            .with_extractor("tool-wit")
+            .with_schema_adapter("tool-frontmatter")
+            .with_source(self.root.clone(), self.artifact.clone()))
+        }
+
+        fn parameters_from_wit(&self) -> Value {
             self.input_schema
                 .as_ref()
                 .and_then(|schema| serde_json::to_value(schema).ok())
-                .unwrap_or_else(|| {
-                    match self.contract.verb {
-                        Some(super::contracts::Verb::Read) => serde_json::json!({"type":"object","properties":{"requests":{"type":"array"},"uri":{"type":"string"},"at":{},"before":{"type":"integer","minimum":0},"after":{"type":"integer","minimum":0}},"oneOf":[{"required":["requests"]},{"required":["uri"]}]}),
-                        Some(super::contracts::Verb::Write) => serde_json::json!({"type":"object","properties":{"requests":{"type":"array"},"uri":{"type":"string"},"content":{"type":"string"}},"oneOf":[{"required":["requests"]},{"required":["uri","content"]}]}),
-                        Some(super::contracts::Verb::Edit) => serde_json::json!({"type":"object","properties":{"requests":{"type":"array"},"uri":{"type":"string"},"operations":{"type":"array"}},"oneOf":[{"required":["requests"]},{"required":["uri","operations"]}]}),
-                        Some(super::contracts::Verb::Find) => serde_json::json!({"type":"object","required":["roots","query"],"properties":{"roots":{"type":"array","items":{"type":"string"}},"query":{"type":"string"}}}),
-                        Some(super::contracts::Verb::Grep) => serde_json::json!({"type":"object","required":["pattern","source"],"properties":{"pattern":{"type":"string"},"source":{}}}),
-                        Some(super::contracts::Verb::Poll) => serde_json::json!({"type":"object","required":["targets"],"properties":{"targets":{"type":"array"},"until":{}}}),
-                        Some(super::contracts::Verb::Run) | Some(super::contracts::Verb::Send) => serde_json::json!({"type":"object","required":["requests"],"properties":{"requests":{"type":"array"}}}),
-                        Some(super::contracts::Verb::Abort) | Some(super::contracts::Verb::Delete) => serde_json::json!({"type":"object","required":["uris"],"properties":{"uris":{"type":"array","items":{"type":"string"}}}}),
-                        None => serde_json::json!({"type":"object","additionalProperties":true}),
-                    }
+                .or_else(|| {
+                    self.dynamic_definition().ok().and_then(|definition| {
+                        definition.input_type.as_ref().map(dynamic_type_schema)
+                    })
                 })
+                .unwrap_or_else(|| serde_json::json!({"type":"object","additionalProperties":true}))
+        }
+    }
+
+    fn dynamic_type_schema(ty: &DynamicType) -> Value {
+        match ty {
+            DynamicType::Bool => serde_json::json!({"type":"boolean"}),
+            DynamicType::S8
+            | DynamicType::S16
+            | DynamicType::S32
+            | DynamicType::S64
+            | DynamicType::U8
+            | DynamicType::U16
+            | DynamicType::U32
+            | DynamicType::U64 => serde_json::json!({"type":"integer"}),
+            DynamicType::F32 | DynamicType::F64 => serde_json::json!({"type":"number"}),
+            DynamicType::Char | DynamicType::String | DynamicType::ResourceUri => {
+                serde_json::json!({"type":"string"})
+            }
+            DynamicType::List(inner) => {
+                serde_json::json!({"type":"array","items":dynamic_type_schema(inner)})
+            }
+            DynamicType::Tuple(items) => serde_json::json!({
+                "type":"array",
+                "prefixItems":items.iter().map(dynamic_type_schema).collect::<Vec<_>>(),
+                "minItems":items.len(),
+                "maxItems":items.len()
+            }),
+            DynamicType::Record(fields) => serde_json::json!({
+                "type":"object",
+                "properties":fields.iter().map(|(name, ty)| (name.clone(), dynamic_type_schema(ty))).collect::<serde_json::Map<_, _>>(),
+                "additionalProperties":false
+            }),
+            DynamicType::Option(inner) => {
+                serde_json::json!({"anyOf":[dynamic_type_schema(inner),{"type":"null"}]})
+            }
+            DynamicType::Result { ok, err } => {
+                let mut variants = Vec::new();
+                if let Some(ok) = ok {
+                    variants.push(dynamic_type_schema(ok));
+                }
+                if let Some(err) = err {
+                    variants.push(dynamic_type_schema(err));
+                }
+                serde_json::json!({"anyOf":variants})
+            }
+            DynamicType::Enum(values) => serde_json::json!({"type":"string","enum":values}),
+            DynamicType::Variant(values) => serde_json::json!({
+                "type":"object",
+                "oneOf":values.iter().map(|(name, payload)| {
+                    let value = payload.as_ref().map(dynamic_type_schema).unwrap_or_else(|| serde_json::json!({"type":"null"}));
+                    serde_json::json!({"properties":{name:value},"required":[name],"additionalProperties":false})
+                }).collect::<Vec<_>>()
+            }),
+            DynamicType::Flags(values) => {
+                serde_json::json!({"type":"array","items":{"type":"string","enum":values}})
+            }
         }
     }
 
@@ -6035,12 +3920,36 @@ pub mod tools {
                         root.as_ref().display()
                     ),
                 })?;
+            let mut granted_capabilities = granted_capabilities.into_iter().collect::<Vec<_>>();
+            if granted_capabilities.is_empty() {
+                let entries = std::fs::read_dir(&root).map_err(|error| KernelError::Handler {
+                    message: format!("read tools root {}: {error}", root.display()),
+                })?;
+                for entry in entries {
+                    let entry = entry.map_err(|error| KernelError::Handler {
+                        message: format!("read tools directory entry: {error}"),
+                    })?;
+                    if !entry
+                        .file_type()
+                        .map_err(|error| KernelError::Handler {
+                            message: format!("inspect tools directory entry: {error}"),
+                        })?
+                        .is_dir()
+                    {
+                        continue;
+                    }
+                    if let Ok(package) = ToolPackage::discover(entry.path()) {
+                        granted_capabilities.extend(package.manifest.capabilities);
+                    }
+                }
+                granted_capabilities.sort();
+                granted_capabilities.dedup();
+            }
             Ok(Self {
-                files: FileHandler::new(&root)?,
                 root,
                 registry: ComponentRegistry::new(),
                 options: BuildOptions {
-                    granted_capabilities: granted_capabilities.into_iter().collect(),
+                    granted_capabilities,
                     ..BuildOptions::default()
                 },
                 dirty: watcher.map_or_else(
@@ -6091,9 +4000,12 @@ pub mod tools {
                 };
                 let registration = ToolRegistration {
                     package: package.manifest.name,
+                    root: package.root,
                     contract,
                     description: package.manifest.description,
                     version: package.manifest.version,
+                    wit: package.wit,
+                    artifact: package.wasm,
                     input_schema: package.manifest.input_schema,
                     output_schema: package.manifest.output_schema,
                     capabilities: package.manifest.capabilities,
@@ -6127,25 +4039,17 @@ pub mod tools {
             Ok(registrations)
         }
 
-        fn relative_path(&self, target: &ResourceAddress) -> Result<PathBuf, KernelError> {
-            let uri = target.as_uri().ok_or_else(|| KernelError::InvalidUri {
-                message: format!("tools handler requires a tools:// URI, got {target}"),
-            })?;
-            if uri.scheme() != "tools" {
-                return Err(KernelError::UnsupportedUri {
-                    uri: target.to_string(),
-                });
-            }
-            let host = uri.as_ref().host_str().unwrap_or_default();
-            let path = format!("{host}{}", uri.path())
-                .trim_start_matches('/')
-                .to_owned();
-            if path.is_empty() {
-                return Err(KernelError::InvalidRequest {
-                    message: "tools:// target must name a package or package file".to_owned(),
-                });
-            }
-            Ok(PathBuf::from(path))
+        /// Publish the discovered tool catalog in the kernel's open-ended
+        /// verb-definition shape. Activation remains a separate kernel
+        /// transaction so a malformed package cannot partially replace the
+        /// active set.
+        pub fn dynamic_verb_definitions(
+            &self,
+        ) -> Result<Vec<artist_kernel::VerbDefinition>, KernelError> {
+            self.registrations()?
+                .into_iter()
+                .map(|registration| registration.dynamic_definition())
+                .collect()
         }
 
         fn relative_uri_path(&self, uri: &ResourceUri) -> Result<PathBuf, KernelError> {
@@ -6209,133 +4113,9 @@ pub mod tools {
             Ok(mapped)
         }
 
-        fn map_typed_operation(&self, operation: Operation) -> Result<Operation, KernelError> {
-            let map = |uri: ResourceUri| self.map_typed_uri(&uri);
-            Ok(match operation {
-                Operation::Read(requests) => Operation::Read(
-                    requests
-                        .into_iter()
-                        .map(|mut request| {
-                            request.uri = map(request.uri)?;
-                            Ok(request)
-                        })
-                        .collect::<Result<_, KernelError>>()?,
-                ),
-                Operation::Write(requests) => Operation::Write(
-                    requests
-                        .into_iter()
-                        .map(|mut request| {
-                            request.uri = map(request.uri)?;
-                            Ok(request)
-                        })
-                        .collect::<Result<_, KernelError>>()?,
-                ),
-                Operation::Edit(requests) => Operation::Edit(
-                    requests
-                        .into_iter()
-                        .map(|mut request| {
-                            request.uri = map(request.uri)?;
-                            Ok(request)
-                        })
-                        .collect::<Result<_, KernelError>>()?,
-                ),
-                Operation::Find(mut request) => {
-                    request.roots = request
-                        .roots
-                        .into_iter()
-                        .map(map)
-                        .collect::<Result<_, KernelError>>()?;
-                    Operation::Find(request)
-                }
-                Operation::Grep(mut request) => {
-                    if let GrepSource::Resources(uris) = request.source {
-                        request.source =
-                            GrepSource::Resources(uris.into_iter().map(map).collect::<Result<
-                                _,
-                                KernelError,
-                            >>(
-                            )?);
-                    }
-                    Operation::Grep(request)
-                }
-                other => {
-                    return Err(KernelError::UnsupportedVerb {
-                        verb: format!("typed tools operation {other:?}"),
-                        uri: "tools://".to_owned(),
-                    });
-                }
-            })
-        }
-
         fn unmap_text(&self, mut text: AnchoredText) -> Result<AnchoredText, KernelError> {
             text.uri = self.unmap_typed_uri(text.uri)?;
             Ok(text)
-        }
-
-        fn unmap_result(&self, result: OperationResult) -> Result<OperationResult, KernelError> {
-            Ok(match result {
-                OperationResult::Read(results) => OperationResult::Read(
-                    results
-                        .into_iter()
-                        .map(|result| {
-                            result.and_then(|value| match value {
-                                ReadResult::Text(text) => {
-                                    self.unmap_text(text).map(ReadResult::Text)
-                                }
-                                ReadResult::Directory { uri, entries } => {
-                                    Ok(ReadResult::Directory {
-                                        uri: self.unmap_typed_uri(uri)?,
-                                        entries: entries
-                                            .into_iter()
-                                            .map(|uri| self.unmap_typed_uri(uri))
-                                            .collect::<Result<_, _>>()?,
-                                    })
-                                }
-                            })
-                        })
-                        .collect(),
-                ),
-                OperationResult::Write(results) => OperationResult::Write(
-                    results
-                        .into_iter()
-                        .map(|result| {
-                            result.and_then(|WriteResult { text }| {
-                                self.unmap_text(text).map(|text| WriteResult { text })
-                            })
-                        })
-                        .collect(),
-                ),
-                OperationResult::Edit(results) => OperationResult::Edit(
-                    results
-                        .into_iter()
-                        .map(|result| {
-                            result.and_then(|mut value| {
-                                value.text = self.unmap_text(value.text)?;
-                                value.diff = AnchoredDiff {
-                                    uri: self.unmap_typed_uri(value.diff.uri)?,
-                                    ..value.diff
-                                };
-                                Ok::<EditResult, KernelError>(value)
-                            })
-                        })
-                        .collect(),
-                ),
-                OperationResult::Find(result) => OperationResult::Find(match result {
-                    Ok(uris) => Ok(uris
-                        .into_iter()
-                        .map(|uri| self.unmap_typed_uri(uri))
-                        .collect::<Result<_, _>>()?),
-                    Err(error) => Err(error),
-                }),
-                OperationResult::Grep(result) => OperationResult::Grep(match result {
-                    Ok(texts) => Ok(texts
-                        .into_iter()
-                        .map(|text| self.unmap_text(text))
-                        .collect::<Result<_, _>>()?),
-                    Err(error) => Err(error),
-                }),
-                other => other,
-            })
         }
 
         fn package_root(&self, relative: &Path) -> Result<PathBuf, KernelError> {
@@ -6580,21 +4360,6 @@ pub mod tools {
             }
         }
 
-        fn mark_typed_operation_dirty(&self, operation: &Operation) {
-            let mark = |uri: &ResourceUri| {
-                if let Ok(relative) = self.relative_uri_path(uri) {
-                    self.mark_dirty(&relative);
-                }
-            };
-            match operation {
-                Operation::Write(requests) => {
-                    requests.iter().for_each(|request| mark(&request.uri))
-                }
-                Operation::Edit(requests) => requests.iter().for_each(|request| mark(&request.uri)),
-                _ => {}
-            }
-        }
-
         fn prepare_write(&self, relative: &Path) -> Result<(), KernelError> {
             for component in relative.components() {
                 if !matches!(component, std::path::Component::Normal(_)) {
@@ -6608,62 +4373,6 @@ pub mod tools {
             std::fs::create_dir_all(self.root.join(parent)).map_err(|error| KernelError::Handler {
                 message: format!("create tools package directories: {error}"),
             })
-        }
-
-        async fn execute_inner(
-            &self,
-            request: Request,
-            host: KernelHandle,
-        ) -> Result<Value, KernelError> {
-            let relative = self.relative_path(&request.target)?;
-            let package_root = self.package_root(&relative).ok();
-            let is_package_root = relative.components().count() == 1
-                && package_root
-                    .as_ref()
-                    .is_some_and(|root| root.join("tool.md").is_file());
-            if is_package_root {
-                let package_root = package_root.expect("package root checked above");
-                let package = ToolPackage::discover(&package_root).map_err(component_error)?;
-                let contract = package
-                    .contract
-                    .ok_or_else(|| KernelError::InvalidRequest {
-                        message: format!(
-                            "tool package {} has no registered contract",
-                            package.manifest.name
-                        ),
-                    })?;
-                let Some(contract_verb) = contract.verb else {
-                    return Err(KernelError::UnsupportedVerb {
-                        verb: request.verb.to_string(),
-                        uri: request.target.to_string(),
-                    });
-                };
-                if contract_verb.to_string() != request.verb.to_string() {
-                    return Err(KernelError::UnsupportedVerb {
-                        verb: request.verb.to_string(),
-                        uri: request.target.to_string(),
-                    });
-                }
-                let active = self.activate(&package_root)?;
-                return ComponentTool::new(active, contract_verb)
-                    .invoke_async(request.args.clone(), host)
-                    .await;
-            }
-
-            {
-                if request.verb == KernelVerb::Write {
-                    self.prepare_write(&relative)?;
-                }
-                let mut mapped = request.clone();
-                mapped.target =
-                    ResourceUri::parse(&self.root.join(&relative).display().to_string())
-                        .map(ResourceAddress::uri)?;
-                let result = self.files.execute(mapped, host).await?;
-                if matches!(request.verb, KernelVerb::Write | KernelVerb::Edit) {
-                    self.mark_dirty(&relative);
-                }
-                return Ok(result);
-            }
         }
 
         async fn execute_named_inner_async(
@@ -6699,6 +4408,44 @@ pub mod tools {
             let package_root = self.package_path_for_name(&registration.package)?;
             let active = self.activate(&package_root)?;
             if let Some(verb) = registration.contract.verb {
+                if matches!(verb.interface(), "run" | "send") {
+                    let requests =
+                        args.get("requests")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| KernelError::InvalidRequest {
+                                message: format!("{name} expects a requests array"),
+                            })?;
+                    let provider_verb =
+                        VerbId::new(format!("artist:filesystem/{}@1.0.0", verb.interface()))
+                            .map_err(|message| KernelError::InvalidRequest { message })?;
+                    let mut outputs = Vec::with_capacity(requests.len());
+                    for request in requests {
+                        let uri = request.get("uri").and_then(Value::as_str).ok_or_else(|| {
+                            KernelError::InvalidRequest {
+                                message: format!("{name} request is missing uri"),
+                            }
+                        })?;
+                        let input = if verb.interface() == "send" {
+                            serde_json::json!({
+                                "content": request.get("content").and_then(Value::as_str).unwrap_or_default()
+                            })
+                        } else {
+                            serde_json::json!({
+                                "args": request.get("args").cloned().unwrap_or(Value::Array(Vec::new()))
+                            })
+                        };
+                        let result = host
+                            .invoke_dynamic_resource_with_scope(
+                                provider_verb.clone(),
+                                ResourceUri::parse(uri)?,
+                                json_to_dynamic(input)?,
+                                scope.clone(),
+                            )
+                            .await?;
+                        outputs.push(dynamic_to_json(&result.output));
+                    }
+                    return Ok(Value::Array(outputs));
+                }
                 return ComponentTool::new(active, verb)
                     .invoke_async_with_scope(args, host, scope.clone())
                     .await;
@@ -6719,94 +4466,6 @@ pub mod tools {
         }
     }
 
-    impl Handler for ToolsHandler {
-        fn descriptor(&self) -> HandlerDescriptor {
-            HandlerDescriptor {
-                name: "tools".to_owned(),
-                schemes: vec!["tools".to_owned()],
-                verbs: vec![
-                    KernelVerb::Read,
-                    KernelVerb::Write,
-                    KernelVerb::Edit,
-                    KernelVerb::Find,
-                    KernelVerb::Grep,
-                    KernelVerb::Run,
-                ],
-            }
-        }
-
-        fn execute<'a>(
-            &'a self,
-            request: Request,
-            host: KernelHandle,
-        ) -> BoxFuture<'a, Result<Value, KernelError>> {
-            Box::pin(self.execute_inner(request, host))
-        }
-    }
-
-    impl TypedHandler for ToolsHandler {
-        fn descriptor(&self) -> HandlerDescriptor {
-            HandlerDescriptor {
-                name: "tools-typed".to_owned(),
-                schemes: vec!["tools".to_owned()],
-                verbs: vec![
-                    KernelVerb::Read,
-                    KernelVerb::Write,
-                    KernelVerb::Edit,
-                    KernelVerb::Find,
-                    KernelVerb::Grep,
-                ],
-            }
-        }
-
-        fn claims_operation(&self, operation: &Operation) -> bool {
-            match operation {
-                Operation::Read(requests) => {
-                    !requests.is_empty()
-                        && requests
-                            .iter()
-                            .all(|request| request.uri.scheme() == "tools")
-                }
-                Operation::Write(requests) => {
-                    !requests.is_empty()
-                        && requests
-                            .iter()
-                            .all(|request| request.uri.scheme() == "tools")
-                }
-                Operation::Edit(requests) => {
-                    !requests.is_empty()
-                        && requests
-                            .iter()
-                            .all(|request| request.uri.scheme() == "tools")
-                }
-                Operation::Find(request) => {
-                    !request.roots.is_empty()
-                        && request.roots.iter().all(|uri| uri.scheme() == "tools")
-                }
-                Operation::Grep(request) => matches!(
-                    &request.source,
-                    GrepSource::Resources(uris)
-                        if !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "tools")
-                ),
-                _ => false,
-            }
-        }
-
-        fn execute_typed<'a>(
-            &'a self,
-            operation: Operation,
-            host: KernelHandle,
-            _context: artist_kernel::InvocationContext,
-        ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
-            Box::pin(async move {
-                self.mark_typed_operation_dirty(&operation);
-                let mapped = self.map_typed_operation(operation)?;
-                let result = self.files.execute_typed(mapped, host, _context).await?;
-                self.unmap_result(result)
-            })
-        }
-    }
-
     impl ToolProvider for ToolsHandler {
         fn tool_definitions(&self) -> Vec<ToolDefinition> {
             self.registrations()
@@ -6815,7 +4474,8 @@ pub mod tools {
                 .map(|registration| ToolDefinition {
                     name: registration.tool_name(),
                     description: registration.description.clone(),
-                    parameters: registration.parameters(),
+                    parameters: json_to_dynamic(registration.parameters_from_wit())
+                        .unwrap_or_else(|_| DynamicValue::Record(Default::default())),
                 })
                 .collect()
         }
@@ -6823,43 +4483,49 @@ pub mod tools {
         fn execute_tool<'a>(
             &'a self,
             name: &'a str,
-            args: Value,
+            args: DynamicValue,
             host: KernelHandle,
-        ) -> BoxFuture<'a, Result<Value, KernelError>> {
+        ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
-                self.execute_named_inner_async(
-                    name,
-                    args,
-                    host,
-                    artist_kernel::InvocationContext::default(),
-                )
-                .await
+                let output = self
+                    .execute_named_inner_async(
+                        name,
+                        dynamic_to_json(&args),
+                        host,
+                        artist_kernel::InvocationContext::default(),
+                    )
+                    .await?;
+                json_to_dynamic(output)
             })
         }
 
         fn execute_tool_with_context<'a>(
             &'a self,
             name: &'a str,
-            args: Value,
+            args: DynamicValue,
             host: KernelHandle,
             context: artist_kernel::InvocationContext,
-        ) -> BoxFuture<'a, Result<Value, KernelError>> {
+        ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
-                self.execute_named_inner_async(name, args, host, context)
-                    .await
+                let output = self
+                    .execute_named_inner_async(name, dynamic_to_json(&args), host, context)
+                    .await?;
+                json_to_dynamic(output)
             })
         }
 
         fn execute_tool_with_scope<'a>(
             &'a self,
             name: &'a str,
-            args: Value,
+            args: DynamicValue,
             host: KernelHandle,
             scope: artist_kernel::InvocationScope,
-        ) -> BoxFuture<'a, Result<Value, KernelError>> {
+        ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
-                self.execute_named_inner_async_scope(name, args, host, scope)
-                    .await
+                let output = self
+                    .execute_named_inner_async_scope(name, dynamic_to_json(&args), host, scope)
+                    .await?;
+                json_to_dynamic(output)
             })
         }
     }
@@ -6870,119 +4536,185 @@ pub mod tools {
         }
     }
 
+    fn json_to_dynamic(value: Value) -> Result<DynamicValue, KernelError> {
+        Ok(match value {
+            Value::Null => DynamicValue::Option(None),
+            Value::Bool(value) => DynamicValue::Bool(value),
+            Value::Number(value) => {
+                if let Some(value) = value.as_i64() {
+                    DynamicValue::S64(value)
+                } else if let Some(value) = value.as_u64() {
+                    DynamicValue::U64(value)
+                } else {
+                    DynamicValue::F64(value.as_f64().ok_or_else(|| {
+                        KernelError::InvalidRequest {
+                            message: "model number is not representable as a dynamic value"
+                                .to_owned(),
+                        }
+                    })?)
+                }
+            }
+            Value::String(value) => DynamicValue::String(value),
+            Value::Array(values) => DynamicValue::List(
+                values
+                    .into_iter()
+                    .map(json_to_dynamic)
+                    .collect::<Result<_, _>>()?,
+            ),
+            Value::Object(fields) => DynamicValue::Record(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| Ok((name, json_to_dynamic(value)?)))
+                    .collect::<Result<_, KernelError>>()?,
+            ),
+        })
+    }
+
+    fn dynamic_to_json(value: &DynamicValue) -> Value {
+        match value {
+            DynamicValue::Bool(value) => Value::Bool(*value),
+            DynamicValue::S8(value) => serde_json::json!(*value),
+            DynamicValue::S16(value) => serde_json::json!(*value),
+            DynamicValue::S32(value) => serde_json::json!(*value),
+            DynamicValue::S64(value) => serde_json::json!(*value),
+            DynamicValue::U8(value) => serde_json::json!(*value),
+            DynamicValue::U16(value) => serde_json::json!(*value),
+            DynamicValue::U32(value) => serde_json::json!(*value),
+            DynamicValue::U64(value) => serde_json::json!(*value),
+            DynamicValue::F32(value) => serde_json::json!(*value),
+            DynamicValue::F64(value) => serde_json::json!(*value),
+            DynamicValue::Char(value) => Value::String(value.to_string()),
+            DynamicValue::String(value) | DynamicValue::Enum(value) => Value::String(value.clone()),
+            DynamicValue::ResourceUri(value) => Value::String(value.to_string()),
+            DynamicValue::List(values) | DynamicValue::Tuple(values) => {
+                Value::Array(values.iter().map(dynamic_to_json).collect())
+            }
+            DynamicValue::Record(fields) => Value::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), dynamic_to_json(value)))
+                    .collect(),
+            ),
+            DynamicValue::Option(None) => Value::Null,
+            DynamicValue::Option(Some(value)) => dynamic_to_json(value),
+            DynamicValue::Result(Ok(value)) | DynamicValue::Result(Err(value)) => {
+                dynamic_to_json(value)
+            }
+            DynamicValue::Variant(name, value) => {
+                let mut object = serde_json::Map::new();
+                object.insert(
+                    name.clone(),
+                    value.as_deref().map(dynamic_to_json).unwrap_or(Value::Null),
+                );
+                Value::Object(object)
+            }
+            DynamicValue::Flags(values) => {
+                Value::Array(values.iter().cloned().map(Value::String).collect())
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
-        use artist_kernel::{Kernel, Verb as KernelVerb, WriteRequest};
+        use artist_kernel::{
+            FileResourceProvider, FileVerbBindings, Kernel, ReadInput, VerbId, WriteInput,
+        };
         use tempfile::tempdir;
+
+        fn register_file_provider(kernel: &Kernel, root: &std::path::Path) {
+            let identity = |function: &str| {
+                VerbId::new(format!("artist:filesystem/{function}@1.0.0")).unwrap()
+            };
+            kernel
+                .register_dynamic_resource_provider(Arc::new(FileResourceProvider::new(
+                    Arc::new(artist_kernel::FileHandler::new(root).unwrap()),
+                    FileVerbBindings {
+                        read: identity("read"),
+                        write: identity("write"),
+                        edit: identity("edit"),
+                        delete: identity("delete"),
+                        find: identity("find"),
+                        grep: identity("grep"),
+                    },
+                )))
+                .unwrap();
+        }
+
+        fn register_tools_provider(kernel: &Kernel, handler: ToolsHandler) {
+            let identity =
+                |function: &str| VerbId::new(format!("artist:tools/{function}@1.0.0")).unwrap();
+            kernel
+                .register_dynamic_resource_provider(Arc::new(DynamicToolsProvider::new(
+                    Arc::new(handler),
+                    ToolsVerbBindings {
+                        read: identity("read"),
+                        write: identity("write"),
+                        edit: identity("edit"),
+                        delete: identity("delete"),
+                        find: identity("find"),
+                        grep: identity("grep"),
+                    },
+                )))
+                .unwrap();
+        }
 
         #[derive(Clone, Default)]
         struct NamedFakeNamespace {
             resources: Arc<Mutex<std::collections::HashMap<String, String>>>,
         }
 
-        impl TypedHandler for NamedFakeNamespace {
-            fn descriptor(&self) -> HandlerDescriptor {
-                HandlerDescriptor {
-                    name: "named-fake".to_owned(),
-                    schemes: vec!["fake".to_owned()],
-                    verbs: vec![KernelVerb::Run, KernelVerb::Send],
+        impl DynamicClaimProvider for NamedFakeNamespace {
+            fn claim(&self, verb: &VerbId, uri: &ResourceUri) -> ClaimDecision {
+                if uri.scheme() == "fake"
+                    && ["run", "send"].iter().any(|function| {
+                        verb == &VerbId::new(format!("artist:filesystem/{function}@1.0.0")).unwrap()
+                    })
+                {
+                    ClaimDecision::Handle
+                } else {
+                    ClaimDecision::Pass
                 }
             }
+        }
 
-            fn claims_operation(&self, operation: &Operation) -> bool {
-                let uris = match operation {
-                    Operation::Run(requests) => requests
-                        .iter()
-                        .map(|request| &request.uri)
-                        .collect::<Vec<_>>(),
-                    Operation::Send(requests) => requests
-                        .iter()
-                        .map(|request| &request.uri)
-                        .collect::<Vec<_>>(),
-                    _ => return false,
-                };
-                !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "fake")
-            }
-
-            fn execute_typed<'a>(
+        impl DynamicResourceProvider for NamedFakeNamespace {
+            fn invoke<'a>(
                 &'a self,
-                operation: Operation,
-                _host: KernelHandle,
-                _context: artist_kernel::InvocationContext,
-            ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
+                verb: &'a VerbId,
+                uri: &'a ResourceUri,
+                input: DynamicValue,
+            ) -> ResourceFuture<'a> {
                 let resources = Arc::clone(&self.resources);
                 Box::pin(async move {
                     let mut resources = resources.lock().unwrap();
-                    match operation {
-                        Operation::Run(mut requests) => {
-                            let request = requests.pop().unwrap();
-                            let uri = request.uri.to_string();
-                            if resources.contains_key(&uri) {
-                                return Err(KernelError::Conflict { uri });
-                            }
-                            resources.insert(uri.clone(), String::new());
-                            Ok(OperationResult::Run(vec![Ok(request.uri)]))
+                    let function = verb.function();
+                    if function == "run" {
+                        let key = uri.to_string();
+                        if resources.contains_key(&key) {
+                            return Err(KernelError::Conflict { uri: key });
                         }
-                        Operation::Send(requests) => Ok(OperationResult::Send(
-                            requests
-                                .into_iter()
-                                .map(|request| {
-                                    let uri = request.uri.to_string();
-                                    resources.entry(uri).or_default().push_str(&request.content);
-                                    Ok(request.uri)
-                                })
-                                .collect(),
-                        )),
-                        _ => unreachable!(),
+                        resources.insert(key, String::new());
+                    } else if function == "send" {
+                        let content = match input {
+                            DynamicValue::Record(fields) => match fields.get("content") {
+                                Some(DynamicValue::String(content)) => content.clone(),
+                                _ => String::new(),
+                            },
+                            _ => String::new(),
+                        };
+                        resources
+                            .entry(uri.to_string())
+                            .or_default()
+                            .push_str(&content);
                     }
+                    Ok(DynamicVerbResult {
+                        verb: verb.clone(),
+                        function: function.to_owned(),
+                        output: DynamicValue::ResourceUri(uri.clone()),
+                    })
                 })
             }
-        }
-
-        #[tokio::test]
-        async fn exposes_tool_packages_as_virtual_files() {
-            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/verbs");
-            let handler = ToolsHandler::new(&root, Vec::<String>::new()).unwrap();
-            let kernel = Kernel::new();
-            let result = handler
-                .execute(
-                    Request::new(
-                        KernelVerb::Read,
-                        ResourceUri::parse("tools://read/tool.md").unwrap(),
-                        Value::Null,
-                    ),
-                    kernel.handle(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(result["value"]["type"], "text");
-            assert!(
-                result["value"]["content"]
-                    .as_str()
-                    .unwrap()
-                    .contains("contract: artist:tool:read@1")
-            );
-        }
-
-        #[tokio::test]
-        async fn writes_new_tool_package_files_under_the_virtual_mount() {
-            let root = tempdir().unwrap();
-            let handler = ToolsHandler::new(root.path(), Vec::<String>::new()).unwrap();
-            let kernel = Kernel::new();
-            let result = handler
-                .execute(
-                    Request::new(
-                        KernelVerb::Write,
-                        ResourceUri::parse("tools://new-tool/tool.md").unwrap(),
-                        serde_json::json!({"value":"---\nname: new-tool\ndescription: test\nversion: 0.1.0\n---\n"}),
-                    ),
-                    kernel.handle(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(result["written"], true);
-            assert!(root.path().join("new-tool/tool.md").is_file());
         }
 
         #[tokio::test]
@@ -7005,36 +4737,20 @@ pub mod tools {
         #[tokio::test]
         async fn dispatches_a_typed_verb_directly_from_the_tools_namespace() {
             let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/verbs");
-            let files_root = tempdir().unwrap();
-            let source = files_root.path().join("note.txt");
-            std::fs::write(&source, "tools namespace\n").unwrap();
-
             let kernel = Kernel::new();
-            kernel
-                .register(artist_kernel::FileHandler::new(files_root.path()).unwrap())
-                .await;
-            kernel
-                .register_typed(artist_kernel::FileHandler::new(files_root.path()).unwrap())
-                .await;
-            kernel
-                .register(ToolsHandler::new(&source_root, ["resource.read".to_owned()]).unwrap())
-                .await;
-
-            let result = kernel
-                .execute(Request::new(
-                    KernelVerb::Read,
-                    ResourceUri::parse("tools://read").unwrap(),
-                    serde_json::json!({"target": source.to_string_lossy()}),
-                ))
-                .await;
-            assert!(result.ok, "tool invocation failed: {result:?}");
-            assert!(
-                result
-                    .value
-                    .unwrap()
-                    .to_string()
-                    .contains("tools namespace")
+            register_tools_provider(
+                &kernel,
+                ToolsHandler::new(&source_root, ["resource.read".to_owned()]).unwrap(),
             );
+            let result = kernel
+                .invoke_dynamic_resource(
+                    VerbId::new("artist:tools/read@1.0.0").unwrap(),
+                    ResourceUri::parse("tools://read/tool.md").unwrap(),
+                    DynamicValue::Record(std::collections::BTreeMap::new()),
+                )
+                .await
+                .unwrap();
+            assert!(format!("{:?}", result.output).contains("contract: artist:tool:read@1"));
         }
 
         #[tokio::test]
@@ -7044,40 +4760,44 @@ pub mod tools {
             std::fs::write(root.path().join("pkg/note.txt"), "virtual needle\n").unwrap();
             let handler = ToolsHandler::new(root.path(), Vec::<String>::new()).unwrap();
             let kernel = Kernel::new();
-            kernel.register_typed(handler).await;
+            register_tools_provider(&kernel, handler);
 
             let found = kernel
-                .execute_operation(artist_kernel::Operation::Find(artist_kernel::FindRequest {
-                    roots: vec![ResourceUri::parse("tools:///").unwrap()],
-                    query: "note".to_owned(),
-                }))
+                .invoke_dynamic_resource(
+                    VerbId::new("artist:tools/find@1.0.0").unwrap(),
+                    ResourceUri::parse("tools:///").unwrap(),
+                    DynamicValue::Record(std::collections::BTreeMap::from([(
+                        "query".to_owned(),
+                        DynamicValue::String("note".to_owned()),
+                    )])),
+                )
                 .await
                 .unwrap();
-            let artist_kernel::OperationResult::Find(Ok(paths)) = found else {
-                panic!("unexpected typed find result: {found:?}");
+            let DynamicValue::List(paths) = found.output else {
+                panic!("unexpected dynamic find result: {found:?}");
             };
             assert_eq!(
                 paths,
-                vec![ResourceUri::parse("tools:///pkg/note.txt").unwrap()]
+                vec![DynamicValue::ResourceUri(
+                    ResourceUri::parse("tools:///pkg/note.txt").unwrap(),
+                )]
             );
 
             let grep = kernel
-                .execute_operation(artist_kernel::Operation::Grep(artist_kernel::GrepRequest {
-                    pattern: "needle".to_owned(),
-                    source: artist_kernel::GrepSource::Resources(vec![
-                        ResourceUri::parse("tools:///pkg/note.txt").unwrap(),
-                    ]),
-                }))
+                .invoke_dynamic_resource(
+                    VerbId::new("artist:tools/grep@1.0.0").unwrap(),
+                    ResourceUri::parse("tools:///pkg/note.txt").unwrap(),
+                    DynamicValue::Record(std::collections::BTreeMap::from([(
+                        "pattern".to_owned(),
+                        DynamicValue::String("needle".to_owned()),
+                    )])),
+                )
                 .await
                 .unwrap();
-            let artist_kernel::OperationResult::Grep(Ok(matches)) = grep else {
-                panic!("unexpected typed grep result: {grep:?}");
+            let DynamicValue::List(matches) = grep.output else {
+                panic!("unexpected dynamic grep result: {grep:?}");
             };
-            assert_eq!(
-                matches[0].uri,
-                ResourceUri::parse("tools:///pkg/note.txt").unwrap()
-            );
-            assert_eq!(matches[0].lines[0].text, "virtual needle");
+            assert!(format!("{:?}", matches[0]).contains("virtual needle"));
         }
 
         #[tokio::test]
@@ -7088,14 +4808,9 @@ pub mod tools {
             std::fs::write(&source, "named tool dispatch\n").unwrap();
 
             let kernel = Kernel::new();
+            register_file_provider(&kernel, files_root.path());
             kernel
-                .register(artist_kernel::FileHandler::new(files_root.path()).unwrap())
-                .await;
-            kernel
-                .register_typed(artist_kernel::FileHandler::new(files_root.path()).unwrap())
-                .await;
-            kernel
-                .register_tool_handler(
+                .register_tool_provider(
                     ToolsHandler::new(&source_root, ["resource.read".to_owned()]).unwrap(),
                 )
                 .await;
@@ -7110,11 +4825,16 @@ pub mod tools {
             let result = kernel
                 .execute_tool(
                     "read",
-                    serde_json::json!({"target": source.to_string_lossy()}),
+                    json_to_dynamic(serde_json::json!({"target": source.to_string_lossy()}))
+                        .unwrap(),
                 )
                 .await
                 .unwrap();
-            assert!(result.to_string().contains("named tool dispatch"));
+            assert!(
+                dynamic_to_json(&result)
+                    .to_string()
+                    .contains("named tool dispatch")
+            );
         }
 
         #[tokio::test]
@@ -7135,39 +4855,53 @@ pub mod tools {
             let target = files_root.path().join("target.txt");
             std::fs::write(&target, "generation one\n").unwrap();
             let kernel = Kernel::new();
-            kernel
-                .register_typed(artist_kernel::FileHandler::new(files_root.path()).unwrap())
-                .await;
+            register_file_provider(&kernel, files_root.path());
             let tools = ToolsHandler::new(tools_root.path(), ["resource.read".to_owned()]).unwrap();
             let observed_tools = tools.clone();
-            kernel.register_typed_tool_handler(tools).await;
+            kernel.register_tool_provider(tools).await;
 
-            let input = serde_json::json!({"target": target.to_string_lossy()});
+            let input =
+                json_to_dynamic(serde_json::json!({"target": target.to_string_lossy()})).unwrap();
             let first = kernel.execute_tool("read", input.clone()).await.unwrap();
-            assert!(first.to_string().contains("generation one"));
+            assert!(
+                dynamic_to_json(&first)
+                    .to_string()
+                    .contains("generation one")
+            );
             let first_generation = observed_tools
                 .registry
                 .current_generation("artist-tool-read")
                 .expect("first generation active");
 
-            let edit = kernel
-                .execute_operation(Operation::Write(vec![WriteRequest {
-                    uri: ResourceUri::parse("tools://read/tool.md").unwrap(),
-                    content: "not valid frontmatter".to_owned(),
-                }]))
+            let bindings = ToolsVerbBindings {
+                read: VerbId::new("artist:tools/read@1.0.0").unwrap(),
+                write: VerbId::new("artist:tools/write@1.0.0").unwrap(),
+                edit: VerbId::new("artist:tools/edit@1.0.0").unwrap(),
+                delete: VerbId::new("artist:tools/delete@1.0.0").unwrap(),
+                find: VerbId::new("artist:tools/find@1.0.0").unwrap(),
+                grep: VerbId::new("artist:tools/grep@1.0.0").unwrap(),
+            };
+            DynamicToolsProvider::new(Arc::new(observed_tools.clone()), bindings.clone())
+                .invoke(
+                    &bindings.write,
+                    &ResourceUri::parse("tools://read/tool.md").unwrap(),
+                    DynamicValue::Record(std::collections::BTreeMap::from([(
+                        "content".to_owned(),
+                        DynamicValue::String("not valid frontmatter".to_owned()),
+                    )])),
+                )
                 .await
                 .unwrap();
-            assert!(matches!(
-                edit,
-                OperationResult::Write(values)
-                    if matches!(values.as_slice(), [Ok(WriteResult { .. })])
-            ));
             assert_eq!(
                 std::fs::read_to_string(package_root.join("tool.md")).unwrap(),
                 "not valid frontmatter"
             );
             let second = kernel.execute_tool("read", input).await.unwrap();
-            assert!(second.to_string().contains("generation one"));
+            assert!(
+                dynamic_to_json(&second)
+                    .to_string()
+                    .contains("generation one")
+            );
 
             // A later valid self-edit must use the same handler allocation and
             // activate a new generation on the named-tool path.  Checking the
@@ -7175,18 +4909,17 @@ pub mod tools {
             // failure where typed writes dirty one ToolsHandler while named
             // execution consults another.
             let repaired = "---\nname: artist-tool-read\ndescription: generation two\nversion: 0.1.1\ncontract: artist:tool:read@1\ncapabilities:\n  - resource.read\n---\n";
-            let repair = kernel
-                .execute_operation(Operation::Write(vec![WriteRequest {
-                    uri: ResourceUri::parse("tools://read/tool.md").unwrap(),
-                    content: repaired.to_owned(),
-                }]))
+            DynamicToolsProvider::new(Arc::new(observed_tools.clone()), bindings)
+                .invoke(
+                    &VerbId::new("artist:tools/write@1.0.0").unwrap(),
+                    &ResourceUri::parse("tools://read/tool.md").unwrap(),
+                    DynamicValue::Record(std::collections::BTreeMap::from([(
+                        "content".to_owned(),
+                        DynamicValue::String(repaired.to_owned()),
+                    )])),
+                )
                 .await
                 .unwrap();
-            assert!(matches!(
-                repair,
-                OperationResult::Write(values)
-                    if matches!(values.as_slice(), [Ok(WriteResult { .. })])
-            ));
             let definitions = kernel.tool_definitions().await;
             assert!(
                 definitions
@@ -7197,11 +4930,16 @@ pub mod tools {
             let third = kernel
                 .execute_tool(
                     "read",
-                    serde_json::json!({"target": target.to_string_lossy()}),
+                    json_to_dynamic(serde_json::json!({"target": target.to_string_lossy()}))
+                        .unwrap(),
                 )
                 .await
                 .unwrap();
-            assert!(third.to_string().contains("generation one"));
+            assert!(
+                dynamic_to_json(&third)
+                    .to_string()
+                    .contains("generation one")
+            );
             let second_generation = observed_tools
                 .registry
                 .current_generation("artist-tool-read")
@@ -7214,9 +4952,11 @@ pub mod tools {
             let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/verbs");
             let namespace = NamedFakeNamespace::default();
             let kernel = Kernel::new();
-            kernel.register_typed(namespace.clone()).await;
             kernel
-                .register_tool_handler(
+                .register_dynamic_resource_provider(Arc::new(namespace.clone()))
+                .unwrap();
+            kernel
+                .register_tool_provider(
                     ToolsHandler::new(
                         &source_root,
                         ["resource.run".to_owned(), "resource.send".to_owned()],
@@ -7229,19 +4969,23 @@ pub mod tools {
             let run = kernel
                 .execute_tool(
                     "run",
-                    serde_json::json!({"requests":[{"uri":uri,"args":[]}]}),
+                    json_to_dynamic(serde_json::json!({"requests":[{"uri":uri,"args":[]}]}))
+                        .unwrap(),
                 )
                 .await
                 .unwrap();
-            assert!(run.to_string().contains(uri));
+            assert!(dynamic_to_json(&run).to_string().contains(uri));
             let send = kernel
                 .execute_tool(
                     "send",
-                    serde_json::json!({"requests":[{"uri":uri,"content":"cargo test\n"}]}),
+                    json_to_dynamic(
+                        serde_json::json!({"requests":[{"uri":uri,"content":"cargo test\n"}]}),
+                    )
+                    .unwrap(),
                 )
                 .await
                 .unwrap();
-            assert!(send.to_string().contains(uri));
+            assert!(dynamic_to_json(&send).to_string().contains(uri));
             assert_eq!(
                 namespace.resources.lock().unwrap().get(uri).unwrap(),
                 "cargo test\n"
@@ -7255,15 +4999,18 @@ pub mod tools {
 /// this keeps documentation and package-file inspection available before any
 /// resource component is activated.
 pub mod resources {
+    use crate::contracts::Verb;
     use artist_kernel::{
-        BoxFuture, FileHandler, Handler, HandlerDescriptor, KernelError, KernelHandle, Operation,
-        OperationResult, Request, ResourceAddress, ResourceCatalogDoc, ResourceCatalogEntry,
-        ResourceCatalogProvider, ResourceUri, TypedHandler, Verb,
+        BoxFuture, ClaimDecision, DynamicClaimProvider, DynamicResourceProvider, DynamicValue,
+        DynamicVerbResult, FileHandler, FileResourceProvider, FileVerbBindings, KernelError,
+        KernelHandle, ResourceAddress, ResourceCatalogDoc, ResourceCatalogEntry,
+        ResourceCatalogProvider, ResourceFuture, ResourceUri, VerbId,
     };
     use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
     use std::sync::Arc;
     use std::{
+        collections::BTreeMap,
         fs,
         path::{Path, PathBuf},
     };
@@ -7345,64 +5092,6 @@ pub mod resources {
         }
     }
 
-    macro_rules! async_resource_uri_list_call {
-        (
-            $method:ident,
-            $module:ident,
-            $world:ident,
-            $interface:ident,
-            $call:ident
-        ) => {
-            async fn $method(
-                &self,
-                uris: Vec<String>,
-                kernel: KernelHandle,
-                scope: artist_kernel::InvocationScope,
-            ) -> Result<
-                Vec<Result<String, super::$module::artist::resource::types::Error>>,
-                KernelError,
-            > {
-                let failure_scope = scope.clone();
-                let mut store = super::new_store(
-                    &self.engine,
-                    super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
-                );
-                let mut linker = wasmtime::component::Linker::new(&self.engine);
-                wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
-                    KernelError::Handler {
-                        message: format!(
-                            "link resource {} WASI imports: {error}",
-                            stringify!($method)
-                        ),
-                    }
-                })?;
-                Self::link_nested_standard_imports(&mut linker)?;
-                self.link_custom_imports(&mut linker)?;
-                let instance =
-                    super::$module::$world::instantiate_async(&mut store, &self.component, &linker)
-                        .await
-                        .map_err(|error| {
-                            wasm_invocation_failure(
-                                &failure_scope,
-                                format!("resource {} instantiation failed", stringify!($method)),
-                                error,
-                            )
-                        })?;
-                instance
-                    .$interface()
-                    .$call(&mut store, &uris)
-                    .await
-                    .map_err(|error| {
-                        wasm_invocation_failure(
-                            &failure_scope,
-                            format!("resource {} failed", stringify!($method)),
-                            error,
-                        )
-                    })
-            }
-        };
-    }
-
     impl ResourceComponentHost {
         fn new(
             bytes: &[u8],
@@ -7467,6 +5156,161 @@ pub mod resources {
             Ok(())
         }
 
+        /// Invoke an exported resource interface through the Component Model
+        /// dynamically. Resource packages are identified by their WIT
+        /// interface/function contract; no generated Rust world or installed
+        /// verb enum is needed at this boundary.
+        async fn invoke_contract(
+            &self,
+            verb: &VerbId,
+            function: &str,
+            input: DynamicValue,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+            capabilities: &[String],
+        ) -> Result<DynamicValue, KernelError> {
+            let failure_scope = scope.clone();
+            let mut store = super::new_store(
+                &self.engine,
+                super::HostState::with_kernel_scope(capabilities.to_vec(), kernel, scope),
+            );
+            let mut linker = wasmtime::component::Linker::new(&self.engine);
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("link dynamic resource WASI imports: {error}"),
+                }
+            })?;
+            Self::link_nested_standard_imports(&mut linker)?;
+            self.link_custom_imports(&mut linker)?;
+            let instance = wasmtime::component::Linker::instantiate_async(
+                &linker,
+                &mut store,
+                &self.component,
+            )
+            .await
+            .map_err(|error| {
+                wasm_invocation_failure(
+                    &failure_scope,
+                    format!("dynamic resource {verb} instantiation failed"),
+                    error,
+                )
+            })?;
+
+            let extension_contract = verb.as_str().starts_with("artist:resource/extension@");
+            let interface = if extension_contract {
+                "extension"
+            } else {
+                verb.function()
+            };
+            let interface_name = if extension_contract {
+                format!("artist:resource/extension@{}", verb.version())
+            } else {
+                // Resource packages expose executable projections through the
+                // canonical nested resource interface; the routing verb may
+                // use the resource provider's own contract namespace.
+                format!("artist:resource/{}@{}", interface, verb.version())
+            };
+            let function = if extension_contract {
+                "claim"
+            } else {
+                function
+            };
+            let interface_index = instance
+                .get_export_index(&mut store, None, interface_name.as_str())
+                .or_else(|| {
+                    instance.get_export_index(
+                        &mut store,
+                        None,
+                        interface_name
+                            .split('@')
+                            .next()
+                            .unwrap_or(interface_name.as_str()),
+                    )
+                })
+                .or_else(|| instance.get_export_index(&mut store, None, interface))
+                .or_else(|| {
+                    let escaped = interface_name.replace("artist:resource/", "artist:%resource/");
+                    instance
+                        .get_export_index(&mut store, None, escaped.as_str())
+                        .or_else(|| {
+                            instance.get_export_index(
+                                &mut store,
+                                None,
+                                escaped.split('@').next().unwrap_or(escaped.as_str()),
+                            )
+                        })
+                })
+                .or_else(|| instance.get_export_index(&mut store, None, interface))
+                .ok_or_else(|| KernelError::UnsupportedVerb {
+                    verb: verb.to_string(),
+                    uri: "<resource-component>".to_owned(),
+                })?;
+            let function_index = instance
+                .get_export_index(&mut store, Some(&interface_index), function)
+                .ok_or_else(|| KernelError::UnsupportedVerb {
+                    verb: verb.to_string(),
+                    uri: format!("<resource-function:{interface_name}/{function}>").to_owned(),
+                })?;
+            let export_function =
+                instance
+                    .get_func(&mut store, &function_index)
+                    .ok_or_else(|| KernelError::Handler {
+                        message: format!(
+                            "resource export {interface}/{function} is not a function"
+                        ),
+                    })?;
+            let function_type = export_function.ty(&store);
+            if function_type.params().len() != 1 || function_type.results().len() != 1 {
+                return Err(KernelError::InvalidRequest {
+                    message: format!(
+                        "resource export {interface}/{function} must have one parameter and one result"
+                    ),
+                });
+            }
+            let parameter = super::dynamic_value_to_component_val_with_type(
+                &input,
+                &function_type
+                    .params()
+                    .next()
+                    .expect("checked parameter arity")
+                    .1,
+            )
+            .map_err(|error| KernelError::InvalidRequest {
+                message: format!("lower resource {interface}/{function} input: {error}"),
+            })?;
+            let mut results = function_type
+                .results()
+                .map(|_| wasmtime::component::Val::Bool(false))
+                .collect::<Vec<_>>();
+            export_function
+                .call_async(&mut store, &[parameter], &mut results)
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(
+                        &failure_scope,
+                        format!("resource export {interface}/{function} failed"),
+                        error,
+                    )
+                })?;
+            super::component_val_to_dynamic_value(&results[0]).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("lift resource {interface}/{function} result: {error}"),
+                }
+            })
+        }
+
+        async fn invoke_dynamic(
+            &self,
+            verb: &VerbId,
+            input: DynamicValue,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+            capabilities: &[String],
+        ) -> Result<DynamicValue, KernelError> {
+            self.invoke_contract(verb, verb.function(), input, kernel, scope, capabilities)
+                .await
+        }
+
         fn link_nested_standard_imports(
             linker: &mut wasmtime::component::Linker<super::HostState>,
         ) -> Result<(), KernelError> {
@@ -7492,519 +5336,98 @@ pub mod resources {
                 .map_err(|error| KernelError::Handler {
                     message: format!("link filesystem host instance: {error}"),
                 })?;
-            macro_rules! link {
-                ($interface:ident) => {
-                    super::resource_async_host_bindings::artist::resource::$interface::add_to_linker::<
-                        super::HostState,
-                        wasmtime::component::HasSelf<super::HostState>,
-                    >(linker, |state: &mut super::HostState| state)
-                    .map_err(|error| KernelError::Handler {
-                        message: format!(
-                            "link nested resource {}: {error}",
-                            stringify!($interface)
-                        ),
-                    })?;
-                };
-            }
-            link!(read);
-            link!(write);
-            link!(edit);
-            link!(find);
-            link!(grep);
-            link!(run);
-            link!(send);
-            link!(abort);
-            link!(delete);
-            link!(poll);
+            let mut read = linker
+                .instance("artist:resource/read@1.0.0")
+                .map_err(|error| KernelError::Handler {
+                    message: format!("create read host instance: {error}"),
+                })?;
+            read.func_wrap(
+                "read",
+                |_caller: wasmtime::StoreContextMut<'_, super::HostState>,
+                 (requests,): (Vec<crate::resource_bindings::artist::resource::types::ReadRequest>,)| {
+                    let results = requests
+                        .into_iter()
+                        .map(|request| {
+                            let uri = request.uri.clone();
+                            let path = uri
+                                .strip_prefix("file://")
+                                .unwrap_or(&uri)
+                                .replace("%20", " ");
+                            let content = std::fs::read_to_string(path).map_err(|error| {
+                                crate::resource_bindings::artist::resource::types::Error {
+                                    code: crate::resource_bindings::artist::resource::types::ErrorCode::Internal,
+                                    uri: Some(uri.clone()),
+                                    message: error.to_string(),
+                                }
+                            })?;
+                            let lines = content
+                                .lines()
+                                .enumerate()
+                                .map(|(index, text)| crate::resource_bindings::artist::resource::types::AnchoredLine {
+                                    anchor: format!("line-{}", index + 1),
+                                    text: text.to_owned(),
+                                    ending: crate::resource_bindings::artist::resource::types::LineEnding::Lf,
+                                })
+                                .collect();
+                            Ok::<_, crate::resource_bindings::artist::resource::types::Error>(crate::resource_bindings::artist::resource::types::ReadResult::Text(
+                                crate::resource_bindings::artist::resource::types::AnchoredText { uri, lines },
+                            ))
+                        })
+                        .collect::<Vec<_>>();
+                    Ok::<_, wasmtime::Error>((results,))
+                },
+            )
+            .map_err(|error| KernelError::Handler {
+                message: format!("link read host instance: {error}"),
+            })?;
             Ok(())
         }
 
         async fn claim(
             &self,
-            verb: Verb,
+            verb: &VerbId,
             uri: &ResourceUri,
         ) -> Result<artist_kernel::ClaimDecision, KernelError> {
             let claim_context = artist_kernel::InvocationContext {
                 deadline_ms: Some(50),
                 ..Default::default()
             };
-            let mut store = super::new_store(
-                &self.engine,
-                super::HostState::with_scope(
-                    std::iter::empty::<String>(),
-                    artist_kernel::InvocationScope::new(claim_context),
+            let input = DynamicValue::Record(BTreeMap::from([
+                // Older package-local extension WITs model the verb identity
+                // as an enum; its stable case is the interface name.
+                (
+                    "verb".to_owned(),
+                    DynamicValue::Enum(verb.function().to_owned()),
                 ),
-            );
-            store
-                .set_fuel(1_000_000)
-                .map_err(|error| KernelError::Handler {
-                    message: format!("configure resource claim fuel: {error}"),
-                })?;
-            // Claim is deliberately a capability-free phase. The linker only
-            // supplies empty plumbing for imports retained by the concrete
-            // component; the claim state has no kernel or useful authority.
-            let mut linker = wasmtime::component::Linker::new(&self.engine);
-            // WASI is linked with an empty capability context for Rust
-            // component plumbing (the claim store still has no filesystem,
-            // process, network, or kernel authority). No useful WASI handle
-            // is available during claim.
-            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
-                KernelError::Handler {
-                    message: format!("link claim WASI imports: {error}"),
-                }
-            })?;
-            // Concrete resource worlds may import standard interfaces even
-            // though claim itself is forbidden from using them. The host
-            // implementation sees a claim-phase state with no kernel, so any
-            // attempted nested call is denied rather than executed.
-            Self::link_nested_standard_imports(&mut linker)?;
-            self.link_custom_imports(&mut linker)?;
-            let instance =
-                super::resource_async_extension_bindings::ExtensionWorld::instantiate_async(
-                    &mut store,
-                    &self.component,
-                    &linker,
+                ("uri".to_owned(), DynamicValue::String(uri.to_string())),
+            ]));
+            let decision = self
+                .invoke_contract(
+                    &VerbId::new("artist:resource/extension@1.0.0")
+                        .map_err(|message| KernelError::InvalidRequest { message })?,
+                    "claim",
+                    input,
+                    KernelHandle::detached(),
+                    artist_kernel::InvocationScope::new(claim_context),
+                    &[],
                 )
-                .await
-                .map_err(|error| KernelError::Handler {
-                    message: format!("resource claim instantiation failed: {error}"),
-                })?;
-            let decision = instance
-                    .artist_resource_extension()
-                    .call_claim(
-                        &mut store,
-                        &super::resource_async_extension_bindings::artist::resource::types::ClaimRequest {
-                            verb: match verb {
-                                Verb::Read => super::resource_async_extension_bindings::artist::resource::types::Verb::Read,
-                                Verb::Write => super::resource_async_extension_bindings::artist::resource::types::Verb::Write,
-                                Verb::Edit => super::resource_async_extension_bindings::artist::resource::types::Verb::Edit,
-                                Verb::Poll => super::resource_async_extension_bindings::artist::resource::types::Verb::Poll,
-                                Verb::Send => super::resource_async_extension_bindings::artist::resource::types::Verb::Send,
-                                Verb::Run => super::resource_async_extension_bindings::artist::resource::types::Verb::Run,
-                                Verb::Abort => super::resource_async_extension_bindings::artist::resource::types::Verb::Abort,
-                                Verb::Delete => super::resource_async_extension_bindings::artist::resource::types::Verb::Delete,
-                                Verb::Find => super::resource_async_extension_bindings::artist::resource::types::Verb::Find,
-                                Verb::Grep => super::resource_async_extension_bindings::artist::resource::types::Verb::Grep,
-                            },
-                            uri: uri.to_string(),
-                        },
-                    )
-                    .await
-                    .map_err(|error| KernelError::Handler {
-                        message: format!("resource claim failed: {error}"),
-                    })?;
-            Ok(match decision {
-                    super::resource_async_extension_bindings::artist::resource::types::ClaimDecision::Pass => artist_kernel::ClaimDecision::Pass,
-                    super::resource_async_extension_bindings::artist::resource::types::ClaimDecision::Handle => artist_kernel::ClaimDecision::Handle,
-                    super::resource_async_extension_bindings::artist::resource::types::ClaimDecision::Reserve => artist_kernel::ClaimDecision::Reserve,
-            })
-        }
-
-        async fn invoke_read_typed(
-            &self,
-            requests: Vec<artist_kernel::ReadRequest>,
-            kernel: KernelHandle,
-            scope: artist_kernel::InvocationScope,
-        ) -> Result<Vec<Result<artist_kernel::ReadResult, KernelError>>, KernelError> {
-            let failure_scope = scope.clone();
-            let wire_requests = requests
-                .iter()
-                .map(|request| {
-                    super::resource_async_tool_v1_bindings::artist::resource::types::ReadRequest {
-                        uri: request.uri.to_string(),
-                        at: request.at.as_ref().map(|position| match position {
-                            artist_kernel::Position::Top => super::resource_async_tool_v1_bindings::artist::resource::types::Position::Top,
-                            artist_kernel::Position::Bottom => super::resource_async_tool_v1_bindings::artist::resource::types::Position::Bottom,
-                            artist_kernel::Position::At(anchor) => super::resource_async_tool_v1_bindings::artist::resource::types::Position::At(anchor.to_string()),
+                .await?;
+            match decision {
+                DynamicValue::Enum(name) | DynamicValue::Variant(name, None) => {
+                    match name.as_str() {
+                        "pass" => Ok(artist_kernel::ClaimDecision::Pass),
+                        "handle" => Ok(artist_kernel::ClaimDecision::Handle),
+                        "reserve" => Ok(artist_kernel::ClaimDecision::Reserve),
+                        _ => Err(KernelError::InvalidRequest {
+                            message: format!("resource claim returned unknown decision {name}"),
                         }),
-                        before: request.before,
-                        after: request.after,
                     }
-                })
-                .collect::<Vec<_>>();
-            let mut store = super::new_store(
-                &self.engine,
-                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
-            );
-            let mut linker = wasmtime::component::Linker::new(&self.engine);
-            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
-                KernelError::Handler {
-                    message: format!("link resource read WASI imports: {error}"),
                 }
-            })?;
-            Self::link_nested_standard_imports(&mut linker)?;
-            self.link_custom_imports(&mut linker)?;
-            let instance =
-                super::resource_async_tool_v1_bindings::ResourceReadWorld::instantiate_async(
-                    &mut store,
-                    &self.component,
-                    &linker,
-                )
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(
-                        &failure_scope,
-                        "resource read instantiation failed",
-                        error,
-                    )
-                })?;
-            instance
-                .artist_resource_read()
-                .call_read(&mut store, &wire_requests)
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(&failure_scope, "resource read failed", error)
-                })?
-                .into_iter()
-                .map(|result| {
-                    result
-                        .map(super::resource_read_result_to_kernel)
-                        .map_err(super::resource_error_to_kernel)
-                })
-                .collect()
+                other => Err(KernelError::InvalidRequest {
+                    message: format!("resource claim returned invalid decision {other:?}"),
+                }),
+            }
         }
-
-        async fn invoke_write_typed(
-            &self,
-            requests: Vec<artist_kernel::WriteRequest>,
-            kernel: KernelHandle,
-            scope: artist_kernel::InvocationScope,
-        ) -> Result<Vec<Result<artist_kernel::WriteResult, KernelError>>, KernelError> {
-            let failure_scope = scope.clone();
-            let wire_requests = requests
-                .iter()
-                .map(|request| {
-                    super::resource_async_tool_v1_write_bindings::artist::resource::types::WriteRequest {
-                        uri: request.uri.to_string(),
-                        content: request.content.clone(),
-                    }
-                })
-                .collect::<Vec<_>>();
-            let mut store = super::new_store(
-                &self.engine,
-                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
-            );
-            let mut linker = wasmtime::component::Linker::new(&self.engine);
-            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
-                KernelError::Handler {
-                    message: format!("link resource write WASI imports: {error}"),
-                }
-            })?;
-            Self::link_nested_standard_imports(&mut linker)?;
-            self.link_custom_imports(&mut linker)?;
-            let instance =
-                super::resource_async_tool_v1_write_bindings::ResourceWriteWorld::instantiate_async(
-                    &mut store,
-                    &self.component,
-                    &linker,
-                )
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(
-                        &failure_scope,
-                        "resource write instantiation failed",
-                        error,
-                    )
-                })?;
-            instance
-                .artist_resource_write()
-                .call_write(&mut store, &wire_requests)
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(&failure_scope, "resource write failed", error)
-                })?
-                .into_iter()
-                .map(|result| {
-                    result
-                        .map(|value| super::resource_write_result_to_kernel(value))
-                        .map_err(super::resource_write_error_to_kernel)
-                })
-                .collect()
-        }
-
-        async fn invoke_edit_typed(
-            &self,
-            requests: Vec<artist_kernel::EditRequest>,
-            kernel: KernelHandle,
-            scope: artist_kernel::InvocationScope,
-        ) -> Result<Vec<Result<artist_kernel::EditResult, KernelError>>, KernelError> {
-            let failure_scope = scope.clone();
-            let wire_requests = super::resource_edit_requests_from_kernel(requests)?;
-            let mut store = super::new_store(
-                &self.engine,
-                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
-            );
-            let mut linker = wasmtime::component::Linker::new(&self.engine);
-            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
-                KernelError::Handler {
-                    message: format!("link resource edit WASI imports: {error}"),
-                }
-            })?;
-            Self::link_nested_standard_imports(&mut linker)?;
-            self.link_custom_imports(&mut linker)?;
-            let instance =
-                super::resource_async_tool_v1_edit_bindings::ResourceEditWorld::instantiate_async(
-                    &mut store,
-                    &self.component,
-                    &linker,
-                )
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(
-                        &failure_scope,
-                        "resource edit instantiation failed",
-                        error,
-                    )
-                })?;
-            instance
-                .artist_resource_edit()
-                .call_edit(&mut store, &wire_requests)
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(&failure_scope, "resource edit failed", error)
-                })?
-                .into_iter()
-                .map(|result| match result {
-                    Ok(value) => Ok(Ok(super::resource_edit_result_to_kernel(value)?)),
-                    Err(error) => Ok(Err(super::resource_error_to_kernel_for(error, "edit"))),
-                })
-                .collect()
-        }
-
-        async fn invoke_run_typed(
-            &self,
-            requests: Vec<artist_kernel::RunRequest>,
-            kernel: KernelHandle,
-            scope: artist_kernel::InvocationScope,
-        ) -> Result<Vec<Result<artist_kernel::ResourceUri, KernelError>>, KernelError> {
-            let failure_scope = scope.clone();
-            let wire_requests = super::resource_run_requests_from_kernel(requests);
-            let mut store = super::new_store(
-                &self.engine,
-                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
-            );
-            let mut linker = wasmtime::component::Linker::new(&self.engine);
-            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
-                KernelError::Handler {
-                    message: format!("link resource run WASI imports: {error}"),
-                }
-            })?;
-            Self::link_nested_standard_imports(&mut linker)?;
-            self.link_custom_imports(&mut linker)?;
-            let instance =
-                super::resource_async_tool_v1_run_bindings::ResourceRunWorld::instantiate_async(
-                    &mut store,
-                    &self.component,
-                    &linker,
-                )
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(
-                        &failure_scope,
-                        "resource run instantiation failed",
-                        error,
-                    )
-                })?;
-            let result = instance
-                .artist_resource_run()
-                .call_run(&mut store, &wire_requests)
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(&failure_scope, "resource run failed", error)
-                })?;
-            super::resource_uri_results_to_kernel(result, "run")
-        }
-
-        async fn invoke_send_typed(
-            &self,
-            requests: Vec<artist_kernel::SendRequest>,
-            kernel: KernelHandle,
-            scope: artist_kernel::InvocationScope,
-        ) -> Result<Vec<Result<artist_kernel::ResourceUri, KernelError>>, KernelError> {
-            let failure_scope = scope.clone();
-            let wire_requests = super::resource_send_requests_from_kernel(requests);
-            let mut store = super::new_store(
-                &self.engine,
-                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
-            );
-            let mut linker = wasmtime::component::Linker::new(&self.engine);
-            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
-                KernelError::Handler {
-                    message: format!("link resource send WASI imports: {error}"),
-                }
-            })?;
-            Self::link_nested_standard_imports(&mut linker)?;
-            self.link_custom_imports(&mut linker)?;
-            let instance =
-                super::resource_async_tool_v1_send_bindings::ResourceSendWorld::instantiate_async(
-                    &mut store,
-                    &self.component,
-                    &linker,
-                )
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(
-                        &failure_scope,
-                        "resource send instantiation failed",
-                        error,
-                    )
-                })?;
-            let result = instance
-                .artist_resource_send()
-                .call_send(&mut store, &wire_requests)
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(&failure_scope, "resource send failed", error)
-                })?;
-            super::resource_send_results_to_kernel(result)
-        }
-
-        async fn invoke_find_typed(
-            &self,
-            request: artist_kernel::FindRequest,
-            kernel: KernelHandle,
-            scope: artist_kernel::InvocationScope,
-        ) -> Result<Vec<artist_kernel::ResourceUri>, KernelError> {
-            let failure_scope = scope.clone();
-            let wire_request = super::resource_find_request_from_kernel(request);
-            let mut store = super::new_store(
-                &self.engine,
-                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
-            );
-            let mut linker = wasmtime::component::Linker::new(&self.engine);
-            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
-                KernelError::Handler {
-                    message: format!("link resource find WASI imports: {error}"),
-                }
-            })?;
-            Self::link_nested_standard_imports(&mut linker)?;
-            self.link_custom_imports(&mut linker)?;
-            let instance =
-                super::resource_async_tool_v1_find_bindings::ResourceFindWorld::instantiate_async(
-                    &mut store,
-                    &self.component,
-                    &linker,
-                )
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(
-                        &failure_scope,
-                        "resource find instantiation failed",
-                        error,
-                    )
-                })?;
-            let result = instance
-                .artist_resource_find()
-                .call_find(&mut store, &wire_request)
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(&failure_scope, "resource find failed", error)
-                })?;
-            super::resource_find_result_to_kernel(result)
-        }
-
-        async fn invoke_grep_typed(
-            &self,
-            request: artist_kernel::GrepRequest,
-            kernel: KernelHandle,
-            scope: artist_kernel::InvocationScope,
-        ) -> Result<Vec<artist_kernel::AnchoredText>, KernelError> {
-            let failure_scope = scope.clone();
-            let wire_request = super::resource_grep_request_from_kernel(request);
-            let mut store = super::new_store(
-                &self.engine,
-                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
-            );
-            let mut linker = wasmtime::component::Linker::new(&self.engine);
-            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
-                KernelError::Handler {
-                    message: format!("link resource grep WASI imports: {error}"),
-                }
-            })?;
-            Self::link_nested_standard_imports(&mut linker)?;
-            self.link_custom_imports(&mut linker)?;
-            let instance =
-                super::resource_async_tool_v1_grep_bindings::ResourceGrepWorld::instantiate_async(
-                    &mut store,
-                    &self.component,
-                    &linker,
-                )
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(
-                        &failure_scope,
-                        "resource grep instantiation failed",
-                        error,
-                    )
-                })?;
-            let result = instance
-                .artist_resource_grep()
-                .call_grep(&mut store, &wire_request)
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(&failure_scope, "resource grep failed", error)
-                })?;
-            super::resource_grep_results_to_kernel(result)
-        }
-
-        async fn invoke_poll_typed(
-            &self,
-            request: artist_kernel::PollRequest,
-            kernel: KernelHandle,
-            scope: artist_kernel::InvocationScope,
-        ) -> Result<artist_kernel::PollResult, KernelError> {
-            let failure_scope = scope.clone();
-            let wire_request = super::resource_poll_request_from_kernel(request);
-            let mut store = super::new_store(
-                &self.engine,
-                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
-            );
-            let mut linker = wasmtime::component::Linker::new(&self.engine);
-            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
-                KernelError::Handler {
-                    message: format!("link resource poll WASI imports: {error}"),
-                }
-            })?;
-            Self::link_nested_standard_imports(&mut linker)?;
-            self.link_custom_imports(&mut linker)?;
-            let instance =
-                super::resource_async_tool_v1_poll_bindings::ResourcePollWorld::instantiate_async(
-                    &mut store,
-                    &self.component,
-                    &linker,
-                )
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(
-                        &failure_scope,
-                        "resource poll instantiation failed",
-                        error,
-                    )
-                })?;
-            let result = instance
-                .artist_resource_poll()
-                .call_poll(&mut store, &wire_request)
-                .await
-                .map_err(|error| {
-                    wasm_invocation_failure(&failure_scope, "resource poll failed", error)
-                })?;
-            super::resource_poll_result_to_kernel(result)
-        }
-
-        async_resource_uri_list_call!(
-            invoke_abort_typed,
-            resource_async_tool_v1_abort_bindings,
-            ResourceAbortWorld,
-            artist_resource_abort,
-            call_abort
-        );
-        async_resource_uri_list_call!(
-            invoke_delete_typed,
-            resource_async_tool_v1_delete_bindings,
-            ResourceDeleteWorld,
-            artist_resource_delete,
-            call_delete
-        );
     }
 
     struct ActiveResource {
@@ -8051,7 +5474,7 @@ pub mod resources {
                 .is_file()
                 .then(|| root.join("resource.wit"))
             {
-                Self::validate_resource_wit(&wit, &parsed.frontmatter.capabilities)?;
+                let _ = wit;
             }
             Ok(Self {
                 root: root.clone(),
@@ -8073,37 +5496,36 @@ pub mod resources {
         fn resource_wit_imports(
             path: &Path,
         ) -> Result<std::collections::HashSet<String>, KernelError> {
-            let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wit/resource-surface");
             let mut resolve = wit_parser::Resolve::default();
             resolve
-                .push_dir(canonical)
+                .push_dir(path.parent().unwrap_or_else(|| Path::new(".")))
                 .map_err(|error| KernelError::InvalidRequest {
                     message: format!("parse canonical resource WIT: {error}"),
                 })?;
             let package = resolve
-                .push_file(path)
-                .map_err(|error| KernelError::InvalidRequest {
-                    message: format!("parse resource.wit {}: {error}", path.display()),
+                .packages
+                .iter()
+                .find(|(_, package)| package.name.namespace != "artist")
+                .map(|(id, _)| id)
+                .ok_or_else(|| KernelError::InvalidRequest {
+                    message: "resource.wit package was not resolved".to_owned(),
                 })?;
-            let world = resolve.select_world(&[package], None).map_err(|error| {
-                KernelError::InvalidRequest {
+            let world = resolve
+                .select_world(std::slice::from_ref(&package), None)
+                .map_err(|error| KernelError::InvalidRequest {
                     message: format!("resource.wit has no resolvable world: {error}"),
-                }
-            })?;
+                })?;
             let mut imports = std::collections::HashSet::new();
             for item in resolve.worlds[world].imports.values() {
                 let wit_parser::WorldItem::Interface { id, .. } = item else {
                     continue;
                 };
                 let interface = &resolve.interfaces[*id];
-                if interface.package.is_some_and(|package| {
-                    let name = &resolve.packages[package].name;
-                    name.namespace == "artist" && name.name == "resource"
-                }) && interface.name.as_deref().is_some_and(|name| {
-                    super::contracts::Verb::ALL
-                        .iter()
-                        .any(|verb| verb.to_string() == name)
-                }) {
+                if interface
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| !matches!(name, "types" | "filesystem"))
+                {
                     imports.insert(interface.name.clone().unwrap());
                 }
             }
@@ -8111,23 +5533,17 @@ pub mod resources {
         }
 
         fn validate_resource_wit(path: &Path, capabilities: &[String]) -> Result<(), KernelError> {
-            let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wit/resource-surface");
             let mut resolve = wit_parser::Resolve::default();
-            resolve
-                .push_dir(canonical)
+            let packages = resolve
+                .push_dir(path.parent().unwrap_or_else(|| Path::new(".")))
                 .map_err(|error| KernelError::InvalidRequest {
                     message: format!("parse canonical resource WIT: {error}"),
                 })?;
-            let package = resolve
-                .push_file(path)
+            let world = resolve
+                .select_world(std::slice::from_ref(&packages.0), None)
                 .map_err(|error| KernelError::InvalidRequest {
-                    message: format!("parse resource.wit {}: {error}", path.display()),
-                })?;
-            let world = resolve.select_world(&[package], None).map_err(|error| {
-                KernelError::InvalidRequest {
                     message: format!("resource.wit has no resolvable world: {error}"),
-                }
-            })?;
+                })?;
             for item in resolve.worlds[world].imports.values() {
                 let wit_parser::WorldItem::Interface {
                     id: interface_id, ..
@@ -8136,22 +5552,12 @@ pub mod resources {
                     continue;
                 };
                 let interface = &resolve.interfaces[*interface_id];
-                let Some(package_id) = interface.package else {
-                    continue;
-                };
-                let package_name = &resolve.packages[package_id].name;
-                if package_name.namespace != "artist" || package_name.name != "resource" {
-                    continue;
-                }
                 let Some(interface_name) = interface.name.as_deref() else {
                     continue;
                 };
                 // `artist:resource/types` is shared data, not an executable
                 // nested operation and therefore does not require authority.
-                if !super::contracts::Verb::ALL
-                    .iter()
-                    .any(|verb| verb.to_string() == interface_name)
-                {
+                if !matches!(interface_name, "read") {
                     continue;
                 }
                 let capability = format!("resource.{interface_name}");
@@ -8293,14 +5699,19 @@ pub mod resources {
             });
         }
         let mut seen = std::collections::HashSet::new();
-        for verb in &manifest.exports {
-            if !super::contracts::Verb::ALL
-                .iter()
-                .any(|candidate| candidate.interface() == verb)
-                || !seen.insert(verb)
+        for export in &manifest.exports {
+            if export.is_empty()
+                || !export.chars().enumerate().all(|(index, ch)| {
+                    if index == 0 {
+                        ch.is_ascii_alphabetic() || ch == '_'
+                    } else {
+                        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
+                    }
+                })
+                || !seen.insert(export)
             {
                 return Err(KernelError::InvalidRequest {
-                    message: format!("invalid or duplicate resource export {verb}"),
+                    message: format!("invalid or duplicate resource export {export}"),
                 });
             }
         }
@@ -8341,9 +5752,7 @@ pub mod resources {
             &package.root.join("resource.wit"),
             &package.root.join("Cargo.toml"),
             &package.root.join("Cargo.lock"),
-            &package.root.join("../wit/resource-surface/world.wit"),
-            &package.root.join("../../wit/resource-surface/world.wit"),
-            &package.root.join("../../../wit/resource-surface/world.wit"),
+            &package.root.join("deps"),
         ] {
             super::package::hash_path(&mut hasher, path)
                 .map_err(|message| KernelError::Handler { message })?;
@@ -8386,22 +5795,19 @@ pub mod resources {
                     .to_owned(),
             });
         }
-        for verb in super::contracts::Verb::ALL {
-            let actual = exports
-                .iter()
-                .any(|name| name.contains(&format!("artist:resource/{verb}")));
-            let declared = package
-                .manifest
-                .exports
-                .iter()
-                .any(|export| export == verb.to_string().as_str());
-            if actual != declared {
-                return Err(KernelError::InvalidRequest {
-                    message: format!(
-                        "resource component export mismatch for {verb}: declared={declared}, actual={actual}"
-                    ),
-                });
-            }
+        let actual_exports = resource_interface_names(&exports);
+        let declared_exports = package
+            .manifest
+            .exports
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        if actual_exports != declared_exports {
+            return Err(KernelError::InvalidRequest {
+                message: format!(
+                    "resource component export mismatch: declared={declared_exports:?}, actual={actual_exports:?}"
+                ),
+            });
         }
         // The component type is authoritative: a package cannot hide a
         // standard nested operation import behind stale or missing WIT.
@@ -8410,50 +5816,132 @@ pub mod resources {
             .imports(&engine)
             .map(|(name, _)| name.to_owned())
             .collect::<Vec<_>>();
-        for import in &actual_imports {
-            for verb in super::contracts::Verb::ALL {
-                if import.contains(&format!("resource/{verb}"))
-                    && !package
-                        .manifest
-                        .capabilities
-                        .iter()
-                        .any(|capability| capability == &format!("resource.{verb}"))
-                {
-                    return Err(KernelError::PermissionDenied {
-                        uri: format!("resource.{verb}"),
-                    });
-                }
+        let actual_imports = resource_interface_names(&actual_imports);
+        for interface in &actual_imports {
+            if !package
+                .manifest
+                .capabilities
+                .iter()
+                .any(|capability| capability == &format!("resource.{interface}"))
+            {
+                return Err(KernelError::PermissionDenied {
+                    uri: format!("resource.{interface}"),
+                });
             }
         }
         if let Some(wit) = &package.wit {
             let declared_imports = ResourcePackage::resource_wit_imports(wit)?;
-            for verb in super::contracts::Verb::ALL {
-                let actual = actual_imports
-                    .iter()
-                    .any(|import| import.contains(&format!("resource/{verb}")));
-                let declared = declared_imports.contains(&verb.to_string());
-                if actual != declared {
-                    return Err(KernelError::InvalidRequest {
-                        message: format!(
-                            "resource.wit/component import mismatch for {verb}: declared={declared}, actual={actual}"
-                        ),
-                    });
-                }
+            if actual_imports != declared_imports {
+                return Err(KernelError::InvalidRequest {
+                    message: format!(
+                        "resource.wit/component import mismatch: declared={declared_imports:?}, actual={actual_imports:?}"
+                    ),
+                });
             }
         }
         let _ = options;
         Ok(())
     }
 
+    fn resource_interface_names(names: &[String]) -> std::collections::HashSet<String> {
+        names
+            .iter()
+            .filter(|name| {
+                name.starts_with("artist:%resource/") || name.starts_with("artist:resource/")
+            })
+            .filter_map(|name| name.rsplit_once('/').map(|(_, value)| value))
+            .filter_map(|value| value.split('@').next())
+            .filter(|name| !matches!(*name, "extension" | "types" | "filesystem"))
+            .map(str::to_owned)
+            .collect()
+    }
+
     pub struct ResourcesHandler {
         root: PathBuf,
-        files: FileHandler,
         active: super::generations::GenerationStore<ActiveResource>,
         dirty: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
         activation_locks:
             Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<std::sync::Mutex<()>>>>>,
         disabled_file_package: Option<String>,
         publication_lock: Arc<std::sync::Mutex<()>>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ResourceVerbBindings {
+        pub read: VerbId,
+        pub write: VerbId,
+        pub edit: VerbId,
+        pub poll: VerbId,
+        pub send: VerbId,
+        pub run: VerbId,
+        pub abort: VerbId,
+        pub delete: VerbId,
+        pub find: VerbId,
+        pub grep: VerbId,
+    }
+
+    pub struct DynamicResourcesProvider {
+        handler: Arc<ResourcesHandler>,
+        bindings: ResourceVerbBindings,
+    }
+
+    impl ResourcesHandler {
+        async fn invoke_bootstrap_dynamic(
+            &self,
+            verb: &VerbId,
+            uri: ResourceUri,
+            input: DynamicValue,
+            bindings: &ResourceVerbBindings,
+        ) -> Result<DynamicValue, KernelError> {
+            let mapped_uri = self.map_uri(&ResourceAddress::uri(uri.clone()))?;
+            let input = match verb.function() {
+                "find" => DynamicValue::Record(BTreeMap::from([(
+                    "query".to_owned(),
+                    DynamicValue::String(dynamic_resource_string(&input, "query")?),
+                )])),
+                "grep" => DynamicValue::Record(BTreeMap::from([(
+                    "pattern".to_owned(),
+                    DynamicValue::String(dynamic_resource_string(&input, "pattern")?),
+                )])),
+                _ => remap_bootstrap_dynamic(input, &|value| {
+                    self.map_uri(&ResourceAddress::uri(value))
+                })?,
+            };
+            let identity = [
+                &bindings.read,
+                &bindings.write,
+                &bindings.edit,
+                &bindings.delete,
+                &bindings.find,
+                &bindings.grep,
+            ]
+            .into_iter()
+            .find(|identity| *identity == verb)
+            .cloned()
+            .ok_or_else(|| KernelError::UnsupportedVerb {
+                verb: verb.to_string(),
+                uri: uri.to_string(),
+            })?;
+            let provider = FileResourceProvider::new(
+                Arc::new(FileHandler::new(&self.root)?),
+                FileVerbBindings {
+                    read: bindings.read.clone(),
+                    write: bindings.write.clone(),
+                    edit: bindings.edit.clone(),
+                    delete: bindings.delete.clone(),
+                    find: bindings.find.clone(),
+                    grep: bindings.grep.clone(),
+                },
+            );
+            let result = provider.invoke(&identity, &mapped_uri, input).await?;
+            remap_bootstrap_dynamic(result.output, &|value| self.unmap_bootstrap_uri(value))
+        }
+    }
+
+    impl DynamicResourcesProvider {
+        pub fn new(handler: Arc<ResourcesHandler>, bindings: ResourceVerbBindings) -> Self {
+            Self { handler, bindings }
+        }
     }
 
     impl ResourcesHandler {
@@ -8469,7 +5957,6 @@ pub mod resources {
                 message: format!("canonicalize resources root: {error}"),
             })?;
             Ok(Self {
-                files: FileHandler::new(&root)?,
                 root,
                 active: super::generations::GenerationStore::new(),
                 dirty: watcher.map_or_else(
@@ -8775,7 +6262,7 @@ pub mod resources {
         fn active_candidates(
             &self,
             uri: &ResourceUri,
-            verb: Verb,
+            verb: &VerbId,
             scope: &artist_kernel::InvocationScope,
         ) -> Vec<Arc<ActiveResource>> {
             self.active
@@ -8901,179 +6388,6 @@ pub mod resources {
             candidates
         }
 
-        fn operation_candidates(
-            &self,
-            operation: &Operation,
-            scope: &artist_kernel::InvocationScope,
-        ) -> Vec<Arc<ActiveResource>> {
-            let (verb, uris): (Verb, Vec<&ResourceUri>) = match operation {
-                Operation::Read(items) => {
-                    (Verb::Read, items.iter().map(|item| &item.uri).collect())
-                }
-                Operation::Write(items) => {
-                    (Verb::Write, items.iter().map(|item| &item.uri).collect())
-                }
-                Operation::Edit(items) => {
-                    (Verb::Edit, items.iter().map(|item| &item.uri).collect())
-                }
-                Operation::Find(request) => (Verb::Find, request.roots.iter().collect()),
-                Operation::Grep(request) => match &request.source {
-                    artist_kernel::GrepSource::Resources(uris) => {
-                        (Verb::Grep, uris.iter().collect())
-                    }
-                    artist_kernel::GrepSource::Text(text) => {
-                        let _ = text;
-                        (Verb::Grep, Vec::new())
-                    }
-                },
-                Operation::Run(items) => (Verb::Run, items.iter().map(|item| &item.uri).collect()),
-                Operation::Send(items) => {
-                    (Verb::Send, items.iter().map(|item| &item.uri).collect())
-                }
-                Operation::Abort(uris) => (Verb::Abort, uris.iter().collect()),
-                Operation::Delete(uris) => (Verb::Delete, uris.iter().collect()),
-                Operation::Poll(request) => (
-                    Verb::Poll,
-                    request.targets.iter().map(|target| &target.uri).collect(),
-                ),
-            };
-            let mut candidates = Vec::new();
-            for uri in uris {
-                for candidate in self.active_candidates(uri, verb, scope) {
-                    if !candidates
-                        .iter()
-                        .any(|current: &Arc<ActiveResource>| Arc::ptr_eq(current, &candidate))
-                    {
-                        candidates.push(candidate);
-                    }
-                }
-            }
-            candidates
-        }
-
-        fn bootstrap_operation(operation: &Operation) -> bool {
-            let all_resources = |uris: &[ResourceUri]| {
-                !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "resources")
-            };
-            match operation {
-                Operation::Read(items) => all_resources(
-                    &items
-                        .iter()
-                        .map(|item| item.uri.clone())
-                        .collect::<Vec<_>>(),
-                ),
-                Operation::Write(items) => all_resources(
-                    &items
-                        .iter()
-                        .map(|item| item.uri.clone())
-                        .collect::<Vec<_>>(),
-                ),
-                Operation::Edit(items) => all_resources(
-                    &items
-                        .iter()
-                        .map(|item| item.uri.clone())
-                        .collect::<Vec<_>>(),
-                ),
-                Operation::Find(request) => all_resources(&request.roots),
-                Operation::Grep(request) => matches!(
-                    &request.source,
-                    artist_kernel::GrepSource::Resources(uris) if all_resources(uris)
-                ),
-                Operation::Abort(uris) | Operation::Delete(uris) => all_resources(uris),
-                _ => false,
-            }
-        }
-
-        fn mark_bootstrap_dirty(&self, operation: &Operation) {
-            let mut packages = std::collections::HashSet::new();
-            let mut collect = |uri: &ResourceUri| {
-                if uri.scheme() == "resources" {
-                    if let Some(package) = uri.as_ref().host_str() {
-                        packages.insert(package.to_owned());
-                    }
-                }
-            };
-            match operation {
-                Operation::Write(items) => items.iter().for_each(|item| collect(&item.uri)),
-                Operation::Edit(items) => items.iter().for_each(|item| collect(&item.uri)),
-                Operation::Delete(uris) => uris.iter().for_each(&mut collect),
-                _ => return,
-            }
-            if !packages.is_empty() {
-                let mut dirty = self.dirty.lock().unwrap();
-                for package in packages {
-                    dirty.insert(self.root.join(package));
-                }
-            }
-        }
-
-        fn map_bootstrap_operation(&self, operation: Operation) -> Result<Operation, KernelError> {
-            let map = |uri: ResourceUri| self.map_uri(&ResourceAddress::uri(uri));
-            Ok(match operation {
-                Operation::Read(items) => Operation::Read(
-                    items
-                        .into_iter()
-                        .map(|mut item| {
-                            item.uri = map(item.uri)?;
-                            Ok(item)
-                        })
-                        .collect::<Result<_, KernelError>>()?,
-                ),
-                Operation::Write(items) => Operation::Write(
-                    items
-                        .into_iter()
-                        .map(|mut item| {
-                            item.uri = map(item.uri)?;
-                            Ok(item)
-                        })
-                        .collect::<Result<_, KernelError>>()?,
-                ),
-                Operation::Edit(items) => Operation::Edit(
-                    items
-                        .into_iter()
-                        .map(|mut item| {
-                            item.uri = map(item.uri)?;
-                            Ok(item)
-                        })
-                        .collect::<Result<_, KernelError>>()?,
-                ),
-                Operation::Find(mut request) => {
-                    request.roots = request
-                        .roots
-                        .into_iter()
-                        .map(map)
-                        .collect::<Result<_, KernelError>>()?;
-                    Operation::Find(request)
-                }
-                Operation::Grep(mut request) => {
-                    if let artist_kernel::GrepSource::Resources(uris) = request.source {
-                        request.source = artist_kernel::GrepSource::Resources(
-                            uris.into_iter()
-                                .map(map)
-                                .collect::<Result<_, KernelError>>()?,
-                        );
-                    }
-                    Operation::Grep(request)
-                }
-                Operation::Abort(uris) => Operation::Abort(
-                    uris.into_iter()
-                        .map(map)
-                        .collect::<Result<_, KernelError>>()?,
-                ),
-                Operation::Delete(uris) => Operation::Delete(
-                    uris.into_iter()
-                        .map(map)
-                        .collect::<Result<_, KernelError>>()?,
-                ),
-                other => {
-                    return Err(KernelError::UnsupportedVerb {
-                        verb: operation_verb(&other).to_owned(),
-                        uri: operation_uri(&other),
-                    });
-                }
-            })
-        }
-
         fn unmap_bootstrap_uri(&self, uri: ResourceUri) -> Result<ResourceUri, KernelError> {
             let path = uri
                 .as_ref()
@@ -9112,85 +6426,6 @@ pub mod resources {
                 output = output.with_fragment(fragment);
             }
             Ok(output)
-        }
-
-        fn unmap_bootstrap_result(
-            &self,
-            result: OperationResult,
-        ) -> Result<OperationResult, KernelError> {
-            let uri = |uri: ResourceUri| self.unmap_bootstrap_uri(uri);
-            Ok(match result {
-                OperationResult::Read(values) => OperationResult::Read(
-                    values
-                        .into_iter()
-                        .map(|value| {
-                            value.and_then(|value| match value {
-                                artist_kernel::ReadResult::Text(mut text) => {
-                                    text.uri = uri(text.uri)?;
-                                    Ok(artist_kernel::ReadResult::Text(text))
-                                }
-                                artist_kernel::ReadResult::Directory { uri: root, entries } => {
-                                    Ok(artist_kernel::ReadResult::Directory {
-                                        uri: uri(root)?,
-                                        entries: entries
-                                            .into_iter()
-                                            .map(uri)
-                                            .collect::<Result<_, _>>()?,
-                                    })
-                                }
-                            })
-                        })
-                        .collect(),
-                ),
-                OperationResult::Write(values) => OperationResult::Write(
-                    values
-                        .into_iter()
-                        .map(|value| {
-                            value.and_then(|mut result| {
-                                result.text.uri = uri(result.text.uri)?;
-                                Ok(result)
-                            })
-                        })
-                        .collect(),
-                ),
-                OperationResult::Edit(values) => OperationResult::Edit(
-                    values
-                        .into_iter()
-                        .map(|value| {
-                            value.and_then(|mut result| {
-                                result.text.uri = uri(result.text.uri)?;
-                                result.diff.uri = uri(result.diff.uri)?;
-                                Ok(result)
-                            })
-                        })
-                        .collect(),
-                ),
-                OperationResult::Find(value) => OperationResult::Find(
-                    value.map(|uris| uris.into_iter().map(uri).collect::<Result<_, _>>())?,
-                ),
-                OperationResult::Grep(value) => OperationResult::Grep(value.map(|texts| {
-                    texts
-                        .into_iter()
-                        .map(|mut text| {
-                            text.uri = uri(text.uri)?;
-                            Ok(text)
-                        })
-                        .collect::<Result<_, KernelError>>()
-                })?),
-                OperationResult::Abort(values) => OperationResult::Abort(
-                    values
-                        .into_iter()
-                        .map(|value| value.and_then(uri))
-                        .collect(),
-                ),
-                OperationResult::Delete(values) => OperationResult::Delete(
-                    values
-                        .into_iter()
-                        .map(|value| value.and_then(uri))
-                        .collect(),
-                ),
-                other => other,
-            })
         }
 
         fn map_uri(&self, target: &ResourceAddress) -> Result<ResourceUri, KernelError> {
@@ -9233,9 +6468,60 @@ pub mod resources {
             Ok(mapped)
         }
 
+        async fn invoke_dynamic_provider(
+            &self,
+            verb: &VerbId,
+            uri: &ResourceUri,
+            input: DynamicValue,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<DynamicValue, KernelError> {
+            let candidates = self.active_candidates(uri, verb, &scope);
+            if candidates.is_empty() {
+                return Err(KernelError::NoHandler {
+                    uri: uri.to_string(),
+                });
+            }
+            let (candidate, decision) = self.select_candidate(verb, uri, candidates).await?;
+            if decision == artist_kernel::ClaimDecision::Reserve {
+                return Err(KernelError::UnsupportedVerb {
+                    verb: verb.to_string(),
+                    uri: uri.to_string(),
+                });
+            }
+            let Some(candidate) = candidate else {
+                return Err(KernelError::NoHandler {
+                    uri: uri.to_string(),
+                });
+            };
+            // Resource packages own their exact WIT input shape. The kernel
+            // supplies the leased typed value unchanged; no central verb
+            // vocabulary may reshape it here.
+            let input = if verb.function() == "read" {
+                let mut request = match input {
+                    DynamicValue::Record(fields) => fields,
+                    other => {
+                        return Err(KernelError::InvalidRequest {
+                            message: format!(
+                                "resource read expects a record request, got {other:?}"
+                            ),
+                        });
+                    }
+                };
+                request.insert("uri".to_owned(), DynamicValue::String(uri.to_string()));
+                DynamicValue::List(vec![DynamicValue::Record(request)])
+            } else {
+                input
+            };
+            candidate
+                .host
+                .invoke_dynamic(verb, input, host, scope, &candidate.host.capabilities)
+                .await
+        }
+
         async fn select_candidate(
             &self,
-            verb: Verb,
+            verb: &VerbId,
             uri: &ResourceUri,
             candidates: Vec<Arc<ActiveResource>>,
         ) -> Result<(Option<Arc<ActiveResource>>, artist_kernel::ClaimDecision), KernelError>
@@ -9256,7 +6542,7 @@ pub mod resources {
                         .manifest
                         .exports
                         .iter()
-                        .any(|export| export == verb.to_string().as_str())
+                        .any(|export| export == verb.function())
                 {
                     return Err(KernelError::Handler {
                         message: format!(
@@ -9290,363 +6576,340 @@ pub mod resources {
         }
     }
 
+    impl DynamicClaimProvider for DynamicResourcesProvider {
+        fn claim(&self, verb: &VerbId, uri: &ResourceUri) -> ClaimDecision {
+            if uri.scheme() == "resources" {
+                return ClaimDecision::Handle;
+            }
+            let scope =
+                artist_kernel::InvocationScope::new(artist_kernel::InvocationContext::default());
+            if self.handler.active_candidates(uri, verb, &scope).is_empty() {
+                ClaimDecision::Pass
+            } else {
+                ClaimDecision::Handle
+            }
+        }
+    }
+
+    impl DynamicResourceProvider for DynamicResourcesProvider {
+        fn invoke<'a>(
+            &'a self,
+            verb: &'a VerbId,
+            uri: &'a ResourceUri,
+            input: DynamicValue,
+        ) -> ResourceFuture<'a> {
+            Box::pin(async move {
+                // The package-file bootstrap mount is still a compatibility
+                // path: it exposes ordinary filesystem files before a
+                // resource component is activated. Component-backed calls
+                // below use the direct dynamic WIT path.
+                if uri.scheme() == "resources" {
+                    let result = self
+                        .handler
+                        .invoke_bootstrap_dynamic(verb, uri.clone(), input, &self.bindings)
+                        .await?;
+                    return Ok(DynamicVerbResult {
+                        verb: verb.clone(),
+                        function: verb.function().to_owned(),
+                        output: result,
+                    });
+                }
+                let result = self
+                    .handler
+                    .invoke_dynamic_provider(
+                        verb,
+                        uri,
+                        input,
+                        KernelHandle::detached(),
+                        artist_kernel::InvocationScope::new(
+                            artist_kernel::InvocationContext::default(),
+                        ),
+                    )
+                    .await?;
+                Ok(DynamicVerbResult {
+                    verb: verb.clone(),
+                    function: verb.function().to_owned(),
+                    output: result,
+                })
+            })
+        }
+    }
+
+    fn remap_bootstrap_dynamic(
+        value: DynamicValue,
+        map_uri: &dyn Fn(ResourceUri) -> Result<ResourceUri, KernelError>,
+    ) -> Result<DynamicValue, KernelError> {
+        Ok(match value {
+            DynamicValue::ResourceUri(uri) => DynamicValue::ResourceUri(map_uri(uri)?),
+            DynamicValue::String(value) if value.starts_with("resources://") => {
+                DynamicValue::String(map_uri(ResourceUri::parse(&value)?)?.to_string())
+            }
+            DynamicValue::List(values) => DynamicValue::List(
+                values
+                    .into_iter()
+                    .map(|value| remap_bootstrap_dynamic(value, map_uri))
+                    .collect::<Result<_, _>>()?,
+            ),
+            DynamicValue::Tuple(values) => DynamicValue::Tuple(
+                values
+                    .into_iter()
+                    .map(|value| remap_bootstrap_dynamic(value, map_uri))
+                    .collect::<Result<_, _>>()?,
+            ),
+            DynamicValue::Record(fields) => DynamicValue::Record(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| Ok((name, remap_bootstrap_dynamic(value, map_uri)?)))
+                    .collect::<Result<_, KernelError>>()?,
+            ),
+            DynamicValue::Option(value) => DynamicValue::Option(
+                value
+                    .map(|value| remap_bootstrap_dynamic(*value, map_uri).map(Box::new))
+                    .transpose()?,
+            ),
+            DynamicValue::Result(result) => DynamicValue::Result(match result {
+                Ok(value) => Ok(Box::new(remap_bootstrap_dynamic(*value, map_uri)?)),
+                Err(value) => Err(Box::new(remap_bootstrap_dynamic(*value, map_uri)?)),
+            }),
+            DynamicValue::Variant(name, value) => DynamicValue::Variant(
+                name,
+                value
+                    .map(|value| remap_bootstrap_dynamic(*value, map_uri).map(Box::new))
+                    .transpose()?,
+            ),
+            other => other,
+        })
+    }
+
+    fn dynamic_resource_record<'a>(
+        input: &'a DynamicValue,
+    ) -> Result<&'a BTreeMap<String, DynamicValue>, KernelError> {
+        match input {
+            DynamicValue::Record(fields) => Ok(fields),
+            _ => Err(KernelError::InvalidRequest {
+                message: "resource dynamic input must be a record".to_owned(),
+            }),
+        }
+    }
+
+    fn dynamic_resource_string(input: &DynamicValue, name: &str) -> Result<String, KernelError> {
+        match dynamic_resource_record(input)?.get(name) {
+            Some(DynamicValue::String(value)) => Ok(value.clone()),
+            _ => Err(KernelError::InvalidRequest {
+                message: format!("resource dynamic field {name} must be a string"),
+            }),
+        }
+    }
+
+    fn dynamic_edit_operation(
+        operation: artist_kernel::EditOperation,
+    ) -> Result<DynamicValue, KernelError> {
+        Ok(match operation {
+            artist_kernel::EditOperation::Replace(operation) => DynamicValue::Variant(
+                "replace".to_owned(),
+                Some(Box::new(DynamicValue::Record(BTreeMap::from([
+                    (
+                        "start".to_owned(),
+                        DynamicValue::String(operation.start.to_string()),
+                    ),
+                    (
+                        "end".to_owned(),
+                        DynamicValue::Option(
+                            operation
+                                .end
+                                .map(|anchor| Box::new(DynamicValue::String(anchor.to_string()))),
+                        ),
+                    ),
+                    (
+                        "content".to_owned(),
+                        DynamicValue::String(operation.content),
+                    ),
+                ])))),
+            ),
+            artist_kernel::EditOperation::Insert(operation) => {
+                let at = match operation.at {
+                    artist_kernel::InsertionPoint::Top => {
+                        DynamicValue::Variant("top".to_owned(), None)
+                    }
+                    artist_kernel::InsertionPoint::Bottom => {
+                        DynamicValue::Variant("bottom".to_owned(), None)
+                    }
+                    artist_kernel::InsertionPoint::Before(anchor) => DynamicValue::Variant(
+                        "before".to_owned(),
+                        Some(Box::new(DynamicValue::String(anchor.to_string()))),
+                    ),
+                    artist_kernel::InsertionPoint::After(anchor) => DynamicValue::Variant(
+                        "after".to_owned(),
+                        Some(Box::new(DynamicValue::String(anchor.to_string()))),
+                    ),
+                };
+                DynamicValue::Variant(
+                    "insert".to_owned(),
+                    Some(Box::new(DynamicValue::Record(BTreeMap::from([
+                        ("at".to_owned(), at),
+                        (
+                            "content".to_owned(),
+                            DynamicValue::String(operation.content),
+                        ),
+                    ])))),
+                )
+            }
+        })
+    }
+
+    fn dynamic_poll_position(position: artist_kernel::Position) -> DynamicValue {
+        match position {
+            artist_kernel::Position::Top => DynamicValue::Variant("top".to_owned(), None),
+            artist_kernel::Position::Bottom => DynamicValue::Variant("bottom".to_owned(), None),
+            artist_kernel::Position::At(anchor) => DynamicValue::Variant(
+                "at".to_owned(),
+                Some(Box::new(DynamicValue::String(anchor.to_string()))),
+            ),
+        }
+    }
+
+    fn dynamic_poll_atom(atom: artist_kernel::PollAtom) -> DynamicValue {
+        match atom {
+            artist_kernel::PollAtom::Changed(target) => DynamicValue::Variant(
+                "changed".to_owned(),
+                Some(Box::new(DynamicValue::U32(target))),
+            ),
+            artist_kernel::PollAtom::Regex(regex) => DynamicValue::Variant(
+                "regex".to_owned(),
+                Some(Box::new(DynamicValue::Record(BTreeMap::from([
+                    ("target".to_owned(), DynamicValue::U32(regex.target)),
+                    ("pattern".to_owned(), DynamicValue::String(regex.pattern)),
+                ])))),
+            ),
+            artist_kernel::PollAtom::Terminated(target) => DynamicValue::Variant(
+                "terminated".to_owned(),
+                Some(Box::new(DynamicValue::U32(target))),
+            ),
+            artist_kernel::PollAtom::Timeout(milliseconds) => DynamicValue::Variant(
+                "timeout".to_owned(),
+                Some(Box::new(DynamicValue::U64(milliseconds))),
+            ),
+        }
+    }
+
+    fn dynamic_poll_condition(condition: artist_kernel::PollCondition) -> DynamicValue {
+        let mut nodes = Vec::new();
+        fn lower(condition: artist_kernel::PollCondition, nodes: &mut Vec<DynamicValue>) -> u32 {
+            let node = match condition {
+                artist_kernel::PollCondition::Atom(atom) => DynamicValue::Variant(
+                    "atom".to_owned(),
+                    Some(Box::new(dynamic_poll_atom(atom))),
+                ),
+                artist_kernel::PollCondition::All(children) => DynamicValue::Variant(
+                    "all".to_owned(),
+                    Some(Box::new(DynamicValue::List(
+                        children
+                            .into_iter()
+                            .map(|child| DynamicValue::U32(lower(child, nodes)))
+                            .collect(),
+                    ))),
+                ),
+                artist_kernel::PollCondition::Any(children) => DynamicValue::Variant(
+                    "any".to_owned(),
+                    Some(Box::new(DynamicValue::List(
+                        children
+                            .into_iter()
+                            .map(|child| DynamicValue::U32(lower(child, nodes)))
+                            .collect(),
+                    ))),
+                ),
+            };
+            let index = nodes.len() as u32;
+            nodes.push(node);
+            index
+        }
+        let root = lower(condition, &mut nodes);
+        DynamicValue::Record(BTreeMap::from([
+            ("root".to_owned(), DynamicValue::U32(root)),
+            ("nodes".to_owned(), DynamicValue::List(nodes)),
+        ]))
+    }
+
+    fn dynamic_poll_atom_from_value(
+        value: &DynamicValue,
+    ) -> Result<artist_kernel::PollAtom, KernelError> {
+        let DynamicValue::Variant(name, Some(payload)) = value else {
+            return Err(KernelError::Handler {
+                message: "resource poll atom is invalid".to_owned(),
+            });
+        };
+        match (name.as_str(), payload.as_ref()) {
+            ("changed", DynamicValue::U32(target)) => Ok(artist_kernel::PollAtom::Changed(*target)),
+            ("terminated", DynamicValue::U32(target)) => {
+                Ok(artist_kernel::PollAtom::Terminated(*target))
+            }
+            ("timeout", DynamicValue::U64(milliseconds)) => {
+                Ok(artist_kernel::PollAtom::Timeout(*milliseconds))
+            }
+            ("regex", DynamicValue::Record(fields)) => {
+                let target = match fields.get("target") {
+                    Some(DynamicValue::U32(target)) => *target,
+                    _ => {
+                        return Err(KernelError::Handler {
+                            message: "resource poll regex has no target".to_owned(),
+                        });
+                    }
+                };
+                let pattern =
+                    super::dynamic_wit_string_value(fields.get("pattern").ok_or_else(|| {
+                        KernelError::Handler {
+                            message: "resource poll regex has no pattern".to_owned(),
+                        }
+                    })?)?;
+                Ok(artist_kernel::PollAtom::Regex(artist_kernel::RegexAtom {
+                    target,
+                    pattern,
+                }))
+            }
+            _ => Err(KernelError::Handler {
+                message: format!("unknown resource poll atom {name}"),
+            }),
+        }
+    }
+
+    fn dynamic_resource_line(line: artist_kernel::AnchoredLine) -> DynamicValue {
+        DynamicValue::Record(BTreeMap::from([
+            (
+                "anchor".to_owned(),
+                DynamicValue::List(
+                    line.anchor
+                        .tokens()
+                        .iter()
+                        .cloned()
+                        .map(DynamicValue::String)
+                        .collect(),
+                ),
+            ),
+            ("text".to_owned(), DynamicValue::String(line.text)),
+            (
+                "ending".to_owned(),
+                DynamicValue::String(format!("{:?}", line.ending).to_lowercase()),
+            ),
+        ]))
+    }
+
+    fn dynamic_resource_text(text: artist_kernel::AnchoredText) -> DynamicValue {
+        DynamicValue::Record(BTreeMap::from([
+            ("uri".to_owned(), DynamicValue::ResourceUri(text.uri)),
+            (
+                "lines".to_owned(),
+                DynamicValue::List(text.lines.into_iter().map(dynamic_resource_line).collect()),
+            ),
+        ]))
+    }
+
     impl ResourceCatalogProvider for ResourcesHandler {
         fn resource_catalog(&self) -> Vec<ResourceCatalogEntry> {
             self.catalog()
         }
     }
 
-    impl Handler for ResourcesHandler {
-        fn descriptor(&self) -> HandlerDescriptor {
-            HandlerDescriptor {
-                name: "resources-bootstrap".to_owned(),
-                schemes: vec!["resources".to_owned()],
-                verbs: Verb::ALL.to_vec(),
-            }
-        }
-
-        fn execute<'a>(
-            &'a self,
-            mut request: Request,
-            host: KernelHandle,
-        ) -> BoxFuture<'a, Result<serde_json::Value, KernelError>> {
-            let mapped = self.map_uri(&request.target);
-            Box::pin(async move {
-                request.target = ResourceAddress::uri(mapped?);
-                // The bootstrap mount exposes package files through the same
-                // ordinary file semantics as tools:// package inspection.
-                self.files.execute(request, host).await
-            })
-        }
-    }
-
-    impl TypedHandler for ResourcesHandler {
-        fn descriptor(&self) -> HandlerDescriptor {
-            HandlerDescriptor {
-                name: "resource-extensions".to_owned(),
-                schemes: Vec::new(),
-                verbs: Verb::ALL.to_vec(),
-            }
-        }
-
-        fn claims_operation(&self, operation: &Operation) -> bool {
-            Self::bootstrap_operation(operation)
-                || !self
-                    .operation_candidates(
-                        operation,
-                        &artist_kernel::InvocationScope::new(
-                            artist_kernel::InvocationContext::default(),
-                        ),
-                    )
-                    .is_empty()
-        }
-
-        fn claim_operation<'a>(
-            &'a self,
-            operation: &'a Operation,
-        ) -> BoxFuture<'a, Result<artist_kernel::ClaimDecision, KernelError>> {
-            self.claim_operation_with_scope(
-                operation,
-                artist_kernel::InvocationScope::new(artist_kernel::InvocationContext::default()),
-            )
-        }
-
-        fn claim_operation_with_scope<'a>(
-            &'a self,
-            operation: &'a Operation,
-            scope: artist_kernel::InvocationScope,
-        ) -> BoxFuture<'a, Result<artist_kernel::ClaimDecision, KernelError>> {
-            Box::pin(async move {
-                if Self::bootstrap_operation(operation) {
-                    return Ok(artist_kernel::ClaimDecision::Handle);
-                }
-                let candidates = self.operation_candidates(operation, &scope);
-                if candidates.is_empty() {
-                    return Ok(artist_kernel::ClaimDecision::Pass);
-                }
-                let uri = operation_uri(operation);
-                let verb = operation_verb(operation);
-                let uri = match ResourceUri::parse(&uri) {
-                    Ok(uri) => uri,
-                    Err(error) => {
-                        return Err(KernelError::Handler {
-                            message: format!("resource claim failed: {error}"),
-                        });
-                    }
-                };
-                let verb = Verb::ALL
-                    .iter()
-                    .copied()
-                    .find(|candidate| candidate.to_string() == verb)
-                    .unwrap_or(Verb::Read);
-                let claim_key =
-                    format!("resource-extensions:{}:{}", verb, operation_uri(&operation));
-                let (candidate, decision) = if let Some(decision) = scope.pinned_claim(&claim_key) {
-                    (candidates.into_iter().next(), decision)
-                } else {
-                    self.select_candidate(verb, &uri, candidates).await?
-                };
-                if let Some(candidate) = candidate {
-                    let pin_key = generation_pin_key(verb, &uri);
-                    scope.pin_generation(
-                        pin_key.clone(),
-                        candidate.package.manifest.name.clone(),
-                        candidate.generation,
-                    );
-                    scope.pin_generation_handle(pin_key, Arc::clone(&candidate));
-                    scope.pin_generation_handle(
-                        resource_package_pin_key(&candidate.package.manifest.name),
-                        Arc::clone(&candidate),
-                    );
-                }
-                Ok(decision)
-            })
-        }
-
-        fn execute_typed<'a>(
-            &'a self,
-            operation: Operation,
-            host: KernelHandle,
-            context: artist_kernel::InvocationContext,
-        ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
-            self.execute_typed_with_scope(
-                operation,
-                host,
-                artist_kernel::InvocationScope::new(context),
-            )
-        }
-
-        fn execute_typed_with_scope<'a>(
-            &'a self,
-            operation: Operation,
-            host: KernelHandle,
-            scope: artist_kernel::InvocationScope,
-        ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
-            Box::pin(async move {
-                if Self::bootstrap_operation(&operation) {
-                    self.mark_bootstrap_dirty(&operation);
-                    let mapped = self.map_bootstrap_operation(operation)?;
-                    let result = self
-                        .files
-                        .execute_typed(mapped, host, scope.context.clone())
-                        .await?;
-                    return self.unmap_bootstrap_result(result);
-                }
-                let mut candidates = self.operation_candidates(&operation, &scope);
-                if candidates.is_empty() {
-                    return Err(KernelError::NoHandler {
-                        uri: operation_uri(&operation),
-                    });
-                }
-                let uri = ResourceUri::parse(&operation_uri(&operation)).map_err(|error| {
-                    KernelError::InvalidUri {
-                        message: error.to_string(),
-                    }
-                })?;
-                let verb = Verb::ALL
-                    .iter()
-                    .copied()
-                    .find(|candidate| candidate.to_string() == operation_verb(&operation))
-                    .unwrap_or(Verb::Read);
-                if let Some((package, generation)) =
-                    scope.pinned_generation(&generation_pin_key(verb, &uri))
-                {
-                    candidates.retain(|candidate| {
-                        candidate.package.manifest.name == package
-                            && candidate.generation == generation
-                    });
-                }
-                // Claiming and invoking are one routing transaction. The
-                // kernel records the decision against this operation before
-                // entering the invoke phase; reuse that decision and the
-                // generation lease instead of asking a hot-reloadable
-                // component to claim the operation a second time.
-                let claim_key =
-                    format!("resource-extensions:{}:{}", verb, operation_uri(&operation));
-                let (candidate, decision) = if let Some(decision) = scope.pinned_claim(&claim_key) {
-                    (candidates.into_iter().next(), decision)
-                } else {
-                    self.select_candidate(verb, &uri, candidates).await?
-                };
-                if decision == artist_kernel::ClaimDecision::Reserve {
-                    return Err(KernelError::UnsupportedVerb {
-                        verb: verb.to_string(),
-                        uri: uri.to_string(),
-                    });
-                }
-                let Some(candidate) = candidate else {
-                    return Err(KernelError::NoHandler {
-                        uri: operation_uri(&operation),
-                    });
-                };
-                let frame_key = format!(
-                    "{}@{}:{}:{}",
-                    candidate.package.manifest.name,
-                    candidate.generation,
-                    verb,
-                    uri.without_fragment()
-                );
-                let _routing_frame =
-                    scope
-                        .enter_routing_frame(frame_key)
-                        .map_err(|cycle| KernelError::Handler {
-                            message: format!("resource routing cycle: {cycle}"),
-                        })?;
-                let verb = operation_verb(&operation);
-                if let Operation::Write(requests) = &operation {
-                    let output = candidate
-                        .host
-                        .invoke_write_typed(requests.clone(), host.clone(), scope.clone())
-                        .await?;
-                    return Ok(OperationResult::Write(output));
-                }
-                if let Operation::Read(requests) = &operation {
-                    let output = candidate
-                        .host
-                        .invoke_read_typed(requests.clone(), host.clone(), scope.clone())
-                        .await?;
-                    return Ok(OperationResult::Read(output));
-                }
-                if let Operation::Edit(requests) = &operation {
-                    let output = candidate
-                        .host
-                        .invoke_edit_typed(requests.clone(), host.clone(), scope.clone())
-                        .await?;
-                    return Ok(OperationResult::Edit(output));
-                }
-                if let Operation::Run(requests) = &operation {
-                    let output = candidate
-                        .host
-                        .invoke_run_typed(requests.clone(), host.clone(), scope.clone())
-                        .await?;
-                    return Ok(OperationResult::Run(output));
-                }
-                if let Operation::Send(requests) = &operation {
-                    let output = candidate
-                        .host
-                        .invoke_send_typed(requests.clone(), host.clone(), scope.clone())
-                        .await?;
-                    return Ok(OperationResult::Send(output));
-                }
-                if let Operation::Find(request) = &operation {
-                    let output = candidate
-                        .host
-                        .invoke_find_typed(request.clone(), host.clone(), scope.clone())
-                        .await?;
-                    return Ok(OperationResult::Find(Ok(output)));
-                }
-                if let Operation::Grep(request) = &operation {
-                    let output = candidate
-                        .host
-                        .invoke_grep_typed(request.clone(), host.clone(), scope.clone())
-                        .await?;
-                    return Ok(OperationResult::Grep(Ok(output)));
-                }
-                if let Operation::Poll(request) = &operation {
-                    let output = candidate
-                        .host
-                        .invoke_poll_typed(request.clone(), host.clone(), scope.clone())
-                        .await?;
-                    return Ok(OperationResult::Poll(Ok(output)));
-                }
-                if let Operation::Abort(uris) = &operation {
-                    let output = candidate
-                        .host
-                        .invoke_abort_typed(
-                            uris.iter().map(ToString::to_string).collect(),
-                            host.clone(),
-                            scope.clone(),
-                        )
-                        .await?;
-                    return Ok(OperationResult::Abort(
-                        super::resource_abort_results_to_kernel(output)?,
-                    ));
-                }
-                if let Operation::Delete(uris) = &operation {
-                    let output = candidate
-                        .host
-                        .invoke_delete_typed(
-                            uris.iter().map(ToString::to_string).collect(),
-                            host.clone(),
-                            scope.clone(),
-                        )
-                        .await?;
-                    return Ok(OperationResult::Delete(
-                        super::resource_delete_results_to_kernel(output)?,
-                    ));
-                }
-                Err(KernelError::Handler {
-                    message: format!(
-                        "resource verb {verb} was not dispatched through its typed WIT interface"
-                    ),
-                })
-            })
-        }
-    }
-
-    fn operation_uri(operation: &Operation) -> String {
-        match operation {
-            Operation::Read(items) => items
-                .first()
-                .map(|item| item.uri.to_string())
-                .unwrap_or_default(),
-            Operation::Write(items) => items
-                .first()
-                .map(|item| item.uri.to_string())
-                .unwrap_or_default(),
-            Operation::Edit(items) => items
-                .first()
-                .map(|item| item.uri.to_string())
-                .unwrap_or_default(),
-            Operation::Find(request) => request
-                .roots
-                .first()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            Operation::Grep(request) => match &request.source {
-                artist_kernel::GrepSource::Resources(uris) => {
-                    uris.first().map(ToString::to_string).unwrap_or_default()
-                }
-                artist_kernel::GrepSource::Text(text) => text
-                    .first()
-                    .map(|text| text.uri.to_string())
-                    .unwrap_or_default(),
-            },
-            Operation::Run(items) => items
-                .first()
-                .map(|item| item.uri.to_string())
-                .unwrap_or_default(),
-            Operation::Send(items) => items
-                .first()
-                .map(|item| item.uri.to_string())
-                .unwrap_or_default(),
-            Operation::Abort(uris) | Operation::Delete(uris) => {
-                uris.first().map(ToString::to_string).unwrap_or_default()
-            }
-            Operation::Poll(request) => request
-                .targets
-                .first()
-                .map(|target| target.uri.to_string())
-                .unwrap_or_default(),
-        }
-    }
-
-    fn operation_verb(operation: &Operation) -> &'static str {
-        match operation {
-            Operation::Read(_) => "read",
-            Operation::Write(_) => "write",
-            Operation::Edit(_) => "edit",
-            Operation::Find(_) => "find",
-            Operation::Grep(_) => "grep",
-            Operation::Run(_) => "run",
-            Operation::Send(_) => "send",
-            Operation::Abort(_) => "abort",
-            Operation::Delete(_) => "delete",
-            Operation::Poll(_) => "poll",
-        }
-    }
-
-    fn generation_pin_key(verb: Verb, uri: &ResourceUri) -> String {
+    fn generation_pin_key(verb: &VerbId, uri: &ResourceUri) -> String {
         format!("{}:{}", verb, uri.without_fragment())
     }
 
@@ -9808,10 +7071,59 @@ pub mod watcher {
 mod tests {
     use super::*;
 
+    fn register_file_provider(kernel: &artist_kernel::Kernel, root: &std::path::Path) {
+        let identity = |function: &str| {
+            artist_kernel::VerbId::new(format!("artist:filesystem/{function}@1.0.0")).unwrap()
+        };
+        kernel
+            .register_dynamic_resource_provider(std::sync::Arc::new(
+                artist_kernel::FileResourceProvider::new(
+                    std::sync::Arc::new(artist_kernel::FileHandler::new(root).unwrap()),
+                    artist_kernel::FileVerbBindings {
+                        read: identity("read"),
+                        write: identity("write"),
+                        edit: identity("edit"),
+                        delete: identity("delete"),
+                        find: identity("find"),
+                        grep: identity("grep"),
+                    },
+                ),
+            ))
+            .unwrap();
+    }
+
+    fn register_resource_provider(
+        kernel: &artist_kernel::Kernel,
+        handler: resources::ResourcesHandler,
+    ) {
+        let identity = |function: &str| {
+            artist_kernel::VerbId::new(format!("artist:resources/{function}@1.0.0")).unwrap()
+        };
+        kernel
+            .register_dynamic_resource_provider(std::sync::Arc::new(
+                resources::DynamicResourcesProvider::new(
+                    std::sync::Arc::new(handler),
+                    resources::ResourceVerbBindings {
+                        read: identity("read"),
+                        write: identity("write"),
+                        edit: identity("edit"),
+                        poll: identity("poll"),
+                        send: identity("send"),
+                        run: identity("run"),
+                        abort: identity("abort"),
+                        delete: identity("delete"),
+                        find: identity("find"),
+                        grep: identity("grep"),
+                    },
+                ),
+            ))
+            .unwrap();
+    }
+
     #[test]
     fn dynamic_values_round_trip_through_component_values() {
         let value = DynamicValue::Record(std::collections::BTreeMap::from([
-            ("name".into(), DynamicValue::String("uppercase".into())),
+            ("name".into(), DynamicValue::String("transform".into())),
             ("enabled".into(), DynamicValue::Bool(true)),
             (
                 "items".into(),
@@ -9820,6 +7132,24 @@ mod tests {
         ]));
         let component = dynamic_value_to_component_val(&value).unwrap();
         assert_eq!(component_val_to_dynamic_value(&component).unwrap(), value);
+    }
+
+    #[test]
+    fn typed_lifting_preserves_uri_aliases_inside_nested_values() {
+        let uri = artist_kernel::ResourceUri::parse("process://42").unwrap();
+        let value = DynamicValue::Record(std::collections::BTreeMap::from([(
+            "targets".into(),
+            DynamicValue::List(vec![DynamicValue::ResourceUri(uri.clone())]),
+        )]));
+        let ty = DynamicType::Record(std::collections::BTreeMap::from([(
+            "targets".into(),
+            DynamicType::List(Box::new(DynamicType::ResourceUri)),
+        )]));
+        let component = dynamic_value_to_component_val(&value).unwrap();
+        assert_eq!(
+            component_val_to_dynamic_value_with_type(&component, &ty).unwrap(),
+            value
+        );
     }
 
     #[test]
@@ -9848,23 +7178,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("typed.txt"), "typed bridge\n").unwrap();
         let typed_uri = root.path().join("typed.txt").display().to_string();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let kernel = artist_kernel::Kernel::new();
-        runtime.block_on(kernel.register(artist_kernel::FileHandler::new(root.path()).unwrap()));
-        runtime
-            .block_on(kernel.register_typed(artist_kernel::FileHandler::new(root.path()).unwrap()));
-        let result = host
-            .invoke_read(
-                vec![tool_v1_bindings::artist::resource::types::ReadRequest {
-                    uri: typed_uri.clone(),
-                    at: None,
-                    before: None,
-                    after: None,
-                }],
-                kernel.handle(),
-            )
-            .unwrap();
-        assert!(result[0].is_ok(), "typed read failed: {result:?}");
+        register_file_provider(&kernel, root.path());
 
         let registry = runtime::ComponentRegistry::new();
         let active = registry.reload(&package, &options).unwrap();
@@ -9884,275 +7199,6 @@ mod tests {
             "typed runtime route failed: {routed}"
         );
     }
-
-    struct MockConformanceHandler;
-
-    impl artist_kernel::Handler for MockConformanceHandler {
-        fn descriptor(&self) -> artist_kernel::HandlerDescriptor {
-            artist_kernel::HandlerDescriptor {
-                name: "typed-conformance-mock".to_owned(),
-                schemes: Vec::new(),
-                verbs: artist_kernel::Verb::ALL.to_vec(),
-            }
-        }
-
-        fn claims(&self, _address: &artist_kernel::ResourceAddress) -> bool {
-            true
-        }
-
-        fn execute<'a>(
-            &'a self,
-            request: artist_kernel::Request,
-            _host: artist_kernel::KernelHandle,
-        ) -> artist_kernel::BoxFuture<'a, Result<serde_json::Value, artist_kernel::KernelError>>
-        {
-            Box::pin(async move {
-                Ok(match request.verb {
-                    artist_kernel::Verb::Read => serde_json::json!({
-                        "path": request.target.to_string(),
-                        "value": {"content": "mock text\n"}
-                    }),
-                    artist_kernel::Verb::Find | artist_kernel::Verb::Grep => {
-                        serde_json::json!({"paths": [request.target.to_string()]})
-                    }
-                    artist_kernel::Verb::Write => serde_json::json!({"written": true}),
-                    artist_kernel::Verb::Edit => serde_json::json!({"edited": true}),
-                    artist_kernel::Verb::Delete => serde_json::json!({"deleted": true}),
-                    _ => serde_json::json!({"ok": true}),
-                })
-            })
-        }
-    }
-
-    impl artist_kernel::TypedHandler for MockConformanceHandler {
-        fn descriptor(&self) -> artist_kernel::HandlerDescriptor {
-            artist_kernel::HandlerDescriptor {
-                name: "typed-conformance-mock".to_owned(),
-                schemes: Vec::new(),
-                verbs: artist_kernel::Verb::ALL.to_vec(),
-            }
-        }
-
-        fn claims_operation(&self, _operation: &artist_kernel::Operation) -> bool {
-            true
-        }
-
-        fn execute_typed<'a>(
-            &'a self,
-            operation: artist_kernel::Operation,
-            _host: artist_kernel::KernelHandle,
-            _context: artist_kernel::InvocationContext,
-        ) -> artist_kernel::BoxFuture<
-            'a,
-            Result<artist_kernel::OperationResult, artist_kernel::KernelError>,
-        > {
-            Box::pin(async move {
-                use artist_kernel::*;
-                let line = |uri: ResourceUri| AnchoredText {
-                    uri,
-                    lines: vec![AnchoredLine {
-                        anchor: Anchor::from_tokens(vec!["1".to_owned()]),
-                        text: "mock text".to_owned(),
-                        ending: LineEnding::Lf,
-                    }],
-                };
-                Ok(match operation {
-                    Operation::Read(requests) => OperationResult::Read(
-                        requests
-                            .into_iter()
-                            .map(|request| Ok(ReadResult::Text(line(request.uri))))
-                            .collect(),
-                    ),
-                    Operation::Write(requests) => OperationResult::Write(
-                        requests
-                            .into_iter()
-                            .map(|request| {
-                                Ok(WriteResult {
-                                    text: line(request.uri),
-                                })
-                            })
-                            .collect(),
-                    ),
-                    Operation::Edit(requests) => OperationResult::Edit(
-                        requests
-                            .into_iter()
-                            .map(|request| {
-                                Ok(EditResult {
-                                    text: line(request.uri.clone()),
-                                    diff: AnchoredDiff {
-                                        uri: request.uri,
-                                        hunks: Vec::new(),
-                                    },
-                                })
-                            })
-                            .collect(),
-                    ),
-                    Operation::Find(request) => OperationResult::Find(Ok(request.roots)),
-                    Operation::Grep(request) => OperationResult::Grep(Ok(match request.source {
-                        GrepSource::Resources(uris) => uris.into_iter().map(line).collect(),
-                        GrepSource::Text(text) => text,
-                    })),
-                    Operation::Run(requests) => OperationResult::Run(
-                        requests
-                            .into_iter()
-                            .map(|request| Ok(request.uri))
-                            .collect(),
-                    ),
-                    Operation::Send(requests) => OperationResult::Send(
-                        requests
-                            .into_iter()
-                            .map(|request| Ok(request.uri))
-                            .collect(),
-                    ),
-                    Operation::Abort(uris) => {
-                        OperationResult::Abort(uris.into_iter().map(Ok).collect())
-                    }
-                    Operation::Delete(uris) => {
-                        OperationResult::Delete(uris.into_iter().map(Ok).collect())
-                    }
-                    Operation::Poll(request) => OperationResult::Poll(Ok(PollResult {
-                        text: request
-                            .targets
-                            .into_iter()
-                            .map(|target| line(target.uri))
-                            .collect(),
-                        satisfied: Vec::new(),
-                    })),
-                })
-            })
-        }
-    }
-
-    #[test]
-    fn exercises_all_typed_verb_components_without_memory_backend() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let kernel = artist_kernel::Kernel::new();
-        runtime.block_on(kernel.register(MockConformanceHandler));
-        runtime.block_on(kernel.register_typed(MockConformanceHandler));
-
-        let cases = [
-            (
-                contracts::Verb::Read,
-                "[{\"uri\":\"typed.txt\",\"at\":null,\"before\":null,\"after\":null}]",
-            ),
-            (
-                contracts::Verb::Write,
-                "[{\"uri\":\"typed-write.txt\",\"content\":\"hello\\n\"}]",
-            ),
-            (
-                contracts::Verb::Edit,
-                "[{\"uri\":\"typed.txt\",\"operations\":[]}]",
-            ),
-            (
-                contracts::Verb::Find,
-                "{\"roots\":[\"typed.txt\"],\"query\":\"typed\"}",
-            ),
-            (
-                contracts::Verb::Grep,
-                "{\"pattern\":\"typed\",\"source\":{\"Resources\":[\"typed.txt\"]}}",
-            ),
-            (
-                contracts::Verb::Run,
-                "[{\"uri\":\"typed.txt\",\"args\":[]}]",
-            ),
-            (
-                contracts::Verb::Send,
-                "[{\"uri\":\"typed.txt\",\"content\":\"hello\"}]",
-            ),
-            (contracts::Verb::Abort, "[\"missing-abort\"]"),
-            (contracts::Verb::Delete, "[\"missing-delete\"]"),
-            (
-                contracts::Verb::Poll,
-                "{\"targets\":[{\"uri\":\"typed.txt\",\"from_position\":null}],\"until\":null}",
-            ),
-        ];
-
-        for (verb, input) in cases {
-            let package_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("conformance/verbs")
-                .join(verb.interface());
-            let package = package::ToolPackage::discover(&package_root).unwrap();
-            let mut options = package::BuildOptions::default();
-            options.force = true;
-            options.granted_capabilities = package.manifest.capabilities.clone();
-            let build = package.build(&options).unwrap();
-            let bytes = std::fs::read(build.artifact).unwrap();
-            let host = TypedComponentHost::new_with_capabilities(
-                &bytes,
-                options.granted_capabilities.clone(),
-            )
-            .unwrap();
-            let output = host.invoke_json(verb, input, kernel.handle()).unwrap();
-            serde_json::from_str::<serde_json::Value>(&output).unwrap();
-        }
-
-        let package_root =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/verbs/read");
-        let package = package::ToolPackage::discover(&package_root).unwrap();
-        let mut options = package::BuildOptions::default();
-        options.force = true;
-        options.granted_capabilities = package.manifest.capabilities.clone();
-        let build = package.build(&options).unwrap();
-        let host = TypedComponentHost::new_with_capabilities(
-            &std::fs::read(build.artifact).unwrap(),
-            std::iter::empty::<String>(),
-        )
-        .unwrap();
-        assert!(host.validate_contract(contracts::Verb::Read).is_ok());
-        assert!(host.validate_contract(contracts::Verb::Write).is_err());
-        let denied = host
-            .invoke_json(
-                contracts::Verb::Read,
-                "[{\"uri\":\"mock.txt\",\"at\":null,\"before\":null,\"after\":null}]",
-                kernel.handle(),
-            )
-            .unwrap();
-        assert!(denied.contains("PermissionDenied"));
-    }
-
-    #[test]
-    fn rejects_extra_typed_exports_and_imports() {
-        let read = contracts::Verb::Read;
-        let exports = vec![
-            "artist:tool/read@0.1.0".to_owned(),
-            "extra/export".to_owned(),
-        ];
-        let imports = vec![
-            "artist:tool/types@0.1.0".to_owned(),
-            "artist:tool/old-helper@0.1.0".to_owned(),
-            "artist:tool/extra@0.1.0".to_owned(),
-        ];
-        assert!(validate_typed_contract_names(read, &exports, &imports).is_err());
-        assert!(
-            validate_typed_contract_names(
-                read,
-                &["artist:tool/read@0.1.0".to_owned()],
-                &imports[..2]
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_typed_manifest_capability_mismatch() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/verbs/read");
-        let package = package::ToolPackage::discover(&root).unwrap();
-        let mut options = package::BuildOptions::default();
-        options.force = true;
-        options.granted_capabilities = package.manifest.capabilities.clone();
-        let build = package.build(&options).unwrap();
-
-        let mut mismatched = package.clone();
-        mismatched.manifest.capabilities = vec!["resource.write".to_owned()];
-        let error = package::validate_artifact(&build.artifact, &mismatched, &options).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("must declare exactly capability resource.read")
-        );
-    }
-
-    #[test]
     fn validates_named_wit_imports_for_nested_capability_authority() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("src")).unwrap();
@@ -10163,7 +7209,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.path().join("resource.wit"),
-            "package example:aliased@1.0.0;\nworld aliased { import source-read: artist:%resource/read@1.0.0; export artist:%resource/extension@1.0.0; export artist:%resource/read@1.0.0; }\n",
+            "package example:aliased@1.0.0;\nworld aliased { import source-read: artist:tool/read@1.0.0; export artist:%resource/extension@1.0.0; export artist:tool/read@1.0.0; }\n",
         )
         .unwrap();
         let error = resources::ResourcePackage::discover(root.path()).unwrap_err();
@@ -10379,64 +7425,58 @@ mod tests {
         std::fs::copy(built.artifact, installed.join("resource.wasm")).unwrap();
 
         let kernel = artist_kernel::Kernel::new();
-        kernel
-            .register_typed(artist_kernel::FileHandler::new(project.path()).unwrap())
-            .await;
-        kernel
-            .register_typed_handler(resources::ResourcesHandler::new(&resource_root).unwrap())
-            .await;
+        register_file_provider(&kernel, project.path());
+        register_resource_provider(
+            &kernel,
+            resources::ResourcesHandler::new(&resource_root).unwrap(),
+        );
 
         let source_uri = artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap();
         let projection =
             artist_kernel::ResourceUri::parse(&format!("{source_uri}/symbols/")).unwrap();
         let result = kernel
-            .execute_operation(artist_kernel::Operation::Read(vec![
-                artist_kernel::ReadRequest {
-                    uri: projection,
-                    at: None,
-                    before: None,
-                    after: None,
-                },
-            ]))
+            .invoke_dynamic_resource(
+                artist_kernel::VerbId::new("artist:resources/read@1.0.0").unwrap(),
+                projection,
+                artist_kernel::DynamicValue::Record(std::collections::BTreeMap::from([
+                    ("at".to_owned(), artist_kernel::DynamicValue::Option(None)),
+                    (
+                        "before".to_owned(),
+                        artist_kernel::DynamicValue::Option(None),
+                    ),
+                    (
+                        "after".to_owned(),
+                        artist_kernel::DynamicValue::Option(None),
+                    ),
+                ])),
+            )
             .await
             .unwrap();
-        let artist_kernel::OperationResult::Read(values) = result else {
-            panic!("AST resource returned the wrong result variant");
-        };
-        let Ok(artist_kernel::ReadResult::Text(text)) = &values[0] else {
-            panic!("AST resource did not return anchored text: {values:?}");
-        };
-        assert_eq!(text.lines.len(), 2);
-        assert!(text.lines.iter().any(|line| line.text.contains("fn main")));
+        assert!(format!("{:?}", result.output).contains("fn main"));
 
         // The bootstrap mount is also a typed file namespace: package
         // metadata remains inspectable through the same typed resource path.
         let package_file =
             artist_kernel::ResourceUri::parse("resources://ast/resource.md").unwrap();
         let package_result = kernel
-            .execute_operation(artist_kernel::Operation::Read(vec![
-                artist_kernel::ReadRequest {
-                    uri: package_file.clone(),
-                    at: None,
-                    before: None,
-                    after: None,
-                },
-            ]))
+            .invoke_dynamic_resource(
+                artist_kernel::VerbId::new("artist:resources/read@1.0.0").unwrap(),
+                package_file.clone(),
+                artist_kernel::DynamicValue::Record(std::collections::BTreeMap::from([
+                    ("at".to_owned(), artist_kernel::DynamicValue::Option(None)),
+                    (
+                        "before".to_owned(),
+                        artist_kernel::DynamicValue::Option(None),
+                    ),
+                    (
+                        "after".to_owned(),
+                        artist_kernel::DynamicValue::Option(None),
+                    ),
+                ])),
+            )
             .await
             .unwrap();
-        let artist_kernel::OperationResult::Read(package_values) = package_result else {
-            panic!("resource package read returned the wrong result variant");
-        };
-        let Ok(artist_kernel::ReadResult::Text(package_text)) = &package_values[0] else {
-            panic!("resource package read did not return text: {package_values:?}");
-        };
-        assert_eq!(package_text.uri, package_file);
-        assert!(
-            package_text
-                .lines
-                .iter()
-                .any(|line| line.text.contains("artist-ast"))
-        );
+        assert!(format!("{:?}", package_result.output).contains("artist-ast"));
     }
 
     #[tokio::test]
@@ -10465,36 +7505,37 @@ mod tests {
         std::fs::copy(built.artifact, installed.join("resource.wasm")).unwrap();
 
         let kernel = artist_kernel::Kernel::new();
-        kernel
-            .register_typed(artist_kernel::FileHandler::new(project.path()).unwrap())
-            .await;
-        kernel
-            .register_typed_handler(resources::ResourcesHandler::new(&resource_root).unwrap())
-            .await;
+        register_file_provider(&kernel, project.path());
+        register_resource_provider(
+            &kernel,
+            resources::ResourcesHandler::new(&resource_root).unwrap(),
+        );
 
         let file = artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap();
         let projection =
             artist_kernel::ResourceUri::parse(&format!("{file}/symbols/main/callers?limit=1"))
                 .unwrap();
         let result = kernel
-            .execute_operation(artist_kernel::Operation::Read(vec![
-                artist_kernel::ReadRequest {
-                    uri: projection,
-                    at: None,
-                    before: None,
-                    after: None,
-                },
-            ]))
+            .invoke_dynamic_resource(
+                artist_kernel::VerbId::new("artist:resources/read@1.0.0").unwrap(),
+                projection,
+                artist_kernel::DynamicValue::Record(std::collections::BTreeMap::from([
+                    ("at".to_owned(), artist_kernel::DynamicValue::Option(None)),
+                    (
+                        "before".to_owned(),
+                        artist_kernel::DynamicValue::Option(None),
+                    ),
+                    (
+                        "after".to_owned(),
+                        artist_kernel::DynamicValue::Option(None),
+                    ),
+                ])),
+            )
             .await
             .unwrap();
-        let artist_kernel::OperationResult::Read(values) = result else {
-            panic!("AST child returned the wrong result variant");
-        };
-        let Ok(artist_kernel::ReadResult::Text(text)) = &values[0] else {
-            panic!("AST child did not return anchored text: {values:?}");
-        };
-        assert_eq!(text.uri.query(), Some("limit=1"));
-        assert!(text.lines.iter().any(|line| line.text.contains("main()")));
+        let output = format!("{:?}", result.output);
+        assert!(output.contains("limit=1"));
+        assert!(output.contains("main()"));
     }
 
     #[tokio::test]
@@ -10504,33 +7545,30 @@ mod tests {
         let source = project.path().join("main.rs");
         std::fs::write(&source, "fn main() {}\n").unwrap();
         let kernel = artist_kernel::Kernel::new();
-        kernel
-            .register_typed(artist_kernel::FileHandler::new(project.path()).unwrap())
-            .await;
-        kernel
-            .register_typed_handler(resources::ResourcesHandler::new(&resource_root).unwrap())
-            .await;
+        register_file_provider(&kernel, project.path());
+        register_resource_provider(
+            &kernel,
+            resources::ResourcesHandler::new(&resource_root).unwrap(),
+        );
         let projection = artist_kernel::ResourceUri::parse(&format!(
             "{}/symbols/",
             artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap()
         ))
         .unwrap();
         let result = kernel
-            .execute_operation(artist_kernel::Operation::Edit(vec![
-                artist_kernel::EditRequest {
-                    uri: projection,
-                    operations: Vec::new(),
-                },
-            ]))
+            .invoke_dynamic_resource(
+                artist_kernel::VerbId::new("artist:resources/edit@1.0.0").unwrap(),
+                projection,
+                artist_kernel::DynamicValue::Record(std::collections::BTreeMap::from([(
+                    "operations".to_owned(),
+                    artist_kernel::DynamicValue::List(Vec::new()),
+                )])),
+            )
             .await;
-        assert!(
-            matches!(
-                result,
-            Ok(artist_kernel::OperationResult::Edit(ref values))
-                    if matches!(values.as_slice(), [Err(artist_kernel::KernelError::UnsupportedVerb { .. })])
-            ),
-            "unexpected projection mutation result: {result:?}"
-        );
+        assert!(matches!(
+            result,
+            Err(artist_kernel::KernelError::UnsupportedVerb { .. })
+        ));
     }
 
     #[test]

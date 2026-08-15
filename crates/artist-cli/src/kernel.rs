@@ -1,34 +1,80 @@
-use anyhow::{Context, Result, bail};
-use artist_component::resources::ResourcesHandler;
-use artist_component::tools::ToolsHandler;
+use crate::args::ResourceVerb as Verb;
+use anyhow::{Context, Result, anyhow, bail};
+use artist_component::resources::{
+    DynamicResourcesProvider, ResourceVerbBindings as ComponentResourceVerbBindings,
+    ResourcesHandler,
+};
+use artist_component::tools::{DynamicToolsProvider, ToolsHandler, ToolsVerbBindings};
 use artist_component::watcher::SharedWatcher;
 use artist_kernel::{
-    FileHandler, Kernel, RepositoryHandler, Request, ResourceAddress, ResourceUri, SessionHandler,
+    DynamicValue, FileHandler, FileResourceProvider, FileVerbBindings, Kernel, ProcessManager,
+    ProcessResourceProvider, ProcessVerbBindings, RepositoryHandler, RepositoryResourceProvider,
+    RepositoryVerbBindings, ResourceAddress, ResourceUri, SessionHandler, SessionResourceProvider,
+    SessionVerbBindings, VerbId,
 };
+use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::Duration;
 
 pub async fn build(root: &Path) -> Result<Kernel> {
     let kernel = Kernel::new();
-    let file_handler = FileHandler::new(root)
-        .with_context(|| format!("initialize filesystem handler at {}", root.display()))?;
-    kernel.register_typed(FileHandler::new(root)?).await;
-    kernel.register(file_handler).await;
-    let session_handler = SessionHandler::new();
-    kernel.register_typed(session_handler.clone()).await;
-    kernel.register(session_handler).await;
-    kernel
-        .register_typed(
-            RepositoryHandler::new(root)
-                .with_context(|| format!("initialize repository handler at {}", root.display()))?,
-        )
-        .await;
-    kernel
-        .register(
-            RepositoryHandler::new(root)
-                .with_context(|| format!("initialize repository handler at {}", root.display()))?,
-        )
-        .await;
+
+    // Native implementations publish their package-owned dynamic identities
+    // at the kernel boundary.
+    kernel.register_dynamic_resource_provider(Arc::new(FileResourceProvider::new(
+        Arc::new(FileHandler::new(root)?),
+        FileVerbBindings {
+            read: native_verb("filesystem", "read"),
+            write: native_verb("filesystem", "write"),
+            edit: native_verb("filesystem", "edit"),
+            delete: native_verb("filesystem", "delete"),
+            find: native_verb("filesystem", "find"),
+            grep: native_verb("filesystem", "grep"),
+        },
+    )))?;
+    kernel.register_dynamic_resource_provider(Arc::new(SessionResourceProvider::new(
+        SessionHandler::new(),
+        SessionVerbBindings {
+            read: native_verb("session", "read"),
+            write: native_verb("session", "write"),
+            send: native_verb("session", "send"),
+            poll: native_verb("session", "poll"),
+            abort: native_verb("session", "abort"),
+            delete: native_verb("session", "delete"),
+        },
+    )))?;
+    kernel.register_dynamic_resource_provider(Arc::new(RepositoryResourceProvider::new(
+        Arc::new(RepositoryHandler::new(root)?),
+        RepositoryVerbBindings {
+            read: native_verb("repository", "read"),
+            find: native_verb("repository", "find"),
+            grep: native_verb("repository", "grep"),
+        },
+    )))?;
+    let process_bindings = ProcessVerbBindings {
+        run: native_verb("process", "run"),
+        send: native_verb("process", "send"),
+        read: native_verb("process", "read"),
+        poll: native_verb("process", "poll"),
+        abort: native_verb("process", "abort"),
+        delete: native_verb("process", "delete"),
+    };
+    for definition in process_bindings.definitions() {
+        kernel.route_registry().register(
+            definition.identity.clone(),
+            Arc::new(artist_kernel::ResourceUriValueExtractor),
+        )?;
+        kernel.activate_verb(definition)?;
+    }
+    kernel.register_dynamic_resource_provider(Arc::new(ProcessResourceProvider::new(
+        ProcessManager::new(),
+        process_bindings,
+        "process.execute",
+    )))?;
     let tools_root = root.join("tools");
     std::fs::create_dir_all(&tools_root)
         .with_context(|| format!("initialize tools root at {}", tools_root.display()))?;
@@ -38,25 +84,120 @@ pub async fn build(root: &Path) -> Result<Kernel> {
         .with_context(|| format!("initialize resources root at {}", resources_root.display()))?;
     seed_ast_resource(&resources_root)?;
     let shared_watcher = SharedWatcher::new();
-    let resources = ResourcesHandler::new_with_watcher(&resources_root, Some(&shared_watcher))?
-        .without_file_package("artist-ast");
-    kernel.register_typed_resource_handler(resources).await;
-    let tool_capabilities = artist_kernel::Verb::ALL
-        .iter()
-        .map(|verb| format!("resource.{verb}"))
-        .collect::<Vec<_>>();
+    let resources = Arc::new(
+        ResourcesHandler::new_with_watcher(&resources_root, Some(&shared_watcher))?
+            .without_file_package("artist-ast"),
+    );
+    kernel.register_dynamic_resource_provider(Arc::new(DynamicResourcesProvider::new(
+        resources.clone(),
+        ComponentResourceVerbBindings {
+            read: native_verb("resources", "read"),
+            write: native_verb("resources", "write"),
+            edit: native_verb("resources", "edit"),
+            poll: native_verb("resources", "poll"),
+            send: native_verb("resources", "send"),
+            run: native_verb("resources", "run"),
+            abort: native_verb("resources", "abort"),
+            delete: native_verb("resources", "delete"),
+            find: native_verb("resources", "find"),
+            grep: native_verb("resources", "grep"),
+        },
+    )))?;
     let tools =
-        ToolsHandler::new_with_watcher(&tools_root, tool_capabilities, Some(&shared_watcher))?;
+        ToolsHandler::new_with_watcher(&tools_root, Vec::<String>::new(), Some(&shared_watcher))?;
+    kernel.register_dynamic_resource_provider(Arc::new(DynamicToolsProvider::new(
+        Arc::new(tools.clone()),
+        ToolsVerbBindings {
+            read: native_verb("tools", "read"),
+            write: native_verb("tools", "write"),
+            edit: native_verb("tools", "edit"),
+            delete: native_verb("tools", "delete"),
+            find: native_verb("tools", "find"),
+            grep: native_verb("tools", "grep"),
+        },
+    )))?;
+    let dynamic_definitions = tools
+        .dynamic_verb_definitions()
+        .map_err(|error| anyhow!(error.to_string()))?;
+    let route_registry = kernel.route_registry();
+    for definition in &dynamic_definitions {
+        route_registry
+            .register(
+                definition.identity.clone(),
+                Arc::new(artist_kernel::ResourceUriValueExtractor),
+            )
+            .map_err(|error| anyhow!(error.to_string()))?;
+    }
+    kernel
+        .activate_verbs(dynamic_definitions)
+        .map_err(|error| anyhow!(error.to_string()))?;
     let package_watcher = shared_watcher.start([&tools_root, &resources_root])?;
     kernel.retain_background(package_watcher);
-    kernel.register_typed_tool_handler(tools).await;
+    kernel.retain_background(DynamicVerbCatalogWatcher::start(
+        kernel.clone(),
+        tools.clone(),
+    ));
+    kernel.register_tool_provider(tools).await;
     Ok(kernel)
+}
+
+fn native_verb(namespace: &str, function: &str) -> VerbId {
+    VerbId::new(format!("artist:{namespace}/{function}@1.0.0"))
+        .expect("native verb identities are canonical")
+}
+
+/// Keeps the model-visible dynamic verb catalog synchronized with editable
+/// tool packages. Component generation reloads remain owned by `ToolsHandler`;
+/// this companion only publishes the package-definition set atomically.
+struct DynamicVerbCatalogWatcher {
+    stop: Option<mpsc::Sender<()>>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl DynamicVerbCatalogWatcher {
+    fn start(kernel: Kernel, tools: ToolsHandler) -> Self {
+        let (stop, receiver) = mpsc::channel();
+        let join = thread::spawn(move || {
+            loop {
+                if receiver.recv_timeout(Duration::from_millis(250)).is_ok() {
+                    break;
+                }
+                let Ok(definitions) = tools.dynamic_verb_definitions() else {
+                    continue;
+                };
+                let route_registry = kernel.route_registry();
+                for definition in &definitions {
+                    let _ = route_registry.register(
+                        definition.identity.clone(),
+                        Arc::new(artist_kernel::ResourceUriValueExtractor),
+                    );
+                }
+                let _ = kernel.reconcile_verbs(definitions);
+            }
+        });
+        Self {
+            stop: Some(stop),
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for DynamicVerbCatalogWatcher {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 fn seed_ast_resource(root: &Path) -> Result<()> {
     let package = root.join("ast");
     std::fs::create_dir_all(package.join("src"))?;
-    std::fs::create_dir_all(root.join("wit/resource-surface"))?;
+    std::fs::create_dir_all(package.join("deps/resource"))?;
+    std::fs::create_dir_all(package.join("deps/tool"))?;
     let manifest = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../artist-component/conformance/resources/ast/Cargo.toml"
@@ -64,11 +205,7 @@ fn seed_ast_resource(root: &Path) -> Result<()> {
     let guest = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../artist-component/conformance/resources/ast/src/lib.rs"
-    ))
-    .replace(
-        "../../../wit/resource-surface",
-        "../../wit/resource-surface",
-    );
+    ));
     let resource_md = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../artist-component/conformance/resources/ast/resource.md"
@@ -81,9 +218,13 @@ fn seed_ast_resource(root: &Path) -> Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/../artist-component/conformance/resources/ast/Cargo.lock"
     ));
-    let shared_wit = include_bytes!(concat!(
+    let resource_dependency = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../artist-component/wit/resource-surface/world.wit"
+        "/../artist-component/conformance/resources/ast/deps/resource/world.wit"
+    ));
+    let tool_dependency = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../artist-component/conformance/resources/ast/deps/tool/world.wit"
     ));
     for (relative, bytes) in [
         ("Cargo.toml", manifest.as_bytes()),
@@ -91,7 +232,8 @@ fn seed_ast_resource(root: &Path) -> Result<()> {
         ("resource.md", resource_md.as_slice()),
         ("resource.wit", resource_wit.as_slice()),
         ("src/lib.rs", guest.as_bytes()),
-        ("../wit/resource-surface/world.wit", shared_wit.as_slice()),
+        ("deps/resource/world.wit", resource_dependency.as_slice()),
+        ("deps/tool/world.wit", tool_dependency.as_slice()),
     ] {
         let path = package.join(relative);
         if !path.exists() {
@@ -102,89 +244,50 @@ fn seed_ast_resource(root: &Path) -> Result<()> {
 }
 
 fn seed_universal_tools(root: &Path) -> Result<()> {
-    macro_rules! seed {
-        ($verb:literal) => {{
-            let package = root.join($verb);
-            std::fs::create_dir_all(package.join("src"))?;
-            std::fs::create_dir_all(root.join("wit/tool-surface-v1"))?;
-            std::fs::create_dir_all(root.join("wit/tool-surface-v1/deps/resource"))?;
-            std::fs::create_dir_all(root.join("wit/resource-surface"))?;
-            let manifest = include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../artist-component/conformance/verbs/",
-                $verb,
-                "/Cargo.toml"
-            ))
-            .replace(
-                "path = \"../../typed-guest/src/lib.rs\"",
-                "path = \"src/lib.rs\"",
-            );
-            let guest = include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../artist-component/conformance/typed-guest/src/lib.rs"
-            ))
-            .replace("../../../wit/tool-surface-v1", "../wit/tool-surface-v1")
-            .replace("../../wit/tool-surface-v1", "../wit/tool-surface-v1")
-            .replace("../../../wit/tool-surface", "../wit/tool-surface-v1")
-            .replace("../../wit/tool-surface", "../wit/tool-surface-v1");
-            let resource_wit = include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../artist-component/wit/resource-surface/world.wit"
-            ));
-            for (relative, bytes) in [
-                ("Cargo.toml", manifest.as_bytes()),
-                (
-                    "Cargo.lock",
-                    include_bytes!(concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/../artist-component/conformance/verbs/",
-                        $verb,
-                        "/Cargo.lock"
-                    ))
-                    .as_slice(),
-                ),
-                (
-                    "tool.md",
-                    include_bytes!(concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/../artist-component/conformance/verbs/",
-                        $verb,
-                        "/tool.md"
-                    ))
-                    .as_slice(),
-                ),
-                ("src/lib.rs", guest.as_bytes()),
-                (
-                    "../wit/tool-surface-v1/world.wit",
-                    include_bytes!(concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/../artist-component/wit/tool-surface-v1/world.wit"
-                    ))
-                    .as_slice(),
-                ),
-                (
-                    "../wit/tool-surface-v1/deps/resource/world.wit",
-                    resource_wit.as_slice(),
-                ),
-                ("../wit/resource-surface/world.wit", resource_wit.as_slice()),
-            ] {
-                let path = package.join(relative);
-                if !path.exists() {
-                    std::fs::write(path, bytes)?;
-                }
+    let source_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../artist-component/conformance/verbs");
+    let guest = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../artist-component/conformance/typed-guest/src/lib.rs"
+    ));
+    for entry in std::fs::read_dir(source_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let package = root.join(&name);
+        std::fs::create_dir_all(package.join("src"))?;
+        std::fs::create_dir_all(package.join("typed-guest/src"))?;
+        std::fs::create_dir_all(package.join("deps/resource"))?;
+        let manifest = std::fs::read_to_string(entry.path().join("Cargo.toml"))?.replace(
+            "path = \"../../typed-guest/src/lib.rs\"",
+            "path = \"src/lib.rs\"",
+        );
+        let source = std::fs::read_to_string(entry.path().join("src/lib.rs"))?.replace(
+            "../../../typed-guest/src/lib.rs",
+            "../typed-guest/src/lib.rs",
+        );
+        let tool_wit = std::fs::read(entry.path().join("tool.wit"))?;
+        let dependency_wit = std::fs::read(entry.path().join("deps/resource/world.wit"))?;
+        for (relative, bytes) in [
+            ("Cargo.toml", manifest.as_bytes().to_vec()),
+            (
+                "Cargo.lock",
+                std::fs::read(entry.path().join("Cargo.lock"))?,
+            ),
+            ("tool.md", std::fs::read(entry.path().join("tool.md"))?),
+            ("src/lib.rs", source.into_bytes()),
+            ("typed-guest/src/lib.rs", guest.as_bytes().to_vec()),
+            ("tool.wit", tool_wit),
+            ("deps/resource/world.wit", dependency_wit),
+        ] {
+            let path = package.join(relative);
+            if !path.exists() {
+                std::fs::write(path, bytes)?;
             }
-        }};
+        }
     }
-    seed!("read");
-    seed!("write");
-    seed!("edit");
-    seed!("find");
-    seed!("grep");
-    seed!("run");
-    seed!("send");
-    seed!("abort");
-    seed!("delete");
-    seed!("poll");
     Ok(())
 }
 
@@ -197,23 +300,347 @@ pub fn address(target: &str) -> Result<ResourceAddress> {
         .with_context(|| format!("parse resource URI or path {target:?}"))
 }
 
-pub async fn dispatch(
-    kernel: &Kernel,
-    verb: artist_kernel::Verb,
-    target: &str,
-    args: &str,
-) -> Result<artist_kernel::ItemResult> {
+#[derive(Debug, Serialize)]
+pub struct CliResult {
+    pub target: ResourceAddress,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<artist_kernel::KernelError>,
+}
+
+impl CliResult {
+    fn success(target: ResourceAddress, value: Value) -> Self {
+        Self {
+            target,
+            ok: true,
+            value: Some(value),
+            error: None,
+        }
+    }
+
+    fn failure(target: ResourceAddress, error: artist_kernel::KernelError) -> Self {
+        Self {
+            target,
+            ok: false,
+            value: None,
+            error: Some(error),
+        }
+    }
+}
+
+pub async fn dispatch(kernel: &Kernel, verb: Verb, target: &str, args: &str) -> Result<CliResult> {
     let args = serde_json::from_str::<Value>(args)
         .with_context(|| format!("parse resource arguments as JSON: {args:?}"))?;
-    Ok(kernel
-        .execute(Request::new(verb, address(target)?, args))
-        .await)
+    let uri = address(target)?
+        .as_uri()
+        .cloned()
+        .ok_or_else(|| anyhow!("typed resource operations require a URI target: {target:?}"))?;
+    let mut input = dynamic_input(verb, &args)?;
+    let identity = if matches!(verb, Verb::Run) && uri.scheme() == "file" {
+        let executable = uri
+            .as_ref()
+            .to_file_path()
+            .map_err(|_| anyhow!("run target is not a local executable path"))?;
+        if let DynamicValue::Record(fields) = &mut input {
+            fields.insert(
+                "executable".to_owned(),
+                DynamicValue::String(executable.to_string_lossy().into_owned()),
+            );
+            fields.insert("target".to_owned(), DynamicValue::ResourceUri(uri.clone()));
+            fields.insert("cwd".to_owned(), DynamicValue::Option(None));
+            fields.insert("environment".to_owned(), DynamicValue::List(Vec::new()));
+        }
+        native_verb("process", "run")
+    } else {
+        native_verb(dynamic_namespace(&uri), dynamic_function(verb))
+    };
+    let result = kernel
+        .invoke_dynamic_resource(identity, uri.clone(), input)
+        .await;
+    Ok(dynamic_cli_result(ResourceAddress::uri(uri), verb, result))
+}
+
+fn dynamic_namespace(uri: &ResourceUri) -> &'static str {
+    match uri.scheme() {
+        "session" => "session",
+        "process" => "process",
+        "repo" => "repository",
+        "resources" => "resources",
+        _ => "filesystem",
+    }
+}
+
+fn dynamic_function(verb: Verb) -> &'static str {
+    match verb {
+        Verb::Read => "read",
+        Verb::Write => "write",
+        Verb::Edit => "edit",
+        Verb::Run => "run",
+        Verb::Send => "send",
+        Verb::Poll => "poll",
+        Verb::Abort => "abort",
+        Verb::Delete => "delete",
+        Verb::Find => "find",
+        Verb::Grep => "grep",
+    }
+}
+
+fn dynamic_input(verb: Verb, args: &Value) -> Result<DynamicValue> {
+    let object = args.as_object().cloned().unwrap_or_default();
+    let string = |name: &str| -> Result<DynamicValue> {
+        Ok(DynamicValue::String(
+            object
+                .get(name)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        ))
+    };
+    let option_u32 = |name: &str| -> Result<DynamicValue> {
+        Ok(DynamicValue::Option(
+            object
+                .get(name)
+                .and_then(Value::as_u64)
+                .map(|value| Box::new(DynamicValue::U32(value as u32))),
+        ))
+    };
+    let option_value = |name: &str| -> Result<DynamicValue> {
+        match object.get(name) {
+            None | Some(Value::Null) => Ok(DynamicValue::Option(None)),
+            Some(value) => Ok(DynamicValue::Option(Some(Box::new(json_dynamic(value)?)))),
+        }
+    };
+    match verb {
+        Verb::Read => Ok(DynamicValue::Record(BTreeMap::from([
+            ("at".to_owned(), option_value("at")?),
+            ("before".to_owned(), option_u32("before")?),
+            ("after".to_owned(), option_u32("after")?),
+        ]))),
+        Verb::Write | Verb::Send => Ok(DynamicValue::Record(BTreeMap::from([(
+            "content".to_owned(),
+            object
+                .get("content")
+                .or_else(|| object.get("value"))
+                .and_then(Value::as_str)
+                .map(|value| DynamicValue::String(value.to_owned()))
+                .unwrap_or(DynamicValue::String(String::new())),
+        )]))),
+        Verb::Find => Ok(DynamicValue::Record(BTreeMap::from([(
+            "query".to_owned(),
+            string("query")?,
+        )]))),
+        Verb::Grep => Ok(DynamicValue::Record(BTreeMap::from([(
+            "pattern".to_owned(),
+            string("pattern")?,
+        )]))),
+        Verb::Run => Ok(DynamicValue::Record(BTreeMap::from([(
+            "args".to_owned(),
+            DynamicValue::List(
+                object
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|value| DynamicValue::String(value.to_owned()))
+                    .collect(),
+            ),
+        )]))),
+        Verb::Edit => Ok(DynamicValue::Record(BTreeMap::from([(
+            "operations".to_owned(),
+            DynamicValue::List(
+                object
+                    .get("operations")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(dynamic_edit_value)
+                    .collect::<Result<_, _>>()?,
+            ),
+        )]))),
+        Verb::Poll | Verb::Abort | Verb::Delete => Ok(DynamicValue::Record(BTreeMap::new())),
+    }
+}
+
+fn dynamic_edit_value(value: &Value) -> Result<DynamicValue> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("edit operation must be an object"))?;
+    if let Some(replace) = object.get("replace").or_else(|| object.get("Replace")) {
+        let fields = replace
+            .as_object()
+            .ok_or_else(|| anyhow!("replace operation must be an object"))?;
+        return Ok(DynamicValue::Variant(
+            "replace".to_owned(),
+            Some(Box::new(DynamicValue::Record(BTreeMap::from([
+                (
+                    "start".to_owned(),
+                    json_dynamic(fields.get("start").unwrap_or(&Value::Null))?,
+                ),
+                (
+                    "end".to_owned(),
+                    match fields.get("end") {
+                        None | Some(Value::Null) => DynamicValue::Option(None),
+                        Some(value) => DynamicValue::Option(Some(Box::new(json_dynamic(value)?))),
+                    },
+                ),
+                (
+                    "content".to_owned(),
+                    json_dynamic(fields.get("content").unwrap_or(&Value::Null))?,
+                ),
+            ])))),
+        ));
+    }
+    if let Some(insert) = object.get("insert").or_else(|| object.get("Insert")) {
+        let fields = insert
+            .as_object()
+            .ok_or_else(|| anyhow!("insert operation must be an object"))?;
+        let at = json_dynamic(fields.get("at").unwrap_or(&Value::Null))?;
+        return Ok(DynamicValue::Variant(
+            "insert".to_owned(),
+            Some(Box::new(DynamicValue::Record(BTreeMap::from([
+                ("at".to_owned(), at),
+                (
+                    "content".to_owned(),
+                    json_dynamic(fields.get("content").unwrap_or(&Value::Null))?,
+                ),
+            ])))),
+        ));
+    }
+    Err(anyhow!("unknown edit operation"))
+}
+
+fn json_dynamic(value: &Value) -> Result<DynamicValue> {
+    Ok(match value {
+        Value::Null => DynamicValue::Option(None),
+        Value::Bool(value) => DynamicValue::Bool(*value),
+        Value::Number(value) => DynamicValue::U64(
+            value
+                .as_u64()
+                .ok_or_else(|| anyhow!("dynamic number must be a non-negative integer"))?,
+        ),
+        Value::String(value) => DynamicValue::String(value.clone()),
+        Value::Array(values) => DynamicValue::List(
+            values
+                .iter()
+                .map(json_dynamic)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        Value::Object(fields) => DynamicValue::Record(
+            fields
+                .iter()
+                .map(|(name, value)| Ok((name.clone(), json_dynamic(value)?)))
+                .collect::<Result<BTreeMap<_, _>>>()?,
+        ),
+    })
+}
+
+fn dynamic_cli_result(
+    target: ResourceAddress,
+    verb: Verb,
+    result: std::result::Result<artist_kernel::DynamicVerbResult, artist_kernel::KernelError>,
+) -> CliResult {
+    let output = match result {
+        Ok(result) => result.output,
+        Err(error) => return CliResult::failure(target, error),
+    };
+    if verb == Verb::Write && target.to_string().starts_with("session:") {
+        return CliResult::success(
+            target.clone(),
+            serde_json::json!({"created": true, "uri": target.to_string(), "status": "running"}),
+        );
+    }
+    if verb == Verb::Read {
+        if let DynamicValue::Record(fields) = &output {
+            if let Some(DynamicValue::List(lines)) = fields.get("lines") {
+                let content = lines
+                    .iter()
+                    .filter_map(|line| match line {
+                        DynamicValue::Record(fields) => {
+                            let DynamicValue::String(text) = fields.get("text")? else {
+                                return None;
+                            };
+                            let ending = match fields.get("ending") {
+                                Some(DynamicValue::Enum(value)) if value == "crlf" => "\r\n",
+                                Some(DynamicValue::Enum(value)) if value == "cr" => "\r",
+                                Some(DynamicValue::Enum(value)) if value == "none" => "",
+                                _ => "\n",
+                            };
+                            Some(format!("{text}{ending}"))
+                        }
+                        _ => None,
+                    })
+                    .collect::<String>();
+                return CliResult::success(
+                    target.clone(),
+                    serde_json::json!({
+                        "path": fields.get("uri").map(dynamic_json).unwrap_or_else(|| Value::String(target.to_string())),
+                        "value": {"type": "text", "content": content}
+                    }),
+                );
+            }
+            if let Some(DynamicValue::List(entries)) = fields.get("entries") {
+                return CliResult::success(
+                    target.clone(),
+                    serde_json::json!({
+                        "path": fields.get("uri").map(dynamic_json).unwrap_or_else(|| Value::String(target.to_string())),
+                        "value": {"type": "directory", "entries": entries.iter().map(dynamic_json).collect::<Vec<_>>()}
+                    }),
+                );
+            }
+        }
+    }
+    CliResult::success(target, dynamic_json(&output))
+}
+
+fn dynamic_json(value: &DynamicValue) -> Value {
+    match value {
+        DynamicValue::Bool(value) => Value::Bool(*value),
+        DynamicValue::S8(value) => serde_json::json!(*value),
+        DynamicValue::S16(value) => serde_json::json!(*value),
+        DynamicValue::S32(value) => serde_json::json!(*value),
+        DynamicValue::S64(value) => serde_json::json!(*value),
+        DynamicValue::U8(value) => serde_json::json!(*value),
+        DynamicValue::U16(value) => serde_json::json!(*value),
+        DynamicValue::U32(value) => serde_json::json!(*value),
+        DynamicValue::U64(value) => serde_json::json!(*value),
+        DynamicValue::F32(value) => serde_json::json!(*value),
+        DynamicValue::F64(value) => serde_json::json!(*value),
+        DynamicValue::Char(value) => Value::String(value.to_string()),
+        DynamicValue::String(value) | DynamicValue::Enum(value) => Value::String(value.clone()),
+        DynamicValue::ResourceUri(value) => Value::String(value.to_string()),
+        DynamicValue::List(values) | DynamicValue::Tuple(values) => {
+            Value::Array(values.iter().map(dynamic_json).collect())
+        }
+        DynamicValue::Record(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(name, value)| (name.clone(), dynamic_json(value)))
+                .collect(),
+        ),
+        DynamicValue::Option(None) => Value::Null,
+        DynamicValue::Option(Some(value)) => dynamic_json(value),
+        DynamicValue::Result(Ok(value)) => dynamic_json(value),
+        DynamicValue::Result(Err(value)) => dynamic_json(value),
+        DynamicValue::Variant(name, value) => {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                name.clone(),
+                value.as_deref().map(dynamic_json).unwrap_or(Value::Null),
+            );
+            Value::Object(object)
+        }
+        DynamicValue::Flags(values) => {
+            Value::Array(values.iter().cloned().map(Value::String).collect())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artist_kernel::Verb;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -224,31 +651,28 @@ mod tests {
         let ast_source = root.path().join("main.rs");
         std::fs::write(&ast_source, "fn caller() { main(); }\nfn main() {}\n").unwrap();
         let kernel = build(root.path()).await.unwrap();
+        assert_eq!(kernel.active_verbs().unwrap().len(), 16);
         let seeded = ToolsHandler::new(root.path().join("tools"), Vec::<String>::new())
             .unwrap()
             .registrations()
             .unwrap();
         assert!(seeded.iter().any(|tool| tool.tool_name() == "read"));
+        assert!(root.path().join("tools/read/tool.wit").is_file());
         assert!(
             root.path()
-                .join("tools/wit/tool-surface-v1/deps/resource/world.wit")
-                .is_file()
-        );
-        assert!(
-            root.path()
-                .join("tools/wit/resource-surface/world.wit")
+                .join("tools/read/deps/resource/world.wit")
                 .is_file()
         );
         let output = kernel
             .execute_tool(
                 "read",
-                serde_json::json!({
+                json_dynamic(&serde_json::json!({
                     "requests": [{"uri": source.display().to_string(), "at": null, "before": null, "after": null}]
-                }),
+                })).unwrap(),
             )
             .await
             .unwrap();
-        assert!(output.to_string().contains("hello"));
+        assert!(format!("{output:?}").contains("hello"));
 
         // A framework migration must not overwrite source that the user has
         // customized. The old seed text is intentionally still present in
@@ -267,13 +691,13 @@ mod tests {
         let docs = kernel
             .execute_tool(
                 "read",
-                serde_json::json!({
+                json_dynamic(&serde_json::json!({
                     "requests": [{"uri": "resources://ast/resource.md", "at": null, "before": null, "after": null}]
-                }),
+                })).unwrap(),
             )
             .await
             .unwrap();
-        assert!(docs.to_string().contains("artist-ast"));
+        assert!(format!("{docs:?}").contains("artist-ast"));
         assert!(root.path().join("resources/ast/resource.wit").is_file());
 
         // Native repository projections retain ownership of production AST
@@ -282,23 +706,24 @@ mod tests {
         let symbols = kernel
             .execute_tool(
                 "read",
-                serde_json::json!({
+                json_dynamic(&serde_json::json!({
                     "requests": [{"uri": projection, "at": null, "before": null, "after": null}]
-                }),
+                }))
+                .unwrap(),
             )
             .await
             .unwrap();
-        assert!(symbols.to_string().contains("main"));
+        assert!(format!("{symbols:?}").contains("main"));
         let callers = kernel
             .execute_tool(
                 "read",
-                serde_json::json!({
+                json_dynamic(&serde_json::json!({
                     "requests": [{"uri": format!("file://{}/symbols/main/callers", ast_source.display()), "at": null, "before": null, "after": null}]
-                }),
+                })).unwrap(),
             )
             .await
             .unwrap();
-        assert!(callers.to_string().contains("caller"));
+        assert!(format!("{callers:?}").contains("caller"));
     }
 
     #[test]

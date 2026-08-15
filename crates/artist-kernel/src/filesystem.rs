@@ -1,17 +1,55 @@
 use crate::{
-    Anchor, AnchorError, AnchorSet, AnchoredLine, AnchoredText, BoxFuture, Handler,
-    HandlerDescriptor, KernelError, KernelHandle, Operation, OperationResult, Pattern, ReadResult,
-    Request, ResourceAddress, SearchService, StructuralAnalyzer, StructuralLine, TypedHandler,
-    Verb, address::uri_path,
+    Anchor, AnchorError, AnchorSet, AnchoredLine, AnchoredText, ClaimDecision,
+    DynamicClaimProvider, DynamicResourceProvider, DynamicValue, DynamicVerbResult, EditOperation,
+    InsertOperation, InsertionPoint, KernelError, Pattern, Position, ReplaceOperation,
+    ResourceFuture, ResourceUri, SearchService, StructuralAnalyzer, StructuralLine, VerbId,
 };
 use cap_std::{ambient_authority, fs::Dir};
+#[cfg(test)]
 use serde::Deserialize;
-use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
+
+/// Dynamic identities implemented by a filesystem resource provider.
+///
+/// The identities are supplied by the active verb package catalog; the
+/// provider contains no closed-world verb enum and can therefore be reused by
+/// a package with a different canonical identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileVerbBindings {
+    pub read: VerbId,
+    pub write: VerbId,
+    pub edit: VerbId,
+    pub delete: VerbId,
+    pub find: VerbId,
+    pub grep: VerbId,
+}
+
+/// Adapter exposing native filesystem semantics through the open-ended
+/// dynamic resource ABI. JSON conversion remains above this boundary.
+pub struct FileResourceProvider {
+    handler: Arc<FileHandler>,
+    bindings: FileVerbBindings,
+}
+
+impl FileResourceProvider {
+    pub fn new(handler: Arc<FileHandler>, bindings: FileVerbBindings) -> Self {
+        Self { handler, bindings }
+    }
+
+    pub fn handler(&self) -> &Arc<FileHandler> {
+        &self.handler
+    }
+
+    pub fn bindings(&self) -> &FileVerbBindings {
+        &self.bindings
+    }
+}
 
 /// Native filesystem handler constrained to one root directory.
 pub struct FileHandler {
@@ -325,113 +363,10 @@ impl FileHandler {
             })
         }
     }
-
-    fn read_value(&self, path: &Path) -> Result<Value, KernelError> {
-        let metadata = self.cap_metadata(path)?;
-        if metadata.is_dir() {
-            let mut entries = self
-                .cap_read_dir(path)?
-                .map(|entry| {
-                    let entry = entry.map_err(|error| KernelError::Handler {
-                        message: format!("read directory entry: {error}"),
-                    })?;
-                    let file_type = entry.file_type().map_err(|error| KernelError::Handler {
-                        message: format!("read entry type: {error}"),
-                    })?;
-                    Ok(json!({
-                        "name": entry.file_name().to_string_lossy(),
-                        "path": path.join(entry.file_name()).to_string_lossy(),
-                        "directory": file_type.is_dir(),
-                    }))
-                })
-                .collect::<Result<Vec<_>, KernelError>>()?;
-            entries.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
-            return Ok(json!({"type": "directory", "entries": entries}));
-        }
-
-        let bytes = self.cap_read(path)?;
-        match String::from_utf8(bytes.clone()) {
-            Ok(content) => Ok(json!({"type": "text", "content": content})),
-            Err(_) => Ok(json!({
-                "type": "binary",
-                "bytes": base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    bytes,
-                ),
-            })),
-        }
-    }
-
-    fn edit(&self, requested: &Path, args: &Value) -> Result<Value, KernelError> {
-        let path = self.resolve_existing(requested)?;
-        let original = self.cap_read(&path)?;
-        let (provider, lines) = self.structural_lines(&path, &original);
-        let inputs = lines
-            .iter()
-            .map(StructuralLine::anchor_input)
-            .collect::<Vec<_>>();
-        let anchors = AnchorSet::from_inputs(&inputs).map_err(anchor_error)?;
-        let edits: Vec<EditSpec> =
-            serde_json::from_value(args.get("edits").cloned().ok_or_else(|| {
-                KernelError::InvalidRequest {
-                    message: "filesystem edit requires an args.edits array".to_owned(),
-                }
-            })?)
-            .map_err(|error| KernelError::InvalidRequest {
-                message: format!("invalid filesystem edit: {error}"),
-            })?;
-        if edits.is_empty() {
-            return Err(KernelError::InvalidRequest {
-                message: "filesystem edit requires at least one edit".to_owned(),
-            });
-        }
-
-        let mut ranges = Vec::with_capacity(edits.len());
-        for edit in edits {
-            let start = anchors.resolve(&edit.start).map_err(anchor_error)?;
-            let end = edit
-                .end
-                .as_ref()
-                .map(|anchor| anchors.resolve(anchor))
-                .transpose()
-                .map_err(anchor_error)?
-                .unwrap_or(start);
-            if start > end {
-                return Err(KernelError::InvalidAnchor {
-                    message: format!("edit range is reversed: {start}..={end}"),
-                });
-            }
-            ranges.push((
-                lines[start].start_byte,
-                lines[end].end_byte,
-                edit.replacement.into_bytes(),
-            ));
-        }
-        ranges.sort_by_key(|(start, _, _)| *start);
-        if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
-            return Err(KernelError::InvalidRequest {
-                message: "filesystem edit ranges overlap".to_owned(),
-            });
-        }
-
-        let mut rendered = Vec::with_capacity(original.len());
-        let mut cursor = 0;
-        for (start, end, replacement) in ranges {
-            rendered.extend_from_slice(&original[cursor..start]);
-            rendered.extend_from_slice(&replacement);
-            cursor = end;
-        }
-        rendered.extend_from_slice(&original[cursor..]);
-        self.cap_atomic_replace(&path, &rendered)?;
-        Ok(json!({
-            "edited": true,
-            "path": path,
-            "provider": provider,
-        }))
-    }
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg(test)]
 struct EditSpec {
     start: Anchor,
     #[serde(default)]
@@ -583,808 +518,431 @@ impl FileHandler {
     }
 }
 
-impl Handler for FileHandler {
-    fn descriptor(&self) -> HandlerDescriptor {
-        HandlerDescriptor {
-            name: "filesystem".to_owned(),
-            schemes: Vec::new(),
-            verbs: vec![
-                Verb::Read,
-                Verb::Write,
-                Verb::Edit,
-                Verb::Delete,
-                Verb::Find,
-                Verb::Grep,
-            ],
+impl DynamicClaimProvider for FileResourceProvider {
+    fn claim(&self, verb: &VerbId, uri: &ResourceUri) -> ClaimDecision {
+        let supported = [
+            &self.bindings.read,
+            &self.bindings.write,
+            &self.bindings.edit,
+            &self.bindings.delete,
+            &self.bindings.find,
+            &self.bindings.grep,
+        ]
+        .iter()
+        .any(|candidate| *candidate == verb);
+        if supported
+            && uri.scheme() == "file"
+            && uri.query().is_none()
+            && !self.handler.is_virtual_projection(uri)
+            && self.handler.typed_path_syntax(uri).is_ok()
+        {
+            ClaimDecision::Handle
+        } else {
+            ClaimDecision::Pass
+        }
+    }
+}
+
+impl DynamicResourceProvider for FileResourceProvider {
+    fn invoke<'a>(
+        &'a self,
+        verb: &'a VerbId,
+        uri: &'a ResourceUri,
+        input: DynamicValue,
+    ) -> ResourceFuture<'a> {
+        Box::pin(async move {
+            let output = if verb == &self.bindings.read {
+                self.handler.dynamic_read(
+                    uri.clone(),
+                    dynamic_position(&input)?,
+                    dynamic_u32_field(&input, "before")?,
+                    dynamic_u32_field(&input, "after")?,
+                )?
+            } else if verb == &self.bindings.write {
+                self.handler
+                    .dynamic_write(uri.clone(), dynamic_string_field(&input, "content")?)?
+            } else if verb == &self.bindings.edit {
+                self.handler
+                    .dynamic_edit(uri.clone(), dynamic_edit_operations(&input)?)?
+            } else if verb == &self.bindings.delete {
+                self.handler.dynamic_delete(uri.clone())?
+            } else if verb == &self.bindings.find {
+                self.handler
+                    .dynamic_find(uri.clone(), dynamic_string_field(&input, "query")?)?
+            } else if verb == &self.bindings.grep {
+                self.handler
+                    .dynamic_grep(uri.clone(), dynamic_string_field(&input, "pattern")?)?
+            } else {
+                return Err(KernelError::UnsupportedVerb {
+                    verb: verb.to_string(),
+                    uri: uri.to_string(),
+                });
+            };
+            Ok(DynamicVerbResult {
+                verb: verb.clone(),
+                function: verb.function().to_owned(),
+                output,
+            })
+        })
+    }
+}
+
+impl FileHandler {
+    fn dynamic_read(
+        &self,
+        uri: ResourceUri,
+        at: Option<Position>,
+        before: Option<u32>,
+        after: Option<u32>,
+    ) -> Result<DynamicValue, KernelError> {
+        let path = self.typed_path(&uri)?;
+        if self.cap_metadata(&path)?.is_dir() {
+            let mut entries = self
+                .cap_read_dir(&path)?
+                .map(|entry| {
+                    let entry = entry.map_err(|error| KernelError::Handler {
+                        message: error.to_string(),
+                    })?;
+                    let child = path.join(entry.file_name());
+                    let is_dir = entry
+                        .file_type()
+                        .map_err(|error| KernelError::Handler {
+                            message: error.to_string(),
+                        })?
+                        .is_dir();
+                    ResourceUri::parse(&format!(
+                        "{}{}",
+                        child.display(),
+                        if is_dir { "/" } else { "" }
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            entries.sort_by_key(ToString::to_string);
+            Ok(DynamicValue::Record(BTreeMap::from([
+                ("uri".to_owned(), DynamicValue::ResourceUri(uri)),
+                (
+                    "entries".to_owned(),
+                    DynamicValue::List(
+                        entries.into_iter().map(DynamicValue::ResourceUri).collect(),
+                    ),
+                ),
+            ])))
+        } else {
+            let bytes = self.cap_read(&path)?;
+            let text = self.anchored_text(uri, &path, &bytes)?;
+            Ok(dynamic_text(select_read_window(
+                text,
+                at.as_ref(),
+                before,
+                after,
+            )?))
         }
     }
 
-    fn claims(&self, address: &ResourceAddress) -> bool {
-        address.as_uri().is_some_and(|uri| {
-            uri.scheme() == "file" && uri.query().is_none() && !self.is_virtual_projection(uri)
-        })
+    fn dynamic_write(
+        &self,
+        uri: ResourceUri,
+        content: String,
+    ) -> Result<DynamicValue, KernelError> {
+        let requested = uri
+            .as_ref()
+            .to_file_path()
+            .map_err(|_| KernelError::InvalidUri {
+                message: uri.to_string(),
+            })?;
+        let path = self.resolve_for_write(&requested)?;
+        self.cap_atomic_replace(&path, content.as_bytes())?;
+        let bytes = self.cap_read(&path)?;
+        Ok(dynamic_text(self.anchored_text(uri, &path, &bytes)?))
     }
 
-    fn execute<'a>(
-        &'a self,
-        request: Request,
-        _host: KernelHandle,
-    ) -> BoxFuture<'a, Result<Value, KernelError>> {
-        Box::pin(async move {
-            let requested =
-                uri_path(
-                    request
-                        .target
-                        .as_uri()
-                        .ok_or_else(|| KernelError::InvalidUri {
-                            message: request.target.to_string(),
-                        })?,
-                )?;
-            match request.verb {
-                Verb::Read => self
-                    .read_value(&self.resolve_existing(&requested)?)
-                    .map(|value| json!({"path": requested, "value": value})),
-                Verb::Write => {
-                    let path = self.resolve_for_write(&requested)?;
-                    let content = request
-                        .args
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| KernelError::InvalidRequest {
-                            message: "filesystem write requires an args.value string".to_owned(),
-                        })?;
-                    self.cap_atomic_replace(&path, content.as_bytes())?;
-                    Ok(json!({"written": true, "path": path}))
-                }
-                Verb::Edit => self.edit(&requested, &request.args),
-                Verb::Delete => {
-                    let path = self.resolve_existing(&requested)?;
-                    if self.cap_metadata(&path)?.is_dir() {
-                        if self.cap_read_dir(&path)?.next().is_some() {
-                            return Err(KernelError::NotEmpty {
-                                uri: request.target.to_string(),
-                            });
+    fn dynamic_edit(
+        &self,
+        uri: ResourceUri,
+        operations: Vec<EditOperation>,
+    ) -> Result<DynamicValue, KernelError> {
+        let path = self.typed_path(&uri)?;
+        let result = self.apply_typed_edit(&path, uri, &operations)?;
+        Ok(DynamicValue::Record(BTreeMap::from([
+            ("text".to_owned(), dynamic_text(result.text)),
+            ("diff".to_owned(), dynamic_diff(result.diff)),
+        ])))
+    }
+
+    fn dynamic_delete(&self, uri: ResourceUri) -> Result<DynamicValue, KernelError> {
+        let path = self.typed_path(&uri)?;
+        if self.cap_metadata(&path)?.is_dir() {
+            if self.cap_read_dir(&path)?.next().is_some() {
+                return Err(KernelError::NotEmpty {
+                    uri: uri.to_string(),
+                });
+            }
+            self.cap_remove_dir(&path)
+        } else {
+            self.cap_remove_file(&path)
+        }
+        .map_err(|error| KernelError::Handler {
+            message: error.to_string(),
+        })?;
+        Ok(DynamicValue::ResourceUri(uri))
+    }
+
+    fn dynamic_find(&self, uri: ResourceUri, query: String) -> Result<DynamicValue, KernelError> {
+        let paths = self
+            .search
+            .find_files(&self.typed_path(&uri)?, &Pattern::parse(&query)?)?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(DynamicValue::List(
+            paths
+                .into_iter()
+                .filter(|path| seen.insert(path.clone()))
+                .map(|path| {
+                    ResourceUri::parse(&format!(
+                        "{}{}",
+                        path.display(),
+                        if path.is_dir() { "/" } else { "" }
+                    ))
+                    .map(DynamicValue::ResourceUri)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ))
+    }
+
+    fn dynamic_grep(&self, uri: ResourceUri, pattern: String) -> Result<DynamicValue, KernelError> {
+        let matches = self.search.grep_file(
+            &self.typed_path(&uri)?,
+            &Pattern::parse(&pattern)?,
+            &self.structure,
+        )?;
+        Ok(DynamicValue::List(
+            matches.into_iter().map(dynamic_text).collect(),
+        ))
+    }
+}
+
+fn dynamic_record(input: &DynamicValue) -> Result<&BTreeMap<String, DynamicValue>, KernelError> {
+    match input {
+        DynamicValue::Record(fields) => Ok(fields),
+        _ => Err(KernelError::InvalidRequest {
+            message: "filesystem dynamic input must be a record".to_owned(),
+        }),
+    }
+}
+
+fn dynamic_string_field(input: &DynamicValue, name: &str) -> Result<String, KernelError> {
+    match dynamic_record(input)?.get(name) {
+        Some(DynamicValue::String(value)) => Ok(value.clone()),
+        _ => Err(KernelError::InvalidRequest {
+            message: format!("filesystem dynamic input field {name} must be a string"),
+        }),
+    }
+}
+
+fn dynamic_u32_field(input: &DynamicValue, name: &str) -> Result<Option<u32>, KernelError> {
+    match dynamic_record(input)?.get(name) {
+        None | Some(DynamicValue::Option(None)) => Ok(None),
+        Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+            DynamicValue::U32(value) => Ok(Some(*value)),
+            DynamicValue::S32(value) if *value >= 0 => Ok(Some(*value as u32)),
+            _ => Err(KernelError::InvalidRequest {
+                message: format!("filesystem dynamic input field {name} must be u32"),
+            }),
+        },
+        Some(DynamicValue::U32(value)) => Ok(Some(*value)),
+        Some(DynamicValue::S32(value)) if *value >= 0 => Ok(Some(*value as u32)),
+        _ => Err(KernelError::InvalidRequest {
+            message: format!("filesystem dynamic input field {name} must be option<u32>"),
+        }),
+    }
+}
+
+fn dynamic_position(input: &DynamicValue) -> Result<Option<Position>, KernelError> {
+    let Some(value) = dynamic_record(input)?.get("at") else {
+        return Ok(None);
+    };
+    let value = match value {
+        DynamicValue::Option(None) => return Ok(None),
+        DynamicValue::Option(Some(value)) => value.as_ref(),
+        value => value,
+    };
+    match value {
+        DynamicValue::String(value) if value == "top" => Ok(Some(Position::Top)),
+        DynamicValue::String(value) if value == "bottom" => Ok(Some(Position::Bottom)),
+        DynamicValue::String(value) => {
+            Ok(Some(Position::At(Anchor::from_tokens(vec![value.clone()]))))
+        }
+        _ => Err(KernelError::InvalidRequest {
+            message: "filesystem dynamic input field at must be a string".to_owned(),
+        }),
+    }
+}
+
+fn dynamic_anchor(value: &DynamicValue) -> Result<Anchor, KernelError> {
+    let tokens = match value {
+        DynamicValue::String(value) => value
+            .trim_start_matches('#')
+            .split('.')
+            .map(str::to_owned)
+            .collect(),
+        DynamicValue::List(values) => values
+            .iter()
+            .map(|value| match value {
+                DynamicValue::String(value) => Ok(value.clone()),
+                _ => Err(KernelError::InvalidRequest {
+                    message: "anchor tokens must be strings".to_owned(),
+                }),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(KernelError::InvalidRequest {
+                message: "anchor must be a string or list<string>".to_owned(),
+            });
+        }
+    };
+    if tokens.is_empty() {
+        return Err(KernelError::InvalidRequest {
+            message: "anchor cannot be empty".to_owned(),
+        });
+    }
+    Ok(Anchor::from_tokens(tokens))
+}
+
+fn dynamic_optional_anchor(
+    fields: &BTreeMap<String, DynamicValue>,
+    name: &str,
+) -> Result<Option<Anchor>, KernelError> {
+    match fields.get(name) {
+        None | Some(DynamicValue::Option(None)) => Ok(None),
+        Some(DynamicValue::Option(Some(value))) => dynamic_anchor(value).map(Some),
+        Some(value) => dynamic_anchor(value).map(Some),
+    }
+}
+
+fn dynamic_insertion_point(value: &DynamicValue) -> Result<InsertionPoint, KernelError> {
+    let DynamicValue::Variant(name, value) = value else {
+        return Err(KernelError::InvalidRequest {
+            message: "edit insertion point must be a variant".to_owned(),
+        });
+    };
+    match (name.as_str(), value.as_deref()) {
+        ("top", None) => Ok(InsertionPoint::Top),
+        ("bottom", None) => Ok(InsertionPoint::Bottom),
+        ("before", Some(value)) => Ok(InsertionPoint::Before(dynamic_anchor(value)?)),
+        ("after", Some(value)) => Ok(InsertionPoint::After(dynamic_anchor(value)?)),
+        _ => Err(KernelError::InvalidRequest {
+            message: format!("invalid edit insertion point variant {name}"),
+        }),
+    }
+}
+
+fn dynamic_edit_operations(input: &DynamicValue) -> Result<Vec<EditOperation>, KernelError> {
+    let Some(DynamicValue::List(values)) = dynamic_record(input)?.get("operations") else {
+        return Err(KernelError::InvalidRequest {
+            message: "filesystem edit input requires operations list".to_owned(),
+        });
+    };
+    values
+        .iter()
+        .map(|value| {
+            let DynamicValue::Variant(name, payload) = value else {
+                return Err(KernelError::InvalidRequest {
+                    message: "edit operation must be a variant".to_owned(),
+                });
+            };
+            let Some(DynamicValue::Record(fields)) = payload.as_deref() else {
+                return Err(KernelError::InvalidRequest {
+                    message: "edit operation variant requires a record".to_owned(),
+                });
+            };
+            match name.as_str() {
+                "replace" => Ok(EditOperation::Replace(ReplaceOperation {
+                    start: dynamic_anchor(fields.get("start").ok_or_else(|| {
+                        KernelError::InvalidRequest {
+                            message: "replace requires start".to_owned(),
                         }
-                        self.cap_remove_dir(&path)
-                    } else {
-                        self.cap_remove_file(&path)
-                    }
-                    .map_err(|error| KernelError::Handler {
-                        message: format!("delete {}: {error}", path.display()),
-                    })?;
-                    Ok(json!({"deleted": true, "path": path}))
-                }
-                Verb::Find => {
-                    let path = self.resolve_existing(&requested)?;
-                    let pattern = Pattern::parse(
-                        request
-                            .args
-                            .get("query")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
-                    )?;
-                    let files = self.search.find_files(&path, &pattern)?;
-                    Ok(json!({"paths": files}))
-                }
-                Verb::Grep => {
-                    let path = self.resolve_existing(&requested)?;
-                    let pattern = request
-                        .args
-                        .get("pattern")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| KernelError::InvalidRequest {
-                            message: "filesystem grep requires an args.pattern string".to_owned(),
-                        })?;
-                    let matches =
-                        self.search
-                            .grep_file(&path, &Pattern::parse(pattern)?, &self.structure)?;
-                    let paths = matches
-                        .iter()
-                        .map(|item| item.uri.to_string())
-                        .collect::<Vec<_>>();
-                    Ok(json!({"matches": matches, "paths": paths, "pattern": pattern}))
-                }
-                verb => Err(KernelError::UnsupportedVerb {
-                    verb: verb.to_string(),
-                    uri: request.target.to_string(),
+                    })?)?,
+                    end: dynamic_optional_anchor(fields, "end")?,
+                    content: dynamic_string_field(
+                        &DynamicValue::Record(fields.clone()),
+                        "content",
+                    )?,
+                })),
+                "insert" => Ok(EditOperation::Insert(InsertOperation {
+                    at: dynamic_insertion_point(fields.get("at").ok_or_else(|| {
+                        KernelError::InvalidRequest {
+                            message: "insert requires at".to_owned(),
+                        }
+                    })?)?,
+                    content: dynamic_string_field(
+                        &DynamicValue::Record(fields.clone()),
+                        "content",
+                    )?,
+                })),
+                _ => Err(KernelError::InvalidRequest {
+                    message: format!("unknown edit operation variant {name}"),
                 }),
             }
         })
-    }
+        .collect()
 }
 
-impl TypedHandler for FileHandler {
-    fn descriptor(&self) -> HandlerDescriptor {
-        HandlerDescriptor {
-            name: "filesystem-typed".to_owned(),
-            schemes: vec!["file".to_owned()],
-            verbs: vec![
-                Verb::Read,
-                Verb::Write,
-                Verb::Edit,
-                Verb::Delete,
-                Verb::Find,
-                Verb::Grep,
-            ],
-        }
-    }
-
-    fn claims_operation(&self, operation: &Operation) -> bool {
-        let ordinary = |uri: &crate::ResourceUri| {
-            uri.scheme() == "file" && uri.query().is_none() && !self.is_virtual_projection(uri)
-        };
-        match operation {
-            Operation::Read(requests) => requests.iter().all(|request| {
-                ordinary(&request.uri) && self.typed_path_syntax(&request.uri).is_ok()
-            }),
-            Operation::Write(requests) => requests.iter().all(|request| {
-                ordinary(&request.uri) && request.uri.as_ref().to_file_path().is_ok()
-            }),
-            Operation::Edit(requests) => requests.iter().all(|request| {
-                ordinary(&request.uri) && request.uri.as_ref().to_file_path().is_ok()
-            }),
-            Operation::Delete(uris) => uris
-                .iter()
-                .all(|uri| ordinary(uri) && self.typed_path_syntax(uri).is_ok()),
-            Operation::Find(request) => {
-                !request.roots.is_empty()
-                    && request
-                        .roots
-                        .iter()
-                        .all(|uri| ordinary(uri) && self.typed_path_syntax(uri).is_ok())
-            }
-            Operation::Grep(request) => {
-                matches!(&request.source,
-                crate::GrepSource::Resources(uris) if !uris.is_empty() && uris.iter().all(|uri| ordinary(uri) && self.typed_path_syntax(uri).is_ok()))
-                    || matches!(&request.source, crate::GrepSource::Text(text) if !text.is_empty())
-            }
-            _ => false,
-        }
-    }
-
-    fn execute_typed<'a>(
-        &'a self,
-        operation: Operation,
-        _host: KernelHandle,
-        _context: crate::InvocationContext,
-    ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
-        Box::pin(async move {
-            match operation {
-                Operation::Read(requests) => {
-                    let results = requests
-                        .into_iter()
-                        .map(|request| {
-                            let path = self.typed_path(&request.uri)?;
-                            if self.cap_metadata(&path)?.is_dir() {
-                                let mut entries = self
-                                    .cap_read_dir(&path)?
-                                    .map(|entry| {
-                                        let entry =
-                                            entry.map_err(|error| KernelError::Handler {
-                                                message: error.to_string(),
-                                            })?;
-                                        let path = path.join(entry.file_name());
-                                        let is_dir = entry
-                                            .file_type()
-                                            .map_err(|error| KernelError::Handler {
-                                                message: error.to_string(),
-                                            })?
-                                            .is_dir();
-                                        crate::ResourceUri::parse(&format!(
-                                            "{}{}",
-                                            path.display(),
-                                            if is_dir { "/" } else { "" }
-                                        ))
-                                    })
-                                    .collect::<Result<Vec<_>, _>>()?;
-                                entries.sort_by_key(ToString::to_string);
-                                Ok(ReadResult::Directory {
-                                    uri: request.uri,
-                                    entries,
-                                })
-                            } else {
-                                let bytes = self.cap_read(&path)?;
-                                let text = self.anchored_text(request.uri, &path, &bytes)?;
-                                Ok(ReadResult::Text(select_read_window(
-                                    text,
-                                    request.at.as_ref(),
-                                    request.before,
-                                    request.after,
-                                )?))
-                            }
-                        })
-                        .collect();
-                    Ok(OperationResult::Read(results))
-                }
-                Operation::Write(requests) => {
-                    let results = requests
-                        .into_iter()
-                        .map(|request| {
-                            let requested = request.uri.as_ref().to_file_path().map_err(|_| {
-                                KernelError::InvalidUri {
-                                    message: request.uri.to_string(),
-                                }
-                            })?;
-                            let path = self.resolve_for_write(&requested)?;
-                            self.cap_atomic_replace(&path, request.content.as_bytes())?;
-                            let bytes = self.cap_read(&path)?;
-                            Ok(crate::WriteResult {
-                                text: self.anchored_text(request.uri, &path, &bytes)?,
-                            })
-                        })
-                        .collect();
-                    Ok(OperationResult::Write(results))
-                }
-                Operation::Edit(requests) => {
-                    let results = requests
-                        .into_iter()
-                        .map(|request| {
-                            let path = self.typed_path(&request.uri)?;
-                            self.apply_typed_edit(&path, request.uri, &request.operations)
-                        })
-                        .collect();
-                    Ok(OperationResult::Edit(results))
-                }
-                Operation::Delete(uris) => {
-                    let results = uris
-                        .into_iter()
-                        .map(|uri| {
-                            let path = self.typed_path(&uri)?;
-                            if self.cap_metadata(&path)?.is_dir() {
-                                if self.cap_read_dir(&path)?.next().is_some() {
-                                    return Err(KernelError::NotEmpty {
-                                        uri: uri.to_string(),
-                                    });
-                                }
-                                self.cap_remove_dir(&path)
-                            } else {
-                                self.cap_remove_file(&path)
-                            }
-                            .map_err(|error| KernelError::Handler {
-                                message: error.to_string(),
-                            })?;
-                            Ok(uri)
-                        })
-                        .collect();
-                    Ok(OperationResult::Delete(results))
-                }
-                Operation::Find(request) => {
-                    let mut paths = Vec::new();
-                    for root in request.roots {
-                        paths.extend(self.search.find_files(
-                            &self.typed_path(&root)?,
-                            &Pattern::parse(&request.query)?,
-                        )?);
-                    }
-                    let mut seen = std::collections::HashSet::new();
-                    paths.retain(|path| seen.insert(path.clone()));
-                    Ok(OperationResult::Find(
-                        paths
-                            .into_iter()
-                            .map(|path| {
-                                crate::ResourceUri::parse(&format!(
-                                    "{}{}",
-                                    path.display(),
-                                    if path.is_dir() { "/" } else { "" }
-                                ))
-                            })
-                            .collect(),
-                    ))
-                }
-                Operation::Grep(request) => {
-                    let pattern = Pattern::parse(&request.pattern)?;
-                    let matches = match request.source {
-                        crate::GrepSource::Resources(uris) => {
-                            let mut matches = Vec::new();
-                            for uri in uris {
-                                matches.extend(self.search.grep_file(
-                                    &self.typed_path(&uri)?,
-                                    &pattern,
-                                    &self.structure,
-                                )?);
-                            }
-                            matches
-                        }
-                        crate::GrepSource::Text(text) => SearchService::grep_text(&text, &pattern)?,
-                    };
-                    Ok(OperationResult::Grep(Ok(matches)))
-                }
-                _ => unreachable!(),
-            }
-        })
-    }
+fn dynamic_line(line: AnchoredLine) -> DynamicValue {
+    DynamicValue::Record(BTreeMap::from([
+        (
+            "anchor".to_owned(),
+            DynamicValue::List(
+                line.anchor
+                    .tokens()
+                    .iter()
+                    .cloned()
+                    .map(DynamicValue::String)
+                    .collect(),
+            ),
+        ),
+        ("text".to_owned(), DynamicValue::String(line.text)),
+        (
+            "ending".to_owned(),
+            DynamicValue::String(format!("{:?}", line.ending).to_lowercase()),
+        ),
+    ]))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Kernel, ResourceAddress};
-    use tempfile::tempdir;
+fn dynamic_text(text: AnchoredText) -> DynamicValue {
+    DynamicValue::Record(BTreeMap::from([
+        ("uri".to_owned(), DynamicValue::ResourceUri(text.uri)),
+        (
+            "lines".to_owned(),
+            DynamicValue::List(text.lines.into_iter().map(dynamic_line).collect()),
+        ),
+    ]))
+}
 
-    fn request(verb: Verb, path: &Path, args: Value) -> Request {
-        Request::new(verb, ResourceAddress::path(path), args)
-    }
-
-    #[tokio::test]
-    async fn reads_writes_finds_greps_and_deletes_native_files() {
-        let root = tempdir().unwrap();
-        fs::create_dir(root.path().join("src")).unwrap();
-        fs::write(root.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-        let kernel = Kernel::new();
-        kernel
-            .register(FileHandler::new(root.path()).unwrap())
-            .await;
-
-        let path = root.path().join("src/main.rs");
-        let read = kernel
-            .execute(request(Verb::Read, &path, Value::Null))
-            .await;
-        assert_eq!(read.value.as_ref().unwrap()["value"]["type"], "text");
-        assert_eq!(
-            read.value.as_ref().unwrap()["value"]["content"],
-            "fn main() {}\n"
-        );
-
-        let new_path = root.path().join("src/lib.rs");
-        assert!(
-            kernel
-                .execute(request(
-                    Verb::Write,
-                    &new_path,
-                    json!({"value": "pub fn answer() -> u8 { 42 }"}),
-                ))
-                .await
-                .ok
-        );
-        let found = kernel
-            .execute(request(Verb::Find, root.path(), json!({"query": "rs"})))
-            .await;
-        assert_eq!(
-            found.value.as_ref().unwrap()["paths"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-
-        let matches = kernel
-            .execute(request(
-                Verb::Grep,
-                root.path(),
-                json!({"pattern": "answer"}),
-            ))
-            .await;
-        assert_eq!(
-            matches.value.as_ref().unwrap()["paths"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-
-        assert!(
-            kernel
-                .execute(request(Verb::Delete, &new_path, Value::Null))
-                .await
-                .ok
-        );
-        assert!(
-            !kernel
-                .execute(request(Verb::Read, &new_path, Value::Null))
-                .await
-                .ok
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_paths_outside_the_filesystem_root() {
-        let root = tempdir().unwrap();
-        let outside = tempdir().unwrap();
-        let path = outside.path().join("secret.txt");
-        fs::write(&path, "secret").unwrap();
-        let kernel = Kernel::new();
-        kernel
-            .register(FileHandler::new(root.path()).unwrap())
-            .await;
-
-        let result = kernel
-            .execute(request(Verb::Read, &path, Value::Null))
-            .await;
-        assert!(!result.ok);
-        assert!(matches!(
-            result.error,
-            Some(KernelError::InvalidRequest { .. })
-        ));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn capability_root_rejects_symlink_escape() {
-        let root = tempdir().unwrap();
-        let outside = tempdir().unwrap();
-        fs::write(outside.path().join("secret.txt"), "secret").unwrap();
-        std::os::unix::fs::symlink(
-            outside.path().join("secret.txt"),
-            root.path().join("link.txt"),
-        )
-        .unwrap();
-        let kernel = Kernel::new();
-        kernel
-            .register(FileHandler::new(root.path()).unwrap())
-            .await;
-
-        let result = kernel
-            .execute(request(
-                Verb::Read,
-                &root.path().join("link.txt"),
-                Value::Null,
-            ))
-            .await;
-        assert!(!result.ok);
-        assert!(matches!(
-            result.error,
-            Some(KernelError::InvalidRequest { .. }) | Some(KernelError::Handler { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn edits_cst_addressed_lines_atomically() {
-        let root = tempdir().unwrap();
-        let path = root.path().join("main.rs");
-        fs::write(&path, "fn main() {\n    let answer = 41;\n}\n").unwrap();
-        let handler = FileHandler::new(root.path()).unwrap();
-        let bytes = fs::read(&path).unwrap();
-        let (_, lines) = handler.structural_lines(&path, &bytes);
-        let anchors = AnchorSet::from_inputs(
-            &lines
-                .iter()
-                .map(StructuralLine::anchor_input)
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let kernel = Kernel::new();
-        kernel.register(handler).await;
-        let result = kernel
-            .execute(request(
-                Verb::Edit,
-                &path,
-                json!({"edits": [{"start": anchors.items()[1].anchor, "replacement": "    let answer = 42;"}]}),
-            ))
-            .await;
-        assert!(result.ok);
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "fn main() {\n    let answer = 42;\n}\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_stale_or_overlapping_edits_without_writing() {
-        let root = tempdir().unwrap();
-        let path = root.path().join("main.rs");
-        let original = "fn main() {\n    let answer = 41;\n}\n";
-        fs::write(&path, original).unwrap();
-        let handler = FileHandler::new(root.path()).unwrap();
-        let (_, lines) = handler.structural_lines(&path, original.as_bytes());
-        let anchors = AnchorSet::from_inputs(
-            &lines
-                .iter()
-                .map(StructuralLine::anchor_input)
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let kernel = Kernel::new();
-        kernel.register(handler).await;
-
-        let stale = Anchor::from_tokens(vec!["stale".to_owned()]);
-        let result = kernel
-            .execute(request(
-                Verb::Edit,
-                &path,
-                json!({"edits": [{"start": stale, "replacement": "changed"}]}),
-            ))
-            .await;
-        assert!(matches!(
-            result.error,
-            Some(KernelError::InvalidAnchor { .. })
-        ));
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
-
-        let result = kernel
-            .execute(request(
-                Verb::Edit,
-                &path,
-                json!({"edits": [{"start": anchors.items()[0].anchor, "end": anchors.items()[1].anchor, "replacement": "x"}, {"start": anchors.items()[1].anchor, "replacement": "y"}]}),
-            ))
-            .await;
-        assert!(matches!(
-            result.error,
-            Some(KernelError::InvalidRequest { .. })
-        ));
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn exposes_cst_context_for_rust_and_line_fallback_for_unknown_files() {
-        let root = tempdir().unwrap();
-        let handler = FileHandler::new(root.path()).unwrap();
-        let (provider, rust_lines) = handler.structural_lines(
-            Path::new("main.rs"),
-            b"fn main() {\n    let answer = 42;\n}\n",
-        );
-        assert_eq!(provider, "tree-sitter-rust");
-        assert!(
-            rust_lines[1]
-                .type_kind_chain
-                .iter()
-                .any(|kind| kind == "let_declaration")
-        );
-
-        let (provider, text_lines) =
-            handler.structural_lines(Path::new("notes.txt"), b"one\ntwo\n");
-        assert_eq!(provider, "line-fallback");
-        assert!(
-            text_lines
-                .iter()
-                .all(|line| line.type_kind_chain.is_empty())
-        );
-    }
-
-    #[tokio::test]
-    async fn typed_read_and_grep_use_contract_values_and_fff() {
-        let root = tempdir().unwrap();
-        let path = root.path().join("main.rs");
-        fs::write(&path, "fn main() {\n    let answer = 42;\n}\n").unwrap();
-        let handler = FileHandler::new(root.path()).unwrap();
-        let uri = crate::ResourceUri::parse(&path.display().to_string()).unwrap();
-        let kernel = Kernel::new();
-        kernel.register_typed(handler).await;
-
-        let read = kernel
-            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
-                uri: uri.clone(),
-                at: None,
-                before: None,
-                after: None,
-            }]))
-            .await
-            .unwrap();
-        let crate::OperationResult::Read(results) = read else {
-            panic!("wrong typed result")
-        };
-        let Ok(crate::ReadResult::Text(text)) = &results[0] else {
-            panic!("wrong read value")
-        };
-        assert_eq!(text.lines.len(), 3);
-        assert!(!text.lines[1].anchor.tokens().is_empty());
-
-        let grep = kernel
-            .execute_operation(crate::Operation::Grep(crate::GrepRequest {
-                pattern: "answer".to_owned(),
-                source: crate::GrepSource::Resources(vec![uri.clone()]),
-            }))
-            .await
-            .unwrap();
-        let crate::OperationResult::Grep(Ok(matches)) = grep else {
-            panic!("wrong grep result")
-        };
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].lines[0].text, "    let answer = 42;");
-
-        let grep_text = kernel
-            .execute_operation(crate::Operation::Grep(crate::GrepRequest {
-                pattern: "answer".to_owned(),
-                source: crate::GrepSource::Text(vec![text.clone()]),
-            }))
-            .await
-            .unwrap();
-        let crate::OperationResult::Grep(Ok(text_matches)) = grep_text else {
-            panic!("wrong text grep result")
-        };
-        assert_eq!(text_matches[0].lines[0].anchor, text.lines[1].anchor);
-
-        let edit = kernel
-            .execute_operation(crate::Operation::Edit(vec![crate::EditRequest {
-                uri,
-                operations: vec![crate::EditOperation::Replace(crate::ReplaceOperation {
-                    start: text_matches[0].lines[0].anchor.clone(),
-                    end: None,
-                    content: "    let answer = 43;".to_owned(),
-                })],
-            }]))
-            .await
-            .unwrap();
-        assert!(matches!(edit, crate::OperationResult::Edit(_)));
-        assert!(fs::read_to_string(&path).unwrap().contains("answer = 43"));
-    }
-
-    #[tokio::test]
-    async fn typed_edit_returns_diff_and_supports_insertions() {
-        let root = tempdir().unwrap();
-        let path = root.path().join("notes.txt");
-        fs::write(&path, "one\ntwo\n").unwrap();
-        let handler = FileHandler::new(root.path()).unwrap();
-        let uri = crate::ResourceUri::parse(&path.display().to_string()).unwrap();
-        let (_, lines) = handler.structural_lines(&path, b"one\ntwo\n");
-        let anchors = AnchorSet::from_inputs(
-            &lines
-                .iter()
-                .map(StructuralLine::anchor_input)
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let kernel = Kernel::new();
-        kernel.register_typed(handler).await;
-        let result = kernel
-            .execute_operation(crate::Operation::Edit(vec![crate::EditRequest {
-                uri: uri.clone(),
-                operations: vec![crate::EditOperation::Insert(crate::InsertOperation {
-                    at: crate::InsertionPoint::Before(anchors.items()[1].anchor.clone()),
-                    content: "inserted\n".to_owned(),
-                })],
-            }]))
-            .await
-            .unwrap();
-        let crate::OperationResult::Edit(mut values) = result else {
-            panic!("wrong typed result")
-        };
-        let value = values.remove(0).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "one\ninserted\ntwo\n");
-        assert_eq!(value.text.uri, uri);
-        assert_eq!(value.diff.hunks.len(), 1);
-        assert_eq!(value.text.lines.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn typed_read_honors_windows_and_all_line_endings() {
-        let root = tempdir().unwrap();
-        let path = root.path().join("mixed.txt");
-        fs::write(&path, b"one\r\ntwo\rthree\nfour").unwrap();
-        let uri = crate::ResourceUri::parse(&path.display().to_string()).unwrap();
-        let kernel = Kernel::new();
-        kernel
-            .register_typed(FileHandler::new(root.path()).unwrap())
-            .await;
-        let full = kernel
-            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
-                uri: uri.clone(),
-                at: None,
-                before: None,
-                after: None,
-            }]))
-            .await
-            .unwrap();
-        let crate::OperationResult::Read(mut values) = full else {
-            panic!("wrong result")
-        };
-        let crate::ReadResult::Text(text) = values.remove(0).unwrap() else {
-            panic!("wrong read")
-        };
-        assert_eq!(
-            text.lines
-                .iter()
-                .map(|line| &line.ending)
-                .collect::<Vec<_>>(),
-            vec![
-                &crate::LineEnding::Crlf,
-                &crate::LineEnding::Cr,
-                &crate::LineEnding::Lf,
-                &crate::LineEnding::None
-            ]
-        );
-        let anchor = text.lines[1].anchor.clone();
-        let window = kernel
-            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
-                uri,
-                at: Some(crate::Position::At(anchor)),
-                before: Some(1),
-                after: Some(1),
-            }]))
-            .await
-            .unwrap();
-        let crate::OperationResult::Read(mut values) = window else {
-            panic!("wrong result")
-        };
-        let crate::ReadResult::Text(text) = values.remove(0).unwrap() else {
-            panic!("wrong read")
-        };
-        assert_eq!(
-            text.lines
-                .iter()
-                .map(|line| line.text.as_str())
-                .collect::<Vec<_>>(),
-            vec!["one", "two", "three"]
-        );
-    }
-
-    #[tokio::test]
-    async fn typed_delete_rejects_nonempty_directories() {
-        let root = tempdir().unwrap();
-        let directory = root.path().join("dir");
-        fs::create_dir(&directory).unwrap();
-        fs::write(directory.join("child"), "x").unwrap();
-        let uri = crate::ResourceUri::parse(&directory.display().to_string()).unwrap();
-        let kernel = Kernel::new();
-        kernel
-            .register_typed(FileHandler::new(root.path()).unwrap())
-            .await;
-        let result = kernel
-            .execute_operation(crate::Operation::Delete(vec![uri]))
-            .await
-            .unwrap();
-        let crate::OperationResult::Delete(mut values) = result else {
-            panic!("wrong result")
-        };
-        assert!(matches!(
-            values.remove(0),
-            Err(crate::KernelError::NotEmpty { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn typed_read_applies_default_window_rejects_invalid_edges_and_marks_directories() {
-        let root = tempdir().unwrap();
-        let directory = root.path().join("dir");
-        fs::create_dir(&directory).unwrap();
-        fs::write(directory.join("child"), "one\n").unwrap();
-        fs::create_dir(directory.join("nested")).unwrap();
-        let file = root.path().join("many.txt");
-        fs::write(
-            &file,
-            (0..250).map(|i| format!("line{i}\n")).collect::<String>(),
-        )
-        .unwrap();
-        let kernel = Kernel::new();
-        kernel
-            .register_typed(FileHandler::new(root.path()).unwrap())
-            .await;
-
-        let read = kernel
-            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
-                uri: crate::ResourceUri::parse(&file.display().to_string()).unwrap(),
-                at: None,
-                before: None,
-                after: None,
-            }]))
-            .await
-            .unwrap();
-        let crate::OperationResult::Read(mut values) = read else {
-            panic!("wrong read result")
-        };
-        let Ok(crate::ReadResult::Text(text)) = values.remove(0) else {
-            panic!("wrong read value")
-        };
-        assert_eq!(text.lines.len(), 201);
-
-        let invalid = kernel
-            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
-                uri: crate::ResourceUri::parse(&file.display().to_string()).unwrap(),
-                at: Some(crate::Position::Top),
-                before: Some(1),
-                after: None,
-            }]))
-            .await
-            .unwrap();
-        assert!(matches!(
-            invalid,
-            crate::OperationResult::Read(values) if matches!(values[0], Err(crate::KernelError::InvalidRequest { .. }))
-        ));
-
-        let read_directory = kernel
-            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
-                uri: crate::ResourceUri::parse(&directory.display().to_string()).unwrap(),
-                at: None,
-                before: None,
-                after: None,
-            }]))
-            .await
-            .unwrap();
-        let crate::OperationResult::Read(mut values) = read_directory else {
-            panic!("wrong directory result")
-        };
-        let Ok(crate::ReadResult::Directory { entries, .. }) = values.remove(0) else {
-            panic!("wrong directory value")
-        };
-        assert!(entries.iter().any(|entry| entry.to_string().ends_with('/')));
-    }
+fn dynamic_diff(diff: crate::AnchoredDiff) -> DynamicValue {
+    DynamicValue::Record(BTreeMap::from([
+        ("uri".to_owned(), DynamicValue::ResourceUri(diff.uri)),
+        (
+            "hunks".to_owned(),
+            DynamicValue::List(
+                diff.hunks
+                    .into_iter()
+                    .map(|hunk| {
+                        DynamicValue::Record(BTreeMap::from([
+                            (
+                                "old".to_owned(),
+                                DynamicValue::List(
+                                    hunk.old.into_iter().map(dynamic_line).collect(),
+                                ),
+                            ),
+                            (
+                                "new".to_owned(),
+                                DynamicValue::List(
+                                    hunk.new.into_iter().map(dynamic_line).collect(),
+                                ),
+                            ),
+                        ]))
+                    })
+                    .collect(),
+            ),
+        ),
+    ]))
 }

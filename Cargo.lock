@@ -314,7 +314,6 @@ dependencies = [
  "futures",
  "regex",
  "serde",
- "serde_json",
  "teca",
  "tempfile",
  "thiserror 2.0.19",

@@ -10,11 +10,17 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DynamicType {
     Bool,
+    S8,
+    S16,
     S32,
     S64,
+    U8,
+    U16,
     U32,
     U64,
+    F32,
     F64,
+    Char,
     String,
     ResourceUri,
     List(Box<Self>),
@@ -35,11 +41,17 @@ impl DynamicType {
         let name = name.trim();
         let primitive = match name {
             "bool" => Some(Self::Bool),
+            "s8" => Some(Self::S8),
+            "s16" => Some(Self::S16),
             "s32" => Some(Self::S32),
             "s64" => Some(Self::S64),
+            "u8" => Some(Self::U8),
+            "u16" => Some(Self::U16),
             "u32" => Some(Self::U32),
             "u64" => Some(Self::U64),
+            "f32" => Some(Self::F32),
             "f64" => Some(Self::F64),
+            "char" => Some(Self::Char),
             "string" => Some(Self::String),
             "uri" | "resource-uri" => Some(Self::ResourceUri),
             _ => None,
@@ -100,11 +112,17 @@ fn split_type_arguments(value: &str) -> Vec<&str> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum DynamicValue {
     Bool(bool),
+    S8(i8),
+    S16(i16),
     S32(i32),
     S64(i64),
+    U8(u8),
+    U16(u16),
     U32(u32),
     U64(u64),
+    F32(f32),
     F64(f64),
+    Char(char),
     String(String),
     ResourceUri(ResourceUri),
     List(Vec<Self>),
@@ -121,11 +139,17 @@ impl DynamicValue {
     pub fn validate(&self, ty: &DynamicType) -> Result<(), KernelError> {
         let valid = match (self, ty) {
             (Self::Bool(_), DynamicType::Bool)
+            | (Self::S8(_), DynamicType::S8)
+            | (Self::S16(_), DynamicType::S16)
             | (Self::S32(_), DynamicType::S32)
             | (Self::S64(_), DynamicType::S64)
+            | (Self::U8(_), DynamicType::U8)
+            | (Self::U16(_), DynamicType::U16)
             | (Self::U32(_), DynamicType::U32)
             | (Self::U64(_), DynamicType::U64)
+            | (Self::F32(_), DynamicType::F32)
             | (Self::F64(_), DynamicType::F64)
+            | (Self::Char(_), DynamicType::Char)
             | (Self::String(_), DynamicType::String)
             | (Self::ResourceUri(_), DynamicType::ResourceUri) => true,
             (Self::List(values), DynamicType::List(element)) => {
@@ -222,7 +246,7 @@ mod tests {
             ),
         ]));
         let value = DynamicValue::Record(BTreeMap::from([
-            ("name".into(), DynamicValue::String("uppercase".into())),
+            ("name".into(), DynamicValue::String("transform".into())),
             (
                 "tags".into(),
                 DynamicValue::List(vec![DynamicValue::String("text".into())]),
@@ -238,5 +262,7 @@ mod tests {
                 .validate(&DynamicType::U32)
                 .is_err()
         );
+        assert!(DynamicValue::S16(-3).validate(&DynamicType::S16).is_ok());
+        assert!(DynamicValue::Char('x').validate(&DynamicType::Char).is_ok());
     }
 }

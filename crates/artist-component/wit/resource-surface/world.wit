@@ -1,9 +1,10 @@
-// `resource` is a WIT keyword; the explicit identifier preserves the
-// canonical package identity artist:resource@1.0.0.
+// Shared data and lifecycle metadata only.  Executable verb contracts are
+// package-owned WIT interfaces and are linked by identity at runtime.
 package artist:%resource@1.0.0;
 
 interface types {
     type uri = string;
+    type verb-id = string;
     type anchor = string;
     type pattern = string;
 
@@ -49,9 +50,8 @@ interface types {
     record poll-request { targets: list<poll-target>, until: option<poll-condition-wire> }
     record poll-result { text: list<anchored-text>, satisfied: list<poll-atom> }
 
-    enum verb { read, write, edit, poll, send, run, abort, delete, find, grep }
     enum claim-decision { pass, handle, reserve }
-    record claim-request { verb: verb, uri: uri }
+    record claim-request { verb: verb-id, uri: uri }
 }
 
 interface filesystem {
@@ -63,105 +63,14 @@ interface extension {
     claim: func(request: claim-request) -> claim-decision;
 }
 
-interface read {
-    use types.{read-request, read-result, error};
-    read: func(requests: list<read-request>) -> list<result<read-result, error>>;
-}
-interface write {
-    use types.{write-request, write-result, error};
-    write: func(requests: list<write-request>) -> list<result<write-result, error>>;
-}
-interface edit {
-    use types.{edit-request, edit-result, error};
-    edit: func(requests: list<edit-request>) -> list<result<edit-result, error>>;
-}
-interface find {
-    use types.{find-request, uri, error};
-    find: func(request: find-request) -> result<list<uri>, error>;
-}
-interface grep {
-    use types.{grep-request, anchored-text, error};
-    grep: func(request: grep-request) -> result<list<anchored-text>, error>;
-}
-interface run {
-    use types.{run-request, uri, error};
-    run: func(requests: list<run-request>) -> list<result<uri, error>>;
-}
-interface send {
-    use types.{send-request, uri, error};
-    send: func(requests: list<send-request>) -> list<result<uri, error>>;
-}
-interface abort {
-    use types.{uri, error};
-    abort: func(uris: list<uri>) -> list<result<uri, error>>;
-}
-interface delete {
-    use types.{uri, error};
-    delete: func(uris: list<uri>) -> list<result<uri, error>>;
-}
-interface poll {
-    use types.{poll-request, poll-result, error};
-    poll: func(request: poll-request) -> result<poll-result, error>;
+world host-world {
+    import filesystem;
 }
 
-world host-world {
-    import read;
-    import write;
-    import edit;
-    import find;
-    import grep;
-    import run;
-    import send;
-    import abort;
-    import delete;
-    import poll;
+world types-world {
+    export types;
 }
 
 world extension-world {
     export extension;
-}
-
-// Resource packages export the extension claim interface plus exactly the
-// standard interfaces declared by their resource.md. Separate worlds keep
-// generated host bindings typed while allowing packages to export subsets.
-world resource-read-world {
-    import read;
-    export extension;
-    export read;
-}
-world resource-write-world {
-    export extension;
-    export write;
-}
-world resource-edit-world {
-    export extension;
-    export edit;
-}
-world resource-find-world {
-    export extension;
-    export find;
-}
-world resource-grep-world {
-    export extension;
-    export grep;
-}
-world resource-run-world {
-    export extension;
-    export run;
-}
-world resource-send-world {
-    export extension;
-    export send;
-}
-world resource-abort-world {
-    export extension;
-    export abort;
-}
-world resource-delete-world {
-    export extension;
-    export delete;
-}
-world resource-poll-world {
-    export extension;
-    export poll;
 }

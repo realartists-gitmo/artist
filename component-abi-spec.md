@@ -5,7 +5,7 @@ Status: implemented horizontal-slice specification
 This document specifies the component boundary used by tools, handlers, verbs,
 and runtimes. The conformance tree contains one reloadable Rust/WASM package
 for each universal verb; those packages delegate resource effects through the
-typed `artist:resource@1.0.0` interfaces.
+typed shared data and lifecycle interfaces.
 
 ## 1. Purpose
 
@@ -22,14 +22,12 @@ The component boundary must be:
 - compatible with resource handles, typed streaming, capabilities, and
   replaceable universal verbs.
 
-The typed universal tool contracts are defined in the companion WIT packages
-at `crates/artist-component/wit/resource-surface/` and
-`crates/artist-component/wit/tool-surface-v1/`. The resource package owns the
-shared URI, anchor, line, diff, error, polling, and request/result types plus
-the ten verb interfaces. The tool package reuses those types and imports the
-corresponding resource interface directly. Each verb package declares one
-contract identity and one required resource capability; its component
-entrypoint is a thin typed adapter, not a JSON host bridge.
+The stable shared data and lifecycle WIT package lives at
+`crates/artist-component/wit/resource-surface/`. Executable verb contracts are
+package-owned: each installed verb carries its own `tool.wit`, imports the
+shared data types, and exports its own versioned interface. Each verb package
+declares one contract identity and its required resource capabilities; its
+component entrypoint is a typed package implementation, not a JSON host bridge.
 
 The `read-stream`, `grep-stream`, and `poll-stream` operations use typed
 component-model streams. Their element types are respectively
@@ -225,7 +223,7 @@ not promise state survival across unload or replacement.
 The ABI package should live independently of any individual tool:
 
     crates/artist-component/
-    ├── wit/tool-surface-v1/
+    ├── wit/resource-surface/
     ├── src/lib.rs
     └── conformance/verbs/
 

@@ -1,4 +1,6 @@
-use crate::{KernelError, ResourceUri};
+#[cfg(test)]
+use crate::KernelError;
+use crate::ResourceUri;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -69,6 +71,7 @@ pub(crate) fn canonical_uri(address: &ResourceAddress) -> Result<ResourceUri, cr
     Ok(address.0.clone())
 }
 
+#[cfg(test)]
 pub(crate) fn uri_path(uri: &ResourceUri) -> Result<PathBuf, KernelError> {
     if uri.scheme() != "file" {
         return Err(KernelError::InvalidRequest {

@@ -27,12 +27,226 @@ pub struct VerbPackageManifest {
     pub output_type: Option<String>,
     #[serde(default)]
     pub wit: Option<String>,
+    /// Symbolic name of the package-owned typed routing extractor.
+    #[serde(default)]
+    pub extractor: Option<String>,
+    /// External model-schema adapter metadata. The kernel stores the
+    /// identity; conversion remains outside the semantic execution path.
+    #[serde(default)]
+    pub schema: Option<String>,
     #[serde(default = "default_manifest_file")]
     pub component: String,
 }
 
 fn default_manifest_file() -> String {
     "component.wasm".to_owned()
+}
+
+fn wit_type_matches(
+    resolve: &wit_parser::Resolve,
+    wit_type: wit_parser::Type,
+    dynamic_type: &DynamicType,
+) -> bool {
+    use wit_parser::{Type, TypeDefKind};
+    match (wit_type, dynamic_type) {
+        (Type::Bool, DynamicType::Bool)
+        | (Type::S8, DynamicType::S8)
+        | (Type::S16, DynamicType::S16)
+        | (Type::U32, DynamicType::U32)
+        | (Type::U64, DynamicType::U64)
+        | (Type::S32, DynamicType::S32)
+        | (Type::S64, DynamicType::S64)
+        | (Type::U8, DynamicType::U8)
+        | (Type::U16, DynamicType::U16)
+        | (Type::F32, DynamicType::F32)
+        | (Type::F64, DynamicType::F64)
+        | (Type::Char, DynamicType::Char)
+        | (Type::String, DynamicType::String | DynamicType::ResourceUri) => true,
+        (Type::Id(id), dynamic_type) => match &resolve.types[id].kind {
+            TypeDefKind::Type(inner) => wit_type_matches(resolve, *inner, dynamic_type),
+            TypeDefKind::List(inner) => {
+                matches!(dynamic_type, DynamicType::List(value) if wit_type_matches(resolve, *inner, value))
+            }
+            TypeDefKind::Option(inner) => {
+                matches!(dynamic_type, DynamicType::Option(value) if wit_type_matches(resolve, *inner, value))
+            }
+            TypeDefKind::Tuple(tuple) => matches!(dynamic_type, DynamicType::Tuple(values)
+                if values.len() == tuple.types.len()
+                    && values.iter().zip(&tuple.types).all(|(value, ty)| wit_type_matches(resolve, *ty, value))),
+            TypeDefKind::Record(record) => matches!(dynamic_type, DynamicType::Record(values)
+                if values.len() == record.fields.len()
+                    && record.fields.iter().all(|field| values.get(&field.name).is_some_and(|value| wit_type_matches(resolve, field.ty, value)))),
+            TypeDefKind::Result(result) => matches!(dynamic_type, DynamicType::Result { ok, err }
+                if result.ok.map(|ty| ok.as_deref().is_some_and(|value| wit_type_matches(resolve, ty, value))).unwrap_or(ok.is_none())
+                    && result.err.map(|ty| err.as_deref().is_some_and(|value| wit_type_matches(resolve, ty, value))).unwrap_or(err.is_none())),
+            TypeDefKind::Enum(enumeration) => matches!(dynamic_type, DynamicType::Enum(values)
+                if values == &enumeration.cases.iter().map(|case| case.name.clone()).collect::<Vec<_>>()),
+            TypeDefKind::Variant(variant) => matches!(dynamic_type, DynamicType::Variant(cases)
+            if cases.len() == variant.cases.len()
+                && variant.cases.iter().all(|case| cases.get(&case.name).is_some_and(|value| match (case.ty, value) {
+                    (None, None) => true,
+                    (Some(ty), Some(value)) => wit_type_matches(resolve, ty, value),
+                    _ => false,
+                }))),
+            TypeDefKind::Flags(flags) => matches!(dynamic_type, DynamicType::Flags(values)
+                if values.iter().all(|value| flags.flags.iter().any(|flag| flag.name == *value))
+                    && values.len() == values.iter().collect::<std::collections::BTreeSet<_>>().len()),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Convert a parsed WIT type into the Artist-owned dynamic contract type.
+///
+/// This is deliberately structural: aliases are followed through the WIT
+/// resolver, while unsupported resource/future/stream handles are rejected
+/// before a package can be published.
+pub fn dynamic_type_from_wit(
+    resolve: &wit_parser::Resolve,
+    wit_type: wit_parser::Type,
+) -> Result<DynamicType, KernelError> {
+    use wit_parser::{Type, TypeDefKind};
+    match wit_type {
+        Type::Bool => Ok(DynamicType::Bool),
+        Type::S8 => Ok(DynamicType::S8),
+        Type::S16 => Ok(DynamicType::S16),
+        Type::S32 => Ok(DynamicType::S32),
+        Type::S64 => Ok(DynamicType::S64),
+        Type::U8 => Ok(DynamicType::U8),
+        Type::U16 => Ok(DynamicType::U16),
+        Type::U32 => Ok(DynamicType::U32),
+        Type::U64 => Ok(DynamicType::U64),
+        Type::F32 => Ok(DynamicType::F32),
+        Type::F64 => Ok(DynamicType::F64),
+        Type::String => Ok(DynamicType::String),
+        Type::Char => Ok(DynamicType::Char),
+        Type::Id(id) => {
+            let definition = &resolve.types[id];
+            if definition
+                .name
+                .as_deref()
+                .is_some_and(|name| matches!(name, "uri" | "resource-uri"))
+            {
+                return Ok(DynamicType::ResourceUri);
+            }
+            match &definition.kind {
+                TypeDefKind::Type(inner) => dynamic_type_from_wit(resolve, *inner),
+                TypeDefKind::List(inner) => Ok(DynamicType::List(Box::new(dynamic_type_from_wit(
+                    resolve, *inner,
+                )?))),
+                TypeDefKind::Option(inner) => Ok(DynamicType::Option(Box::new(
+                    dynamic_type_from_wit(resolve, *inner)?,
+                ))),
+                TypeDefKind::Tuple(tuple) => Ok(DynamicType::Tuple(
+                    tuple
+                        .types
+                        .iter()
+                        .copied()
+                        .map(|ty| dynamic_type_from_wit(resolve, ty))
+                        .collect::<Result<_, _>>()?,
+                )),
+                TypeDefKind::Record(record) => Ok(DynamicType::Record(
+                    record
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            Ok((
+                                field.name.clone(),
+                                dynamic_type_from_wit(resolve, field.ty)?,
+                            ))
+                        })
+                        .collect::<Result<BTreeMap<_, _>, KernelError>>()?,
+                )),
+                TypeDefKind::Result(result) => Ok(DynamicType::Result {
+                    ok: result
+                        .ok
+                        .map(|ty| dynamic_type_from_wit(resolve, ty).map(Box::new))
+                        .transpose()?,
+                    err: result
+                        .err
+                        .map(|ty| dynamic_type_from_wit(resolve, ty).map(Box::new))
+                        .transpose()?,
+                }),
+                TypeDefKind::Enum(enumeration) => Ok(DynamicType::Enum(
+                    enumeration
+                        .cases
+                        .iter()
+                        .map(|case| case.name.clone())
+                        .collect(),
+                )),
+                TypeDefKind::Variant(variant) => Ok(DynamicType::Variant(
+                    variant
+                        .cases
+                        .iter()
+                        .map(|case| {
+                            Ok((
+                                case.name.clone(),
+                                case.ty
+                                    .map(|ty| dynamic_type_from_wit(resolve, ty))
+                                    .transpose()?,
+                            ))
+                        })
+                        .collect::<Result<BTreeMap<_, _>, KernelError>>()?,
+                )),
+                TypeDefKind::Flags(flags) => Ok(DynamicType::Flags(
+                    flags.flags.iter().map(|flag| flag.name.clone()).collect(),
+                )),
+                kind => Err(KernelError::InvalidRequest {
+                    message: format!("unsupported WIT type in dynamic contract: {kind:?}"),
+                }),
+            }
+        }
+        kind => Err(KernelError::InvalidRequest {
+            message: format!("unsupported WIT primitive in dynamic contract: {kind:?}"),
+        }),
+    }
+}
+
+/// Parse a WIT source file and derive the exact one-parameter/one-result
+/// contract for a named interface function.
+pub fn dynamic_contract_from_wit(
+    path: &Path,
+    interface_name: &str,
+    function_name: &str,
+) -> Result<(DynamicType, DynamicType), KernelError> {
+    let mut resolve = wit_parser::Resolve::default();
+    let (package_id, _) = resolve
+        .push_path(path.parent().unwrap_or(path))
+        .map_err(|error| KernelError::InvalidRequest {
+            message: format!("invalid WIT contract {}: {error}", path.display()),
+        })?;
+    let interface_id = resolve.packages[package_id]
+        .interfaces
+        .get(interface_name)
+        .copied()
+        .ok_or_else(|| KernelError::InvalidRequest {
+            message: format!(
+                "WIT interface {interface_name} is absent from {}",
+                path.display()
+            ),
+        })?;
+    let function = resolve.interfaces[interface_id]
+        .functions
+        .get(function_name)
+        .ok_or_else(|| KernelError::InvalidRequest {
+            message: format!(
+                "WIT function {function_name} is absent from {}",
+                path.display()
+            ),
+        })?;
+    if function.params.len() != 1 {
+        return Err(KernelError::InvalidRequest {
+            message: format!("WIT function {function_name} must have exactly one parameter"),
+        });
+    }
+    let output = function.result.ok_or_else(|| KernelError::InvalidRequest {
+        message: format!("WIT function {function_name} must return one result"),
+    })?;
+    Ok((
+        dynamic_type_from_wit(&resolve, function.params[0].ty)?,
+        dynamic_type_from_wit(&resolve, output)?,
+    ))
 }
 
 pub trait DynamicVerbExecutor: Send + Sync {
@@ -56,6 +270,8 @@ impl VerbPackageManifest {
             &self.description,
         );
         definition.docs = self.docs.clone();
+        definition.extractor = self.extractor.clone();
+        definition.schema = self.schema.clone();
         definition.dependencies = self
             .dependencies
             .iter()
@@ -63,6 +279,7 @@ impl VerbPackageManifest {
                 VerbId::new(dependency).map_err(|message| KernelError::InvalidRequest { message })
             })
             .collect::<Result<_, _>>()?;
+        let mut wit_contract = None;
         if let Some(wit) = &self.wit {
             let wit_path = package_dir.join(wit);
             let mut resolve = wit_parser::Resolve::default();
@@ -84,12 +301,50 @@ impl VerbPackageManifest {
                     ),
                 })?;
             let interface = &resolve.interfaces[*interface_id];
-            if !interface.functions.contains_key(&self.function) {
-                return Err(KernelError::InvalidRequest {
+            let wit_function = interface.functions.get(&self.function).ok_or_else(|| {
+                KernelError::InvalidRequest {
                     message: format!(
                         "WIT function {} is absent from {}",
                         self.function,
                         wit_path.display()
+                    ),
+                }
+            })?;
+            let derived_input = (wit_function.params.len() == 1)
+                .then(|| dynamic_type_from_wit(&resolve, wit_function.params[0].ty))
+                .transpose()?;
+            let derived_output = wit_function
+                .result
+                .map(|ty| dynamic_type_from_wit(&resolve, ty))
+                .transpose()?;
+            wit_contract = derived_input.zip(derived_output);
+            let input_type = self
+                .input_type
+                .as_deref()
+                .map(DynamicType::named)
+                .transpose()?;
+            let output_type = self
+                .output_type
+                .as_deref()
+                .map(DynamicType::named)
+                .transpose()?;
+            let input_matches = input_type.as_ref().is_some_and(|ty| {
+                wit_function.params.len() == 1
+                    && wit_type_matches(&resolve, wit_function.params[0].ty, ty)
+            });
+            let output_matches = match (output_type.as_ref(), wit_function.result) {
+                (Some(ty), Some(result)) => wit_type_matches(&resolve, result, ty),
+                (Some(_), None) => false,
+                // Declarations are checked below; an entirely undeclared
+                // contract is allowed through parsing so discovery can issue
+                // its more useful complete-contract diagnostic.
+                (None, _) => true,
+            };
+            if (input_type.is_some() && !input_matches) || !output_matches {
+                return Err(KernelError::InvalidRequest {
+                    message: format!(
+                        "WIT function {} does not match the declared dynamic contract",
+                        self.function
                     ),
                 });
             }
@@ -101,6 +356,9 @@ impl VerbPackageManifest {
             return Err(KernelError::InvalidRequest {
                 message: "verb package must declare both input_type and output_type".into(),
             });
+        } else if let Some((input, output)) = wit_contract {
+            definition.input_type = Some(input);
+            definition.output_type = Some(output);
         }
         definition.source = Some(package_dir.to_owned());
         definition.artifact = Some(package_dir.join(&self.component));
@@ -152,6 +410,8 @@ pub struct VerbDefinition {
     pub source: Option<PathBuf>,
     pub artifact: Option<PathBuf>,
     pub dependencies: Vec<VerbId>,
+    pub extractor: Option<String>,
+    pub schema: Option<String>,
     /// The typed function contract. Optional only while compatibility packages
     /// are being migrated; dynamically invokable packages must provide both.
     pub input_type: Option<DynamicType>,
@@ -174,6 +434,8 @@ impl VerbDefinition {
             source: None,
             artifact: None,
             dependencies: Vec::new(),
+            extractor: None,
+            schema: None,
             input_type: None,
             output_type: None,
         }
@@ -184,6 +446,22 @@ impl VerbDefinition {
         self.output_type = Some(output);
         self
     }
+
+    pub fn with_extractor(mut self, extractor: impl Into<String>) -> Self {
+        self.extractor = Some(extractor.into());
+        self
+    }
+
+    pub fn with_schema_adapter(mut self, schema: impl Into<String>) -> Self {
+        self.schema = Some(schema.into());
+        self
+    }
+
+    pub fn with_source(mut self, source: impl Into<PathBuf>, artifact: Option<PathBuf>) -> Self {
+        self.source = Some(source.into());
+        self.artifact = artifact;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,6 +470,9 @@ pub struct VerbToolDescriptor {
     pub name: String,
     pub description: String,
     pub docs: Vec<String>,
+    pub input_type: Option<DynamicType>,
+    pub output_type: Option<DynamicType>,
+    pub schema: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -275,6 +556,9 @@ impl VerbRegistry {
         &self,
         definitions: Vec<VerbDefinition>,
     ) -> Result<Vec<u64>, KernelError> {
+        if definitions.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut seen = std::collections::BTreeSet::new();
         let desired = definitions
             .iter()
@@ -499,9 +783,26 @@ impl VerbRegistry {
                 verb: call.verb.to_string(),
                 uri: "<dynamic-result>".to_owned(),
             })?;
+        self.validate_result_for_definition(call, result, &active.definition)
+    }
+
+    pub fn validate_result_for_lease(
+        &self,
+        call: &DynamicVerbCall,
+        result: &DynamicVerbResult,
+        lease: &VerbLease,
+    ) -> Result<(), KernelError> {
+        self.validate_result_for_definition(call, result, &lease.active.definition)
+    }
+
+    fn validate_result_for_definition(
+        &self,
+        call: &DynamicVerbCall,
+        result: &DynamicVerbResult,
+        definition: &VerbDefinition,
+    ) -> Result<(), KernelError> {
         let output_type =
-            active
-                .definition
+            definition
                 .output_type
                 .as_ref()
                 .ok_or_else(|| KernelError::InvalidRequest {
@@ -519,6 +820,9 @@ impl VerbRegistry {
                 name: active.definition.model_name.clone(),
                 description: active.definition.description.clone(),
                 docs: active.definition.docs.clone(),
+                input_type: active.definition.input_type.clone(),
+                output_type: active.definition.output_type.clone(),
+                schema: active.definition.schema.clone(),
             })
             .collect())
     }
@@ -552,11 +856,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
             root.path().join("contract.wit"),
-            "package example:text@1.0.0; interface text { uppercase: func(input: string) -> string }",
+            "package example:text@1.0.0; interface text { transform: func(input: string) -> string }",
         )
         .unwrap();
         let manifest = VerbPackageManifest::from_toml(
-            "identity = 'example:text/uppercase@1.0.0'\nfunction = 'missing'\nmodel_name = 'uppercase'\ndescription = 'Uppercase'\nwit = 'contract.wit'\n",
+            "identity = 'example:text/transform@1.0.0'\nfunction = 'missing'\nmodel_name = 'transform'\ndescription = 'Transform'\nwit = 'contract.wit'\n",
         )
         .unwrap();
         assert!(matches!(
@@ -566,25 +870,94 @@ mod tests {
     }
 
     #[test]
+    fn manifest_wit_contract_accepts_nested_list_and_option_shapes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("contract.wit"),
+            "package example:text@1.0.0; interface text { transform: func(input: list<string>) -> option<string>; }",
+        )
+        .unwrap();
+        let manifest = VerbPackageManifest::from_toml(
+            "identity = 'example:text/transform@1.0.0'\nfunction = 'transform'\nmodel_name = 'transform'\ndescription = 'Transform'\nwit = 'contract.wit'\ninput_type = 'list<string>'\noutput_type = 'option<string>'\n",
+        )
+        .unwrap();
+        let definition = manifest.definition(root.path()).unwrap();
+        assert_eq!(
+            definition.input_type,
+            Some(DynamicType::List(Box::new(DynamicType::String)))
+        );
+        assert_eq!(
+            definition.output_type,
+            Some(DynamicType::Option(Box::new(DynamicType::String)))
+        );
+    }
+
+    #[test]
+    fn derives_dynamic_contract_types_from_wit_records_and_results() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("contract.wit");
+        std::fs::write(
+            &path,
+            "package example:text@1.0.0; interface text { type uri = string; record payload { uri: uri, name: string, tags: list<string> } enum mode { fast, slow } transform: func(input: payload) -> result<list<string>, mode>; }",
+        )
+        .unwrap();
+        let mut resolve = wit_parser::Resolve::default();
+        let (package_id, _) = resolve.push_path(&path).unwrap();
+        let interface_id = resolve.packages[package_id].interfaces["text"];
+        let function = &resolve.interfaces[interface_id].functions["transform"];
+        let input = dynamic_type_from_wit(&resolve, function.params[0].ty).unwrap();
+        let output = dynamic_type_from_wit(&resolve, function.result.unwrap()).unwrap();
+        assert_eq!(
+            input,
+            DynamicType::Record(BTreeMap::from([
+                ("uri".into(), DynamicType::ResourceUri),
+                ("name".into(), DynamicType::String),
+                (
+                    "tags".into(),
+                    DynamicType::List(Box::new(DynamicType::String)),
+                ),
+            ]))
+        );
+        assert_eq!(
+            output,
+            DynamicType::Result {
+                ok: Some(Box::new(DynamicType::List(Box::new(DynamicType::String)))),
+                err: Some(Box::new(DynamicType::Enum(vec![
+                    "fast".into(),
+                    "slow".into(),
+                ]))),
+            }
+        );
+
+        let manifest = VerbPackageManifest::from_toml(
+            "identity = 'example:text/transform@1.0.0'\nfunction = 'transform'\nmodel_name = 'transform'\ndescription = 'Transform'\nwit = 'contract.wit'\n",
+        )
+        .unwrap();
+        let definition = manifest.definition(root.path()).unwrap();
+        assert_eq!(definition.input_type, Some(input));
+        assert_eq!(definition.output_type, Some(output));
+    }
+
+    #[test]
     fn manifest_discovery_is_name_agnostic_and_preserves_artifact_path() {
         let root = tempfile::tempdir().unwrap();
-        let package = root.path().join("uppercase-package");
+        let package = root.path().join("transform-package");
         std::fs::create_dir(&package).unwrap();
-        std::fs::write(package.join("uppercase.wasm"), b"component-artifact").unwrap();
+        std::fs::write(package.join("transform.wasm"), b"component-artifact").unwrap();
         std::fs::write(
             package.join("verb.toml"),
-            "identity = 'example:text/uppercase@1.0.0'\nfunction = 'uppercase'\nmodel_name = 'uppercase'\ndescription = 'Uppercase text'\ndocs = ['tool.md']\ninput_type = 'string'\noutput_type = 'string'\ncomponent = 'uppercase.wasm'\n",
+            "identity = 'example:text/transform@1.0.0'\nfunction = 'transform'\nmodel_name = 'transform'\ndescription = 'Transform text'\ndocs = ['tool.md']\ninput_type = 'string'\noutput_type = 'string'\ncomponent = 'transform.wasm'\n",
         )
         .unwrap();
         let definitions = discover_verb_packages(root.path()).unwrap();
         assert_eq!(definitions.len(), 1);
         assert_eq!(
             definitions[0].identity.to_string(),
-            "example:text/uppercase@1.0.0"
+            "example:text/transform@1.0.0"
         );
         assert_eq!(
             definitions[0].artifact,
-            Some(package.join("uppercase.wasm"))
+            Some(package.join("transform.wasm"))
         );
         let registry = VerbRegistry::new();
         assert_eq!(registry.activate_discovered(root.path()).unwrap(), vec![1]);
@@ -622,21 +995,21 @@ mod tests {
     #[test]
     fn dynamic_calls_are_checked_against_the_active_contract() {
         let registry = VerbRegistry::new();
-        let identity = VerbId::new("example:text/uppercase@1.0.0").unwrap();
+        let identity = VerbId::new("example:text/transform@1.0.0").unwrap();
         let definition =
-            VerbDefinition::new(identity.clone(), "uppercase", "uppercase", "Uppercase")
+            VerbDefinition::new(identity.clone(), "transform", "transform", "Transform")
                 .with_contract(DynamicType::String, DynamicType::String);
         registry.activate(definition).unwrap();
         let call = DynamicVerbCall {
             verb: identity.clone(),
-            function: "uppercase".into(),
+            function: "transform".into(),
             input: crate::DynamicValue::String("hello".into()),
         };
         let active = registry.validate_call(&call).unwrap();
         assert_eq!(active.generation, 1);
         let result = DynamicVerbResult {
             verb: identity,
-            function: "uppercase".into(),
+            function: "transform".into(),
             output: crate::DynamicValue::String("HELLO".into()),
         };
         registry.validate_result(&call, &result).unwrap();
@@ -645,15 +1018,22 @@ mod tests {
     #[test]
     fn active_tool_descriptors_are_derived_from_dynamic_packages() {
         let registry = VerbRegistry::new();
-        let mut definition = definition("uppercase");
-        definition.docs.push("uppercase.md".into());
+        let mut definition = definition("transform");
+        definition.docs.push("transform.md".into());
+        definition = definition
+            .with_contract(DynamicType::String, DynamicType::String)
+            .with_extractor("uri-record")
+            .with_schema_adapter("json-schema-v1");
         registry.activate(definition).unwrap();
         let tools = registry.tool_descriptors().unwrap();
-        assert_eq!(tools[0].name, "uppercase");
-        assert_eq!(tools[0].docs, vec!["uppercase.md"]);
+        assert_eq!(tools[0].name, "transform");
+        assert_eq!(tools[0].docs, vec!["transform.md"]);
+        assert_eq!(tools[0].input_type, Some(DynamicType::String));
+        assert_eq!(tools[0].output_type, Some(DynamicType::String));
+        assert_eq!(tools[0].schema.as_deref(), Some("json-schema-v1"));
         assert_eq!(
             tools[0].identity.to_string(),
-            "example:uppercase/uppercase@1.0.0"
+            "example:transform/transform@1.0.0"
         );
     }
 
@@ -704,13 +1084,13 @@ mod tests {
         );
     }
 
-    struct UppercaseExecutor;
+    struct TransformExecutor;
 
-    impl DynamicVerbExecutor for UppercaseExecutor {
+    impl DynamicVerbExecutor for TransformExecutor {
         fn invoke(&self, call: &DynamicVerbCall) -> Result<DynamicVerbResult, KernelError> {
             let DynamicValue::String(value) = &call.input else {
                 return Err(KernelError::InvalidRequest {
-                    message: "uppercase expects a string".into(),
+                    message: "transform expects a string".into(),
                 });
             };
             Ok(DynamicVerbResult {
@@ -724,20 +1104,20 @@ mod tests {
     #[test]
     fn dynamic_executor_runs_without_kernel_verb_dispatch() {
         let registry = VerbRegistry::new();
-        let identity = VerbId::new("example:text/uppercase@1.0.0").unwrap();
+        let identity = VerbId::new("example:text/transform@1.0.0").unwrap();
         registry
             .activate(
-                VerbDefinition::new(identity.clone(), "uppercase", "uppercase", "Uppercase")
+                VerbDefinition::new(identity.clone(), "transform", "transform", "Transform")
                     .with_contract(DynamicType::String, DynamicType::String),
             )
             .unwrap();
         registry
-            .register_executor(identity.clone(), Arc::new(UppercaseExecutor))
+            .register_executor(identity.clone(), Arc::new(TransformExecutor))
             .unwrap();
         let result = registry
             .execute(&DynamicVerbCall {
                 verb: identity,
-                function: "uppercase".into(),
+                function: "transform".into(),
                 input: DynamicValue::String("hello".into()),
             })
             .unwrap();
@@ -764,12 +1144,51 @@ mod tests {
     #[test]
     fn dynamic_verbs_activate_replace_and_deactivate() {
         let registry = VerbRegistry::new();
-        let identity = definition("uppercase").identity.clone();
-        assert_eq!(registry.activate(definition("uppercase")).unwrap(), 1);
-        assert_eq!(registry.activate(definition("uppercase")).unwrap(), 1);
-        assert_eq!(registry.activate(definition("uppercase")).unwrap(), 1);
+        let identity = definition("transform").identity.clone();
+        assert_eq!(registry.activate(definition("transform")).unwrap(), 1);
+        assert_eq!(registry.activate(definition("transform")).unwrap(), 1);
+        assert_eq!(registry.activate(definition("transform")).unwrap(), 1);
         assert_eq!(registry.current(&identity).unwrap().unwrap().generation, 1);
         assert!(registry.deactivate(&identity).unwrap().is_some());
         assert!(registry.current(&identity).unwrap().is_none());
+    }
+
+    #[test]
+    fn contract_change_creates_generation_and_old_lease_stays_pinned() {
+        let registry = VerbRegistry::new();
+        let identity = VerbId::new("example:text/transform@1.0.0").unwrap();
+        registry
+            .activate(
+                VerbDefinition::new(identity.clone(), "transform", "transform", "Transform")
+                    .with_contract(DynamicType::String, DynamicType::String),
+            )
+            .unwrap();
+        let old_lease = registry.acquire(&identity).unwrap();
+        let old_call = DynamicVerbCall {
+            verb: identity.clone(),
+            function: "transform".into(),
+            input: DynamicValue::String("old".into()),
+        };
+
+        let next_generation = registry
+            .activate(
+                VerbDefinition::new(identity.clone(), "transform", "transform", "Transform")
+                    .with_contract(DynamicType::U32, DynamicType::U32),
+            )
+            .unwrap();
+        assert_eq!(old_lease.generation(), 1);
+        assert_eq!(next_generation, 2);
+        assert!(registry.validate_call(&old_call).is_err());
+
+        let old_result = DynamicVerbResult {
+            verb: identity,
+            function: "transform".into(),
+            output: DynamicValue::String("old result".into()),
+        };
+        assert!(
+            registry
+                .validate_result_for_lease(&old_call, &old_result, &old_lease)
+                .is_ok()
+        );
     }
 }

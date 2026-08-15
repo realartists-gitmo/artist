@@ -15,10 +15,8 @@ mod operation;
 mod process;
 mod registry;
 mod repository;
-mod request;
 mod resolver;
 mod resources;
-mod result;
 mod routing;
 mod search;
 mod session;
@@ -32,22 +30,20 @@ pub use anchors::{AddressedItem, Anchor, AnchorError, AnchorInput, AnchorSet};
 pub use claims::{ClaimRegistry, ClaimedResource, DynamicClaimProvider};
 pub use dynamic::{DynamicType, DynamicValue, DynamicVerbCall, DynamicVerbResult};
 pub use error::KernelError;
-pub use filesystem::FileHandler;
+pub use filesystem::{FileHandler, FileResourceProvider, FileVerbBindings};
 pub use handler::{
-    BoxFuture, ClaimDecision, Handler, HandlerDescriptor, KernelHandle, ResourceCatalogDoc,
-    ResourceCatalogEntry, ResourceCatalogProvider, ToolDefinition, ToolProvider, TypedHandler,
+    BoxFuture, ClaimDecision, KernelHandle, ResourceCatalogDoc, ResourceCatalogEntry,
+    ResourceCatalogProvider, ToolDefinition, ToolProvider,
 };
-pub use operation::{Verb, VerbId};
-pub use process::{ProcessManager, ProcessSnapshot};
+pub use operation::VerbId;
+pub use process::{ProcessManager, ProcessResourceProvider, ProcessSnapshot, ProcessVerbBindings};
 pub use registry::Kernel;
-pub use repository::RepositoryHandler;
-pub use request::{BatchRequest, Request};
+pub use repository::{RepositoryHandler, RepositoryResourceProvider, RepositoryVerbBindings};
 pub use resolver::{is_file_uri, normalize};
 pub use resources::{DynamicResourceProvider, ResourceFuture, ResourceRegistry};
-pub use result::{BatchResult, ItemResult};
-pub use routing::{DynamicRouteExtractor, RouteRegistry};
+pub use routing::{DynamicRouteExtractor, ResourceUriValueExtractor, RouteRegistry};
 pub use search::{Pattern, SearchService};
-pub use session::SessionHandler;
+pub use session::{SessionHandler, SessionResourceProvider, SessionVerbBindings};
 pub use structure::{
     CstError, CstProvider, LineFallbackProvider, RustCstProvider, StructuralAnalyzer,
     StructuralLine,
@@ -56,5 +52,11 @@ pub use typed::*;
 pub use uri::ResourceUri;
 pub use verbs::{
     ActiveVerb, DynamicVerbExecutor, VerbDefinition, VerbLease, VerbPackageManifest, VerbRegistry,
-    VerbToolDescriptor, discover_verb_packages,
+    VerbToolDescriptor, discover_verb_packages, dynamic_contract_from_wit, dynamic_type_from_wit,
 };
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynamicResourceResult {
+    pub uri: ResourceUri,
+    pub result: DynamicVerbResult,
+}

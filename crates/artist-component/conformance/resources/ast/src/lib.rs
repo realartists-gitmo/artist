@@ -1,12 +1,14 @@
 #![allow(unexpected_cfgs)]
 
 wit_bindgen::generate!({
-    path: "../../../wit/resource-surface",
-    world: "resource-read-world",
+    path: "../",
+    world: "ast",
     generate_all,
 });
 
-use artist::resource::{self, types};
+use artist::resource::types;
+// Keep the generated bindings refreshed when package-local WIT dependencies change.
+use artist::tool::read as source_read;
 
 struct AstResource;
 
@@ -20,8 +22,7 @@ fn error(message: impl ToString, uri: Option<String>) -> types::Error {
 
 fn source_uri(uri: &str) -> Option<String> {
     let path = uri.split('?').next().unwrap_or(uri);
-    path.match_indices("/symbols")
-        .rev()
+    path.rmatch_indices("/symbols")
         .filter_map(|(index, _)| {
             let source = &path[..index];
             let suffix = &path[index + "/symbols".len()..];
@@ -33,7 +34,7 @@ fn source_uri(uri: &str) -> Option<String> {
             {
                 return None;
             }
-            resource::filesystem::is_file(source).then(|| source.to_owned())
+            Some(source.to_owned())
         })
         .next()
 }
@@ -45,14 +46,16 @@ impl exports::artist::resource::extension::Guest for AstResource {
         if source_uri(&request.uri).is_none() {
             return types::ClaimDecision::Pass;
         }
-        match request.verb {
-            types::Verb::Read => types::ClaimDecision::Handle,
+        match request.verb.as_str() {
+            "read" | "artist:tool/read@1.0.0" => {
+                types::ClaimDecision::Handle
+            }
             _ => types::ClaimDecision::Reserve,
         }
     }
 }
 
-impl exports::artist::resource::read::Guest for AstResource {
+impl exports::artist::tool::read::Guest for AstResource {
     fn read(
         requests: Vec<types::ReadRequest>,
     ) -> Vec<Result<types::ReadResult, types::Error>> {
@@ -63,12 +66,12 @@ impl exports::artist::resource::read::Guest for AstResource {
                 let source = source_uri(&target)
                     .ok_or_else(|| error("unsupported AST projection", Some(target.clone())))?;
                 let source_request = types::ReadRequest {
-                    uri: source,
+                    uri: source.clone(),
                     at: None,
                     before: None,
                     after: None,
                 };
-                let source_text = resource::read::read(&vec![source_request])
+                let source_text = source_read::read(&vec![source_request])
                     .into_iter()
                     .next()
                     .ok_or_else(|| error("source read returned no result", Some(target.clone())))??;

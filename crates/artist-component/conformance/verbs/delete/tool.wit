@@ -1,0 +1,6 @@
+package artist:tool@1.0.0;
+interface delete {
+    use artist:%resource/types@1.0.0.{uri, error};
+    delete: func(uris: list<uri>) -> list<result<uri, error>>;
+}
+world tool-world { export delete; }

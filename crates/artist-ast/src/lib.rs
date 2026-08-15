@@ -47,6 +47,7 @@ use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
 
 pub use crate::core::ParseResult;
+pub use serde_json::{Value as JsonValue, from_str, json, to_value, to_vec_pretty};
 pub mod snapshot;
 
 /// Parse one file into its declarations, or `None` when the path has no

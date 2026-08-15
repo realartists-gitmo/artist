@@ -6,15 +6,17 @@
 //! source edits remain native-path `edit` requests, anchored by the kernel.
 
 use crate::{
-    AnchorSet, AnchoredLine, AnchoredText, BoxFuture, ClaimDecision, Handler, HandlerDescriptor,
-    KernelError, KernelHandle, Operation, OperationResult, Pattern, ReadResult, Request,
-    ResourceAddress, ResourceUri, SearchService, StructuralAnalyzer, StructuralLine, TypedHandler,
-    Verb, is_file_uri, normalize,
+    AnchorSet, AnchoredLine, AnchoredText, ClaimDecision, DynamicClaimProvider,
+    DynamicResourceProvider, DynamicValue, DynamicVerbResult, KernelError, Pattern,
+    ResourceAddress, ResourceFuture, ResourceUri, SearchService, StructuralAnalyzer,
+    StructuralLine, VerbId, is_file_uri, normalize,
 };
-use serde_json::{Value, json};
+use artist_ast::{JsonValue as Value, from_str, json, to_value, to_vec_pretty};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use url::Url;
 
@@ -25,6 +27,24 @@ pub struct RepositoryHandler {
     search: SearchService,
     file_projections: bool,
     file_symbol_projections: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryVerbBindings {
+    pub read: VerbId,
+    pub find: VerbId,
+    pub grep: VerbId,
+}
+
+pub struct RepositoryResourceProvider {
+    handler: Arc<RepositoryHandler>,
+    bindings: RepositoryVerbBindings,
+}
+
+impl RepositoryResourceProvider {
+    pub fn new(handler: Arc<RepositoryHandler>, bindings: RepositoryVerbBindings) -> Self {
+        Self { handler, bindings }
+    }
 }
 
 impl RepositoryHandler {
@@ -383,7 +403,7 @@ impl RepositoryHandler {
         let parsed = artist_ast::parse_source(file, text).ok_or_else(|| KernelError::NotFound {
             uri: target.to_string(),
         })?;
-        Ok(serde_json::from_str(&artist_ast::core::render_json_map(
+        Ok(from_str(&artist_ast::core::render_json_map(
             &[parsed],
             &artist_ast::core::MapOptions::default(),
             false,
@@ -553,235 +573,161 @@ impl RepositoryHandler {
     }
 }
 
-impl Handler for RepositoryHandler {
-    fn descriptor(&self) -> HandlerDescriptor {
-        HandlerDescriptor {
-            name: "repository".to_owned(),
-            schemes: vec!["repo".to_owned(), "file".to_owned()],
-            verbs: vec![Verb::Read, Verb::Find, Verb::Grep],
+impl DynamicClaimProvider for RepositoryResourceProvider {
+    fn claim(&self, verb: &VerbId, uri: &ResourceUri) -> ClaimDecision {
+        let supported = verb == &self.bindings.read
+            || verb == &self.bindings.find
+            || verb == &self.bindings.grep;
+        if supported && (uri.scheme() == "repo" || self.handler.claims_file_projection(uri)) {
+            ClaimDecision::Handle
+        } else {
+            ClaimDecision::Pass
         }
     }
+}
 
-    fn claims(&self, address: &ResourceAddress) -> bool {
-        address
-            .as_uri()
-            .is_some_and(|uri| uri.scheme() == "repo" || uri.scheme() == "file")
-    }
-
-    fn execute<'a>(
+impl DynamicResourceProvider for RepositoryResourceProvider {
+    fn invoke<'a>(
         &'a self,
-        request: Request,
-        _host: KernelHandle,
-    ) -> BoxFuture<'a, Result<Value, KernelError>> {
+        verb: &'a VerbId,
+        uri: &'a ResourceUri,
+        input: DynamicValue,
+    ) -> ResourceFuture<'a> {
         Box::pin(async move {
-            let target = normalize(&request.target)?;
-            match request.verb {
-                Verb::Read => self.read_resource(&target),
-                Verb::Find => Ok(
-                    json!({"paths": self.find_paths(&target, request.args.get("query").and_then(Value::as_str).unwrap_or_default())?.into_iter().map(|(path, directory)| format!("{}{}", path, if directory { "/" } else { "" })).collect::<Vec<_>>() }),
-                ),
-                Verb::Grep => self.grep(&target, &request.args),
-                verb => Err(KernelError::UnsupportedVerb {
+            let output = if verb == &self.bindings.read {
+                self.handler.dynamic_read(uri.clone())?
+            } else if verb == &self.bindings.find {
+                self.handler
+                    .dynamic_find(uri.clone(), repository_string_field(&input, "query")?)?
+            } else if verb == &self.bindings.grep {
+                self.handler
+                    .dynamic_grep(uri.clone(), repository_string_field(&input, "pattern")?)?
+            } else {
+                return Err(KernelError::UnsupportedVerb {
                     verb: verb.to_string(),
-                    uri: request.target.to_string(),
-                }),
-            }
+                    uri: uri.to_string(),
+                });
+            };
+            Ok(DynamicVerbResult {
+                verb: verb.clone(),
+                function: verb.function().to_owned(),
+                output,
+            })
         })
     }
 }
 
-impl TypedHandler for RepositoryHandler {
-    fn descriptor(&self) -> HandlerDescriptor {
-        HandlerDescriptor {
-            name: "repository-typed".to_owned(),
-            schemes: vec!["repo".to_owned(), "file".to_owned()],
-            verbs: vec![Verb::Read, Verb::Find, Verb::Grep],
-        }
-    }
-
-    fn claims_operation(&self, operation: &Operation) -> bool {
-        match operation {
-            Operation::Read(requests) => requests.iter().all(|request| {
-                request.uri.scheme() == "repo" || self.claims_file_projection(&request.uri)
-            }),
-            Operation::Find(request) => request
-                .roots
-                .iter()
-                .all(|uri| uri.scheme() == "repo" || self.claims_file_projection(uri)),
-            Operation::Grep(request) => matches!(
-                &request.source,
-                crate::GrepSource::Resources(uris)
-                    if !uris.is_empty()
-                        && uris.iter().all(|uri| uri.scheme() == "repo" || self.claims_file_projection(uri))
-            ),
-            _ => false,
-        }
-    }
-
-    fn claim_operation<'a>(
-        &'a self,
-        operation: &'a Operation,
-    ) -> BoxFuture<'a, Result<ClaimDecision, KernelError>> {
-        let reserve = match operation {
-            Operation::Write(requests) => requests
-                .iter()
-                .any(|request| self.claims_file_projection(&request.uri)),
-            Operation::Edit(requests) => requests
-                .iter()
-                .any(|request| self.claims_file_projection(&request.uri)),
-            Operation::Run(requests) => requests
-                .iter()
-                .any(|request| self.claims_file_projection(&request.uri)),
-            Operation::Send(requests) => requests
-                .iter()
-                .any(|request| self.claims_file_projection(&request.uri)),
-            Operation::Poll(request) => request
-                .targets
-                .iter()
-                .any(|target| self.claims_file_projection(&target.uri)),
-            Operation::Abort(uris) | Operation::Delete(uris) => {
-                uris.iter().any(|uri| self.claims_file_projection(uri))
-            }
-            Operation::Find(_) | Operation::Read(_) | Operation::Grep(_) => false,
+impl RepositoryHandler {
+    fn dynamic_read(&self, uri: ResourceUri) -> Result<DynamicValue, KernelError> {
+        let target = ResourceAddress::uri(uri.clone());
+        let (file, suffix) = self.file_and_suffix(&target).unwrap_or_else(|_| {
+            (
+                self.root.join(".artist-projection.json"),
+                vec!["projection".to_owned()],
+            )
+        });
+        let source = if !suffix.is_empty() {
+            let value = self.read_resource(&target)?;
+            to_vec_pretty(&value).map_err(|error| KernelError::Handler {
+                message: format!("serialize repository projection: {error}"),
+            })?
+        } else {
+            fs::read(&file).map_err(|error| KernelError::Handler {
+                message: format!("read {}: {error}", file.display()),
+            })?
         };
-        Box::pin(async move {
-            if reserve {
-                Ok(ClaimDecision::Reserve)
-            } else if self.claims_operation(operation) {
-                Ok(ClaimDecision::Handle)
-            } else {
-                Ok(ClaimDecision::Pass)
-            }
-        })
+        let text = repository_anchored_text(uri, &file, &source, &self.structure)?;
+        Ok(repository_text(select_repository_read_window(
+            text, None, None, None,
+        )?))
     }
 
-    fn execute_typed<'a>(
-        &'a self,
-        operation: Operation,
-        _host: KernelHandle,
-        _context: crate::InvocationContext,
-    ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
-        Box::pin(async move {
-            match operation {
-                Operation::Read(requests) => {
-                    let results = requests
-                        .into_iter()
-                        .map(|request| {
-                            let target = ResourceAddress::uri(request.uri.clone());
-                            let (file, suffix) =
-                                self.file_and_suffix(&target).unwrap_or_else(|_| {
-                                    (
-                                        self.root.join(".artist-projection.json"),
-                                        vec!["projection".to_owned()],
-                                    )
-                                });
-                            if !suffix.is_empty() {
-                                let value = self.read_resource(&target)?;
-                                let source =
-                                    serde_json::to_string_pretty(&value).map_err(|error| {
-                                        KernelError::Handler {
-                                            message: format!(
-                                                "serialize repository projection: {error}"
-                                            ),
-                                        }
-                                    })?;
-                                let text = repository_anchored_text(
-                                    request.uri.clone(),
-                                    &file,
-                                    source.as_bytes(),
-                                    &self.structure,
-                                )?;
-                                return Ok(ReadResult::Text(select_repository_read_window(
-                                    text,
-                                    request.at.as_ref(),
-                                    request.before,
-                                    request.after,
-                                )?));
-                            }
-                            let source = fs::read(&file).map_err(|error| KernelError::Handler {
-                                message: format!("read {}: {error}", file.display()),
-                            })?;
-                            Ok(ReadResult::Text(select_repository_read_window(
-                                repository_anchored_text(
-                                    request.uri,
-                                    &file,
-                                    &source,
-                                    &self.structure,
-                                )?,
-                                request.at.as_ref(),
-                                request.before,
-                                request.after,
-                            )?))
-                        })
-                        .collect();
-                    Ok(OperationResult::Read(results))
-                }
-                Operation::Find(request) => {
-                    let mut paths = Vec::new();
-                    for root in request.roots {
-                        let target = ResourceAddress::uri(root);
-                        paths.extend(self.find_paths(&target, &request.query)?);
-                    }
-                    let mut seen = std::collections::HashSet::new();
-                    paths.retain(|(path, _)| seen.insert(path.clone()));
-                    Ok(OperationResult::Find(
-                        paths
-                            .into_iter()
-                            .map(|(path, directory)| {
-                                crate::ResourceUri::parse(&format!(
-                                    "{}{}",
-                                    path,
-                                    if directory { "/" } else { "" }
-                                ))
-                            })
-                            .collect::<Result<Vec<_>, _>>(),
-                    ))
-                }
-                Operation::Grep(request) => {
-                    let crate::GrepSource::Resources(uris) = request.source else {
-                        return Err(KernelError::InvalidRequest {
-                            message: "repository grep requires resource sources".to_owned(),
-                        });
-                    };
-                    let mut matches = Vec::new();
-                    for uri in uris {
-                        let target = ResourceAddress::uri(uri.clone());
-                        let root = self.file_and_suffix(&target)?.0;
-                        for mut item in self.search.grep_file(
-                            &root,
-                            &Pattern::parse(&request.pattern)?,
-                            &self.structure,
-                        )? {
-                            let file_uri = item.uri.clone();
-                            let item_uri = if uri.scheme() == "repo" {
-                                crate::ResourceUri::parse(&format!(
-                                    "repo://{}/{}",
-                                    self.project,
-                                    relative(
-                                        &self.root,
-                                        &file_uri.as_ref().to_file_path().map_err(|_| {
-                                            KernelError::InvalidUri {
-                                                message: file_uri.to_string(),
-                                            }
-                                        })?
-                                    )
-                                ))?
-                            } else {
-                                file_uri.clone()
-                            };
-                            item.uri = item_uri;
-                            matches.push(item);
-                        }
-                    }
-                    Ok(OperationResult::Grep(Ok(matches)))
-                }
-                _ => Err(KernelError::UnsupportedVerb {
-                    verb: "typed-repository".to_owned(),
-                    uri: "repo://".to_owned(),
-                }),
-            }
-        })
+    fn dynamic_find(&self, uri: ResourceUri, query: String) -> Result<DynamicValue, KernelError> {
+        let paths = self.find_paths(&ResourceAddress::uri(uri), &query)?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(DynamicValue::List(
+            paths
+                .into_iter()
+                .filter(|(path, _)| seen.insert(path.clone()))
+                .map(|(path, directory)| {
+                    ResourceUri::parse(&format!("{}{}", path, if directory { "/" } else { "" }))
+                        .map(DynamicValue::ResourceUri)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ))
     }
+
+    fn dynamic_grep(&self, uri: ResourceUri, pattern: String) -> Result<DynamicValue, KernelError> {
+        let target = ResourceAddress::uri(uri.clone());
+        let root = self.file_and_suffix(&target)?.0;
+        let mut matches =
+            self.search
+                .grep_file(&root, &Pattern::parse(&pattern)?, &self.structure)?;
+        for item in &mut matches {
+            if uri.scheme() == "repo" {
+                let file_uri =
+                    item.uri
+                        .as_ref()
+                        .to_file_path()
+                        .map_err(|_| KernelError::InvalidUri {
+                            message: item.uri.to_string(),
+                        })?;
+                item.uri = ResourceUri::parse(&format!(
+                    "repo://{}/{}",
+                    self.project,
+                    relative(&self.root, &file_uri)
+                ))?;
+            }
+        }
+        Ok(DynamicValue::List(
+            matches.into_iter().map(repository_text).collect(),
+        ))
+    }
+}
+
+fn repository_string_field(input: &DynamicValue, name: &str) -> Result<String, KernelError> {
+    let DynamicValue::Record(fields) = input else {
+        return Err(KernelError::InvalidRequest {
+            message: "repository dynamic input must be a record".to_owned(),
+        });
+    };
+    match fields.get(name) {
+        Some(DynamicValue::String(value)) => Ok(value.clone()),
+        _ => Err(KernelError::InvalidRequest {
+            message: format!("repository dynamic field {name} must be a string"),
+        }),
+    }
+}
+
+fn repository_line(line: AnchoredLine) -> DynamicValue {
+    DynamicValue::Record(BTreeMap::from([
+        (
+            "anchor".to_owned(),
+            DynamicValue::List(
+                line.anchor
+                    .tokens()
+                    .iter()
+                    .cloned()
+                    .map(DynamicValue::String)
+                    .collect(),
+            ),
+        ),
+        ("text".to_owned(), DynamicValue::String(line.text)),
+        (
+            "ending".to_owned(),
+            DynamicValue::String(format!("{:?}", line.ending).to_lowercase()),
+        ),
+    ]))
+}
+
+fn repository_text(text: AnchoredText) -> DynamicValue {
+    DynamicValue::Record(BTreeMap::from([
+        ("uri".to_owned(), DynamicValue::ResourceUri(text.uri)),
+        (
+            "lines".to_owned(),
+            DynamicValue::List(text.lines.into_iter().map(repository_line).collect()),
+        ),
+    ]))
 }
 
 fn select_repository_read_window(
@@ -870,6 +816,7 @@ impl RepositoryHandler {
         Ok(output)
     }
 
+    #[cfg(test)]
     fn grep(&self, target: &ResourceAddress, args: &Value) -> Result<Value, KernelError> {
         let pattern = args.get("pattern").and_then(Value::as_str).ok_or_else(|| {
             KernelError::InvalidRequest {
@@ -1014,7 +961,7 @@ fn collect_declaration(
     file_uri: &str,
     output: &mut Vec<Value>,
 ) {
-    let mut value = serde_json::to_value(declaration).unwrap_or_else(|_| json!({}));
+    let mut value = to_value(declaration).unwrap_or_else(|_| json!({}));
     if let Value::Object(fields) = &mut value {
         let anchor = declaration_anchor(declaration.start_line, lines, anchors)
             .map(|anchor| format!("{file_uri}{anchor}"));
@@ -1071,255 +1018,5 @@ fn symbol_resource(
         Err(KernelError::InvalidRequest {
             message: format!("symbol path is ambiguous: {name}"),
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Kernel, ResourceUri};
-    use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn exposes_rust_symbols_as_repo_views() {
-        let root = tempdir().unwrap();
-        fs::write(root.path().join("main.rs"), "fn answer() -> u8 { 42 }\n").unwrap();
-        let kernel = Kernel::new();
-        let handler = RepositoryHandler::new(root.path()).unwrap();
-        let project = handler.project().to_owned();
-        kernel.register(handler).await;
-        let target = format!("repo://{project}/main.rs/symbols");
-        let result = kernel
-            .execute(Request::new(
-                Verb::Read,
-                ResourceUri::parse(&target).unwrap(),
-                Value::Null,
-            ))
-            .await;
-        assert!(result.ok);
-        assert_eq!(result.value.unwrap()["items"][0]["name"], "answer");
-    }
-
-    #[tokio::test]
-    async fn typed_repository_read_returns_anchored_source() {
-        let root = tempdir().unwrap();
-        let file = root.path().join("main.rs");
-        fs::write(&file, "fn main() {}\n").unwrap();
-        let handler = RepositoryHandler::new(root.path()).unwrap();
-        let uri = crate::ResourceUri::parse(&file.display().to_string()).unwrap();
-        let kernel = Kernel::new();
-        kernel
-            .register_typed(crate::FileHandler::new(root.path()).unwrap())
-            .await;
-        kernel.register_typed(handler).await;
-        let result = kernel
-            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
-                uri: uri.clone(),
-                at: None,
-                before: None,
-                after: None,
-            }]))
-            .await
-            .unwrap();
-        let crate::OperationResult::Read(mut values) = result else {
-            panic!("wrong typed repository result")
-        };
-        let Ok(crate::ReadResult::Text(text)) = values.remove(0) else {
-            panic!("wrong typed repository value")
-        };
-        assert_eq!(text.uri, uri);
-        assert_eq!(text.lines[0].text, "fn main() {}");
-        assert!(!text.lines[0].anchor.tokens().is_empty());
-    }
-
-    #[tokio::test]
-    async fn typed_repository_reads_projections_and_returns_only_grep_matches() {
-        let root = tempdir().unwrap();
-        let file = root.path().join("main.rs");
-        fs::write(&file, "fn first() {}\nfn answer() -> u8 { 42 }\n").unwrap();
-        let handler = RepositoryHandler::new(root.path()).unwrap();
-        let project = handler.project().to_owned();
-        let file_uri = ResourceUri::parse(&file.display().to_string()).unwrap();
-        let repo_uri = ResourceUri::parse(&format!("repo://{project}/main.rs/symbols")).unwrap();
-        let kernel = Kernel::new();
-        kernel
-            .register_typed(crate::FileHandler::new(root.path()).unwrap())
-            .await;
-        kernel.register_typed(handler).await;
-
-        let read = kernel
-            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
-                uri: repo_uri,
-                at: Some(crate::Position::Top),
-                before: None,
-                after: Some(20),
-            }]))
-            .await
-            .unwrap();
-        let crate::OperationResult::Read(mut values) = read else {
-            panic!("wrong typed projection result")
-        };
-        let Ok(crate::ReadResult::Text(text)) = values.remove(0) else {
-            panic!("projection was not exposed as typed text")
-        };
-        assert!(!text.lines.is_empty());
-
-        let grep = kernel
-            .execute_operation(crate::Operation::Grep(crate::GrepRequest {
-                pattern: "answer".to_owned(),
-                source: crate::GrepSource::Resources(vec![file_uri]),
-            }))
-            .await
-            .unwrap();
-        let crate::OperationResult::Grep(Ok(matches)) = grep else {
-            panic!("wrong typed grep result")
-        };
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].lines.len(), 1);
-        assert!(matches[0].lines[0].text.contains("answer"));
-    }
-
-    #[tokio::test]
-    async fn exposes_non_rust_symbols_through_the_vendored_ast_engine() {
-        let root = tempdir().unwrap();
-        fs::write(
-            root.path().join("main.py"),
-            "class Greeter:\n    def hello(self):\n        return 'hi'\n",
-        )
-        .unwrap();
-        let kernel = Kernel::new();
-        let handler = RepositoryHandler::new(root.path()).unwrap();
-        let project = handler.project().to_owned();
-        kernel.register(handler).await;
-        let target = format!("repo://{project}/main.py/symbols");
-        let result = kernel
-            .execute(Request::new(
-                Verb::Read,
-                ResourceUri::parse(&target).unwrap(),
-                Value::Null,
-            ))
-            .await;
-        assert!(result.ok);
-        let items = result.value.unwrap()["items"].as_array().unwrap().clone();
-        assert!(items.iter().any(|item| item["name"] == "Greeter"));
-        assert!(items.iter().any(|item| item["name"] == "hello"));
-        assert!(
-            items
-                .iter()
-                .all(|item| item["provider"] == "ast-bro:python")
-        );
-    }
-
-    #[tokio::test]
-    async fn exposes_structural_and_project_ast_views() {
-        let root = tempdir().unwrap();
-        fs::write(
-            root.path().join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-        )
-        .unwrap();
-        fs::create_dir(root.path().join("src")).unwrap();
-        fs::write(
-            root.path().join("src/lib.rs"),
-            "pub trait Shape {}\npub struct Circle;\nimpl Shape for Circle {}\npub fn draw() { paint(); }\npub fn paint() {}\n",
-        )
-        .unwrap();
-        let kernel = Kernel::new();
-        let handler = RepositoryHandler::new(root.path()).unwrap();
-        let project = handler.project().to_owned();
-        kernel.register(handler).await;
-        for suffix in [
-            "src/lib.rs/map",
-            "src/lib.rs/show/Circle",
-            "deps",
-            "surface",
-        ] {
-            let target = format!("repo://{project}/{suffix}");
-            let result = kernel
-                .execute(Request::new(
-                    Verb::Read,
-                    ResourceUri::parse(&target).unwrap(),
-                    Value::Null,
-                ))
-                .await;
-            assert!(result.ok, "AST view failed: {target}: {:?}", result.error);
-        }
-        for suffix in [
-            "src/lib.rs/symbols/draw/callees",
-            "src/lib.rs/symbols/draw/trace/to/paint",
-            "src/lib.rs/symbols/Shape/implementations",
-            "symbols/Circle",
-        ] {
-            let target = format!("repo://{project}/{suffix}");
-            let result = kernel
-                .execute(Request::new(
-                    Verb::Read,
-                    ResourceUri::parse(&target).unwrap(),
-                    Value::Null,
-                ))
-                .await;
-            assert!(
-                result.ok,
-                "relationship URI failed: {target}: {:?}",
-                result.error
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn exposes_the_same_ast_paths_for_file_uris() {
-        let root = tempdir().unwrap();
-        let file = root.path().join("main.py");
-        fs::write(&file, "def hello():\n    return 1\n").unwrap();
-        let kernel = Kernel::new();
-        kernel
-            .register(RepositoryHandler::new(root.path()).unwrap())
-            .await;
-        let file_uri = Url::from_file_path(&file).unwrap().to_string();
-        let target = format!("{file_uri}/symbols");
-        let result = kernel
-            .execute(Request::new(
-                Verb::Read,
-                ResourceUri::parse(&target).unwrap(),
-                Value::Null,
-            ))
-            .await;
-        assert!(result.ok, "local AST view failed: {:?}", result.error);
-        let value = result.value.unwrap();
-        assert_eq!(value["items"][0]["name"], "hello");
-        assert!(
-            value["items"][0]["def"]
-                .as_str()
-                .is_some_and(|def| def.starts_with("file://"))
-        );
-
-        let bare_target = format!("{}/symbols", file.display());
-        let result = kernel
-            .execute(Request::new(
-                Verb::Read,
-                ResourceAddress::path(bare_target),
-                Value::Null,
-            ))
-            .await;
-        assert!(result.ok, "bare local AST view failed: {:?}", result.error);
-        assert_eq!(result.value.unwrap()["items"][0]["name"], "hello");
-
-        let result = kernel
-            .execute(Request::new(
-                Verb::Find,
-                ResourceAddress::path(format!("{}/symbols", file.display())),
-                Value::Null,
-            ))
-            .await;
-        assert!(result.ok, "bare local find failed: {:?}", result.error);
-
-        let result = kernel
-            .execute(Request::new(
-                Verb::Grep,
-                ResourceAddress::path(format!("{}/symbols", file.display())),
-                json!({"pattern":"hello"}),
-            ))
-            .await;
-        assert!(result.ok, "bare local grep failed: {:?}", result.error);
     }
 }

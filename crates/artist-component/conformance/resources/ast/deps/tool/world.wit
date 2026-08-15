@@ -1,0 +1,6 @@
+package artist:tool@1.0.0;
+
+interface read {
+    use artist:%resource/types@1.0.0.{read-request, read-result, error};
+    read: func(requests: list<read-request>) -> list<result<read-result, error>>;
+}

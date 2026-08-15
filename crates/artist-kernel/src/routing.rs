@@ -7,6 +7,60 @@ pub trait DynamicRouteExtractor: Send + Sync {
     fn extract(&self, input: &DynamicValue) -> Result<Vec<ResourceUri>, KernelError>;
 }
 
+/// Extract every typed resource URI from a dynamic value in structural order.
+///
+/// This is a useful package adapter for contracts whose routing fields are
+/// represented by the shared `uri` WIT alias. It deliberately does not inspect
+/// field names, request verbs, or JSON keys; custom packages can register a
+/// more selective `DynamicRouteExtractor` when their contract requires one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResourceUriValueExtractor;
+
+impl DynamicRouteExtractor for ResourceUriValueExtractor {
+    fn extract(&self, input: &DynamicValue) -> Result<Vec<ResourceUri>, KernelError> {
+        let mut routes = Vec::new();
+        collect_resource_uris(input, &mut routes);
+        Ok(routes)
+    }
+}
+
+fn collect_resource_uris(value: &DynamicValue, routes: &mut Vec<ResourceUri>) {
+    match value {
+        DynamicValue::ResourceUri(uri) => routes.push(uri.clone()),
+        DynamicValue::List(values) | DynamicValue::Tuple(values) => {
+            for value in values {
+                collect_resource_uris(value, routes);
+            }
+        }
+        DynamicValue::Record(fields) => {
+            for value in fields.values() {
+                collect_resource_uris(value, routes);
+            }
+        }
+        DynamicValue::Option(Some(value))
+        | DynamicValue::Result(Ok(value))
+        | DynamicValue::Result(Err(value)) => collect_resource_uris(value, routes),
+        DynamicValue::Variant(_, Some(value)) => collect_resource_uris(value, routes),
+        DynamicValue::Bool(_)
+        | DynamicValue::S8(_)
+        | DynamicValue::S16(_)
+        | DynamicValue::S32(_)
+        | DynamicValue::S64(_)
+        | DynamicValue::U8(_)
+        | DynamicValue::U16(_)
+        | DynamicValue::U32(_)
+        | DynamicValue::U64(_)
+        | DynamicValue::F32(_)
+        | DynamicValue::F64(_)
+        | DynamicValue::Char(_)
+        | DynamicValue::String(_)
+        | DynamicValue::Option(None)
+        | DynamicValue::Variant(_, None)
+        | DynamicValue::Enum(_)
+        | DynamicValue::Flags(_) => {}
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct RouteRegistry {
     extractors:
@@ -80,6 +134,7 @@ impl RouteRegistry {
 mod tests {
     use super::*;
     use crate::{DynamicValue, ResourceUri};
+    use std::collections::BTreeMap;
 
     struct UriExtractor;
     impl DynamicRouteExtractor for UriExtractor {
@@ -104,5 +159,23 @@ mod tests {
             .extract(&identity, &DynamicValue::String("file:///tmp/a".into()))
             .unwrap();
         assert_eq!(routes[0].to_string(), "file:///tmp/a");
+    }
+
+    #[test]
+    fn resource_uri_extractor_walks_nested_typed_values_without_field_names() {
+        let extractor = ResourceUriValueExtractor;
+        let first = ResourceUri::parse("file:///tmp/one").unwrap();
+        let second = ResourceUri::parse("session://local/two").unwrap();
+        let input = DynamicValue::Record(BTreeMap::from([
+            (
+                "targets".into(),
+                DynamicValue::List(vec![
+                    DynamicValue::ResourceUri(first.clone()),
+                    DynamicValue::Option(Some(Box::new(DynamicValue::ResourceUri(second.clone())))),
+                ]),
+            ),
+            ("label".into(), DynamicValue::String("ignored".into())),
+        ]));
+        assert_eq!(extractor.extract(&input).unwrap(), vec![first, second]);
     }
 }

@@ -58,7 +58,7 @@ pub enum Position {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ReadRequest {
+pub struct ReadInput {
     pub uri: ResourceUri,
     pub at: Option<Position>,
     pub before: Option<u32>,
@@ -66,7 +66,7 @@ pub struct ReadRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct WriteRequest {
+pub struct WriteInput {
     pub uri: ResourceUri,
     pub content: String,
 }
@@ -99,13 +99,13 @@ pub enum EditOperation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct EditRequest {
+pub struct EditInput {
     pub uri: ResourceUri,
     pub operations: Vec<EditOperation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct FindRequest {
+pub struct FindInput {
     pub roots: Vec<ResourceUri>,
     pub query: String,
 }
@@ -117,7 +117,7 @@ pub enum GrepSource {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct GrepRequest {
+pub struct GrepInput {
     pub pattern: String,
     pub source: GrepSource,
 }
@@ -321,13 +321,13 @@ impl InvocationScope {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct RunRequest {
+pub struct RunInput {
     pub uri: ResourceUri,
     pub args: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct SendRequest {
+pub struct SendInput {
     pub uri: ResourceUri,
     pub content: String,
 }
@@ -339,151 +339,9 @@ pub struct PollTarget {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PollRequest {
+pub struct PollInput {
     pub targets: Vec<PollTarget>,
     pub until: Option<PollCondition>,
-}
-
-/// A complete universal invocation. Each variant has its WIT operation shape;
-/// there is no universal target or untyped argument bag here.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub enum Operation {
-    Read(Vec<ReadRequest>),
-    Write(Vec<WriteRequest>),
-    Edit(Vec<EditRequest>),
-    Find(FindRequest),
-    Grep(GrepRequest),
-    Run(Vec<RunRequest>),
-    Send(Vec<SendRequest>),
-    Abort(Vec<ResourceUri>),
-    Delete(Vec<ResourceUri>),
-    Poll(PollRequest),
-}
-
-/// Apply the URI-layer fragment rules once at the kernel boundary. Providers
-/// and claims only see the base path plus query; textual anchors become the
-/// existing positional fields for the operations that have them.
-pub fn lower_operation_fragments(operation: Operation) -> Result<Operation, KernelError> {
-    fn anchor(uri: &ResourceUri) -> Anchor {
-        Anchor::from_tokens(
-            uri.fragment()
-                .unwrap_or_default()
-                .split('.')
-                .map(str::to_owned)
-                .collect(),
-        )
-    }
-    fn reject(uri: &ResourceUri) -> Result<(), KernelError> {
-        if uri.fragment().is_some() {
-            Err(KernelError::InvalidRequest {
-                message: format!("fragment is not valid for this operation: {uri}"),
-            })
-        } else {
-            Ok(())
-        }
-    }
-    Ok(match operation {
-        Operation::Read(requests) => Operation::Read(
-            requests
-                .into_iter()
-                .map(|mut request| {
-                    if request.uri.fragment().is_some() {
-                        if request.at.is_some() {
-                            return Err(KernelError::InvalidRequest {
-                                message: "read cannot combine a URI fragment with at".to_owned(),
-                            });
-                        }
-                        request.at = Some(Position::At(anchor(&request.uri)));
-                        request.uri = request.uri.without_fragment();
-                    }
-                    Ok(request)
-                })
-                .collect::<Result<_, _>>()?,
-        ),
-        Operation::Poll(mut request) => {
-            for target in &mut request.targets {
-                if target.uri.fragment().is_some() {
-                    if target.from_position.is_some() {
-                        return Err(KernelError::InvalidRequest {
-                            message: "poll cannot combine a URI fragment with from-position"
-                                .to_owned(),
-                        });
-                    }
-                    target.from_position = Some(Position::At(anchor(&target.uri)));
-                    target.uri = target.uri.without_fragment();
-                }
-            }
-            Operation::Poll(request)
-        }
-        Operation::Write(requests) => {
-            for request in &requests {
-                reject(&request.uri)?;
-            }
-            Operation::Write(requests)
-        }
-        Operation::Edit(requests) => {
-            for request in &requests {
-                reject(&request.uri)?;
-            }
-            Operation::Edit(requests)
-        }
-        Operation::Run(requests) => {
-            for request in &requests {
-                reject(&request.uri)?;
-            }
-            Operation::Run(requests)
-        }
-        Operation::Send(requests) => {
-            for request in &requests {
-                reject(&request.uri)?;
-            }
-            Operation::Send(requests)
-        }
-        Operation::Abort(uris) => {
-            for uri in &uris {
-                reject(uri)?;
-            }
-            Operation::Abort(uris)
-        }
-        Operation::Delete(uris) => {
-            for uri in &uris {
-                reject(uri)?;
-            }
-            Operation::Delete(uris)
-        }
-        Operation::Find(request) => {
-            for uri in &request.roots {
-                reject(uri)?;
-            }
-            Operation::Find(request)
-        }
-        Operation::Grep(request) => {
-            if let GrepSource::Resources(uris) = &request.source {
-                for uri in uris {
-                    reject(uri)?;
-                }
-            } else if let GrepSource::Text(text) = &request.source {
-                for value in text {
-                    reject(&value.uri)?;
-                }
-            }
-            Operation::Grep(request)
-        }
-    })
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub enum OperationResult {
-    Read(Vec<Result<ReadResult, KernelError>>),
-    Write(Vec<Result<WriteResult, KernelError>>),
-    Edit(Vec<Result<EditResult, KernelError>>),
-    Find(Result<Vec<ResourceUri>, KernelError>),
-    Grep(Result<Vec<AnchoredText>, KernelError>),
-    Run(Vec<Result<ResourceUri, KernelError>>),
-    Send(Vec<Result<ResourceUri, KernelError>>),
-    Abort(Vec<Result<ResourceUri, KernelError>>),
-    Delete(Vec<Result<ResourceUri, KernelError>>),
-    Poll(Result<PollResult, KernelError>),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
