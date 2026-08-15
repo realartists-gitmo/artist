@@ -10,6 +10,13 @@ fn error(message: impl ToString, uri: Option<String>) -> types::Error {
     }
 }
 
+fn observe<T>(response: Result<T, types::Error>) -> String {
+    match response {
+        Ok(_) => "ok".to_owned(),
+        Err(error) => format!("{:?}: {}", error.code, error.message),
+    }
+}
+
 fn invoke_json(verb: &str, uri: &str, input: serde_json::Value) -> Result<serde_json::Value, types::Error> {
     let output = artist::resource::host::invoke(verb, uri, &input.to_string());
     let value = serde_json::from_str::<serde_json::Value>(&output)
@@ -20,6 +27,16 @@ fn invoke_json(verb: &str, uri: &str, input: serde_json::Value) -> Result<serde_
     value.get("ok").cloned().ok_or_else(|| {
         error(format!("{verb} host output has neither ok nor err"), Some(uri.to_owned()))
     })
+}
+
+#[cfg(any(feature = "read", feature = "poll"))]
+fn position_json(position: Option<&types::Position>) -> serde_json::Value {
+    match position {
+        None => serde_json::Value::Null,
+        Some(types::Position::Top) => serde_json::json!("top"),
+        Some(types::Position::Bottom) => serde_json::json!("bottom"),
+        Some(types::Position::At(anchor)) => serde_json::json!(anchor),
+    }
 }
 
 #[cfg(feature = "read")]
@@ -49,9 +66,9 @@ impl exports::artist::tool::read::Guest for TypedTool {
                 let uri = request.uri.clone();
                 let input = serde_json::json!({
                     "uri": uri,
-                    "at": null,
-                    "before": null,
-                    "after": null,
+                    "at": position_json(request.at.as_ref()),
+                    "before": request.before,
+                    "after": request.after,
                 })
                 .to_string();
                 let output = artist::resource::host::invoke("read", &request.uri, &input);
@@ -61,7 +78,7 @@ impl exports::artist::tool::read::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::read::ReadResponse, types::Error>) -> String {
-        format!("{response:?}")
+        observe(response)
     }
 }
 
@@ -82,6 +99,12 @@ fn read_response(
     let success = value.get("ok").ok_or_else(|| {
         error("read host output has neither ok nor err".to_owned(), Some(fallback_uri.to_owned()))
     })?;
+    if success.get("lines").is_some() {
+        return Ok(exports::artist::tool::read::ReadResponse::Text(json_text(
+            success,
+            fallback_uri,
+        )?));
+    }
     if let Some(text_value) = success.get("text") {
         return Ok(exports::artist::tool::read::ReadResponse::Text(json_text(
             text_value,
@@ -116,7 +139,7 @@ fn read_response(
     ))
 }
 
-#[cfg(any(feature = "read", feature = "write"))]
+#[cfg(any(feature = "read", feature = "write", feature = "edit", feature = "insert", feature = "grep", feature = "poll"))]
 fn json_text(
     value: &serde_json::Value,
     fallback_uri: &str,
@@ -139,13 +162,57 @@ fn json_text(
                 _ => types::LineEnding::Lf,
             };
             Ok(types::AnchoredLine {
-                anchor: line.get("anchor").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                anchor: match line.get("anchor") {
+                    Some(serde_json::Value::String(anchor)) => anchor.clone(),
+                    Some(serde_json::Value::Array(tokens)) => format!(
+                        "#{}",
+                        tokens.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join(".")
+                    ),
+                    _ => String::new(),
+                },
                 text: line.get("text").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
                 ending,
             })
         })
         .collect::<Result<Vec<_>, types::Error>>()?;
     Ok(types::AnchoredText { uri, lines })
+}
+
+#[cfg(any(feature = "edit", feature = "insert"))]
+fn json_diff(value: &serde_json::Value, fallback_uri: &str) -> Result<types::AnchoredDiff, types::Error> {
+    let uri = value.get("uri").and_then(serde_json::Value::as_str).unwrap_or(fallback_uri).to_owned();
+    let hunks = value.get("hunks").and_then(serde_json::Value::as_array).ok_or_else(|| error("diff has no hunks", Some(uri.clone())))?
+        .iter().map(|hunk| {
+            let old = hunk.get("old").and_then(serde_json::Value::as_array).ok_or_else(|| error("diff hunk has no old lines", Some(uri.clone())))?
+                .iter().map(|line| json_line(line, &uri)).collect::<Result<Vec<_>, _>>()?;
+            let new = hunk.get("new").and_then(serde_json::Value::as_array).ok_or_else(|| error("diff hunk has no new lines", Some(uri.clone())))?
+                .iter().map(|line| json_line(line, &uri)).collect::<Result<Vec<_>, _>>()?;
+            Ok(types::DiffHunk { old, new })
+        }).collect::<Result<Vec<_>, types::Error>>()?;
+    Ok(types::AnchoredDiff { uri, hunks })
+}
+
+#[cfg(any(feature = "edit", feature = "insert", feature = "grep", feature = "poll"))]
+fn json_line(value: &serde_json::Value, fallback_uri: &str) -> Result<types::AnchoredLine, types::Error> {
+    let text = value.get("text").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+    let ending = match value.get("ending").and_then(serde_json::Value::as_str) {
+        Some("crlf") => types::LineEnding::Crlf,
+        Some("cr") => types::LineEnding::Cr,
+        Some("none") => types::LineEnding::None,
+        _ => types::LineEnding::Lf,
+    };
+    let anchor = match value.get("anchor") {
+        Some(serde_json::Value::String(anchor)) => anchor.clone(),
+        Some(serde_json::Value::Array(tokens)) => format!("#{}", tokens.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join(".")),
+        _ => return Err(error("line has no anchor", Some(fallback_uri.to_owned()))),
+    };
+    Ok(types::AnchoredLine { anchor, text, ending })
+}
+
+#[cfg(any(feature = "edit", feature = "insert"))]
+fn json_changed(value: &serde_json::Value, fallback_uri: &str) -> Result<Vec<types::AnchoredText>, types::Error> {
+    value.get("changed").and_then(serde_json::Value::as_array).ok_or_else(|| error("response has no changed text", Some(fallback_uri.to_owned())))?
+        .iter().map(|value| json_text(value, fallback_uri)).collect()
 }
 
 fn json_error(value: &serde_json::Value, fallback_uri: &str) -> types::Error {
@@ -162,6 +229,7 @@ fn json_error(value: &serde_json::Value, fallback_uri: &str) -> types::Error {
         Some("conflict") => types::ErrorCode::Conflict,
         Some("not-empty") => types::ErrorCode::NotEmpty,
         Some("aborted") => types::ErrorCode::Aborted,
+        Some("unsupported") => types::ErrorCode::Unsupported,
         _ => types::ErrorCode::Internal,
     };
     types::Error {
@@ -207,7 +275,7 @@ impl exports::artist::tool::write::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::write::WriteResponse, types::Error>) -> String {
-        format!("{response:?}")
+        observe(response)
     }
 }
 
@@ -220,7 +288,7 @@ impl exports::artist::tool::edit::Guest for TypedTool {
             .into_iter()
             .map(|request| {
                 let uri = request.uri.clone();
-                let _ = invoke_json("edit", &uri, serde_json::json!({
+                let output = invoke_json("edit", &uri, serde_json::json!({
                     "uri": uri,
                     "start": request.start,
                     "end": request.end,
@@ -228,15 +296,15 @@ impl exports::artist::tool::edit::Guest for TypedTool {
                 }))?;
                 Ok(exports::artist::tool::edit::EditResponse {
                     uri: uri.clone(),
-                    changed: Vec::new(),
-                    diff: types::AnchoredDiff { uri: uri.clone(), hunks: Vec::new() },
+                    changed: json_changed(&output, &uri)?,
+                    diff: json_diff(output.get("diff").ok_or_else(|| error("edit response has no diff", Some(uri.clone())))?, &uri)?,
                 })
             })
             .collect()
     }
 
     fn observe(response: Result<exports::artist::tool::edit::EditResponse, types::Error>) -> String {
-        format!("{response:?}")
+        observe(response)
     }
 }
 
@@ -249,22 +317,26 @@ impl exports::artist::tool::insert::Guest for TypedTool {
             .into_iter()
             .map(|request| {
                 let uri = request.uri.clone();
-                let _ = invoke_json("insert", &uri, serde_json::json!({
+                let output = invoke_json("insert", &uri, serde_json::json!({
                     "uri": uri,
-                    "at": null,
+                    "at": match request.at {
+                        exports::artist::tool::insert::InsertionPosition::Top => serde_json::json!({"top": null}),
+                        exports::artist::tool::insert::InsertionPosition::Bottom => serde_json::json!({"bottom": null}),
+                        exports::artist::tool::insert::InsertionPosition::At(anchor) => serde_json::json!({"at": anchor}),
+                    },
                     "content": request.content,
                 }))?;
                 Ok(exports::artist::tool::insert::InsertResponse {
                     uri: uri.clone(),
-                    changed: Vec::new(),
-                    diff: types::AnchoredDiff { uri: uri.clone(), hunks: Vec::new() },
+                    changed: json_changed(&output, &uri)?,
+                    diff: json_diff(output.get("diff").ok_or_else(|| error("insert response has no diff", Some(uri.clone())))?, &uri)?,
                 })
             })
             .collect()
     }
 
     fn observe(response: Result<exports::artist::tool::insert::InsertResponse, types::Error>) -> String {
-        format!("{response:?}")
+        observe(response)
     }
 }
 
@@ -282,14 +354,15 @@ impl exports::artist::tool::find::Guest for TypedTool {
                     "query": request.query,
                 }))?;
                 let uris = output.get("uris").and_then(serde_json::Value::as_array)
-                    .unwrap_or(&Vec::new()).iter().filter_map(|uri| uri.as_str().map(str::to_owned)).collect();
+                    .ok_or_else(|| error("find response has no uris", Some(root.clone())))?
+                    .iter().map(|uri| uri.as_str().map(str::to_owned).ok_or_else(|| error("find response has a non-uri", Some(root.clone())))).collect::<Result<Vec<_>, _>>()?;
                 Ok(exports::artist::tool::find::FindResponse { uris })
             })
             .collect()
     }
 
     fn observe(response: Result<exports::artist::tool::find::FindResponse, types::Error>) -> String {
-        format!("{response:?}")
+        observe(response)
     }
 }
 
@@ -302,19 +375,21 @@ impl exports::artist::tool::grep::Guest for TypedTool {
             .into_iter()
             .map(|request| {
                 let uri = request.uri.clone();
-                let _ = invoke_json("grep", &uri, serde_json::json!({
+                let output = invoke_json("grep", &uri, serde_json::json!({
                     "uri": uri,
                     "pattern": request.pattern,
                 }))?;
                 Ok(exports::artist::tool::grep::GrepResponse {
-                    matches: Vec::new(),
+                    matches: output.get("matches").and_then(serde_json::Value::as_array)
+                        .ok_or_else(|| error("grep response has no matches", Some(uri.clone())))?
+                        .iter().map(|value| json_text(value, &uri)).collect::<Result<Vec<_>, _>>()?,
                 })
             })
             .collect()
     }
 
     fn observe(response: Result<exports::artist::tool::grep::GrepResponse, types::Error>) -> String {
-        format!("{response:?}")
+        observe(response)
     }
 }
 
@@ -327,14 +402,15 @@ impl exports::artist::tool::run::Guest for TypedTool {
             .into_iter()
             .map(|request| {
                 let uri = request.uri.clone();
-                let _ = invoke_json("run", &uri, serde_json::json!({"uri": uri, "args": request.args}))?;
-                Ok(exports::artist::tool::run::RunResponse { uri })
+                let output = invoke_json("run", &uri, serde_json::json!({"uri": uri, "args": request.args}))?;
+                let execution_uri = output.get("uri").and_then(serde_json::Value::as_str).ok_or_else(|| error("run response has no execution uri", Some(uri.clone())))?;
+                Ok(exports::artist::tool::run::RunResponse { uri: execution_uri.to_owned() })
             })
             .collect()
     }
 
     fn observe(response: Result<exports::artist::tool::run::RunResponse, types::Error>) -> String {
-        format!("{response:?}")
+        observe(response)
     }
 }
 
@@ -347,23 +423,30 @@ impl exports::artist::tool::poll::Guest for TypedTool {
             .into_iter()
             .map(|request| {
                 let uri = request.uri.clone();
-                let _ = invoke_json("poll", &uri, serde_json::json!({
+                let output = invoke_json("poll", &uri, serde_json::json!({
                     "uri": uri,
-                    "from": null,
+                    "from": position_json(request.from.as_ref()),
                     "match": request.match,
                     "timeout-ms": request.timeout_ms,
                 }))?;
+                let reason = match output.get("reason").and_then(serde_json::Value::as_str) {
+                    Some("changed") => exports::artist::tool::poll::PollReason::Changed,
+                    Some("matched") => exports::artist::tool::poll::PollReason::Matched,
+                    Some("terminated") => exports::artist::tool::poll::PollReason::Terminated,
+                    Some("timeout") => exports::artist::tool::poll::PollReason::Timeout,
+                    _ => return Err(error("poll response has invalid reason", Some(uri.clone()))),
+                };
                 Ok(exports::artist::tool::poll::PollResponse {
                     uri: uri.clone(),
-                    text: text(uri, ""),
-                    reason: exports::artist::tool::poll::PollReason::Timeout,
+                    text: json_text(output.get("text").ok_or_else(|| error("poll response has no text", Some(uri.clone())))?, &uri)?,
+                    reason,
                 })
             })
             .collect()
     }
 
     fn observe(response: Result<exports::artist::tool::poll::PollResponse, types::Error>) -> String {
-        format!("{response:?}")
+        observe(response)
     }
 }
 
@@ -378,14 +461,15 @@ macro_rules! uri_verb {
                     .into_iter()
                     .map(|request| {
                         let uri = request.uri.clone();
-                        let _ = invoke_json(stringify!($module), &uri, serde_json::json!({"uri": uri}))?;
-                        Ok(exports::artist::tool::$module::UriResponse { uri })
+                        let output = invoke_json(stringify!($module), &uri, serde_json::json!({"uri": uri}))?;
+                        let returned_uri = output.get("uri").and_then(serde_json::Value::as_str).ok_or_else(|| error("uri response has no uri", Some(uri.clone())))?;
+                        Ok(exports::artist::tool::$module::UriResponse { uri: returned_uri.to_owned() })
                     })
                     .collect()
             }
 
             fn observe(response: Result<exports::artist::tool::$module::UriResponse, types::Error>) -> String {
-                format!("{response:?}")
+                observe(response)
             }
         }
     };

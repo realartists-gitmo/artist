@@ -587,6 +587,24 @@ impl DynamicClaimProvider for RepositoryResourceProvider {
 }
 
 impl DynamicResourceProvider for RepositoryResourceProvider {
+    fn verb_definitions(&self) -> Vec<crate::VerbDefinition> {
+        [
+            (&self.bindings.read, "read"),
+            (&self.bindings.find, "find"),
+            (&self.bindings.grep, "grep"),
+        ]
+        .into_iter()
+        .map(|(identity, function)| {
+            crate::VerbDefinition::new(
+                identity.clone(),
+                function,
+                function,
+                format!("Repository {function} provider"),
+            )
+        })
+        .collect()
+    }
+
     fn invoke<'a>(
         &'a self,
         verb: &'a VerbId,

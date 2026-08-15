@@ -492,9 +492,11 @@ where
                         .map_err(|error| error.to_string())
                     }
                     BatchedRunEvent::Text(text) => {
+                        attempt_observed_for_events.store(true, Ordering::Relaxed);
                         on_event(PromptEvent::TextDelta(text)).map_err(|error| error.to_string())
                     }
                     BatchedRunEvent::Reasoning(reasoning) => {
+                        attempt_observed_for_events.store(true, Ordering::Relaxed);
                         on_event(PromptEvent::ReasoningSummaryDelta(reasoning))
                             .map_err(|error| error.to_string())
                     }

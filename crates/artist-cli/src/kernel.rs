@@ -10,7 +10,7 @@ use artist_kernel::{
     DynamicValue, FileHandler, FileResourceProvider, FileVerbBindings, Kernel, ProcessManager,
     ProcessResourceProvider, ProcessVerbBindings, RepositoryHandler, RepositoryResourceProvider,
     RepositoryVerbBindings, ResourceAddress, ResourceUri, SessionHandler, SessionResourceProvider,
-    SessionVerbBindings, VerbDefinition, VerbId,
+    SessionVerbBindings, VerbId,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -22,19 +22,6 @@ use std::time::Duration;
 
 pub async fn build(root: &Path) -> Result<Kernel> {
     let kernel = Kernel::new();
-
-    // The invocation stream is a first-class resource namespace. Its
-    // channel verbs are activated once here; individual tool packages never
-    // need to know how invocation resources are stored or polled.
-    for function in ["read", "write", "poll", "abort", "delete"] {
-        let identity = native_verb("invocations", function);
-        kernel.activate_verb(VerbDefinition::new(
-            identity,
-            function,
-            "invocation-channel",
-            "Read or control one invocation channel",
-        ))?;
-    }
 
     // Native implementations publish their package-owned dynamic identities
     // at the kernel boundary.
@@ -81,7 +68,6 @@ pub async fn build(root: &Path) -> Result<Kernel> {
             definition.identity.clone(),
             Arc::new(artist_kernel::ResourceUriValueExtractor),
         )?;
-        kernel.activate_verb(definition)?;
     }
     kernel.register_dynamic_resource_provider(Arc::new(ProcessResourceProvider::new(
         ProcessManager::new(),
@@ -299,25 +285,10 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
             ("deps/resource/world.wit", dependency_wit),
         ] {
             let path = package.join(relative);
-            let refresh = if path.exists() {
-                match relative {
-                    "typed-guest/src/lib.rs" => std::fs::read_to_string(&path)
-                        .map(|contents| {
-                            contents.contains("artist-ast")
-                                || contents.contains("has no resource host")
-                        })
-                        .unwrap_or(false),
-                    "tool.wit" => std::fs::read_to_string(&path)
-                        .map(|contents| !contents.contains("artist:%resource/host"))
-                        .unwrap_or(false),
-                    "deps/resource/world.wit" => std::fs::read_to_string(&path)
-                        .map(|contents| !contents.contains("interface host"))
-                        .unwrap_or(false),
-                    _ => false,
-                }
-            } else {
-                true
-            };
+            // These packages are user-editable after first publication. Do
+            // not silently migrate them by inspecting content: a deliberate
+            // replacement may use a different host ABI or implementation.
+            let refresh = !path.exists();
             if refresh {
                 std::fs::write(path, bytes)?;
             }
@@ -650,7 +621,23 @@ mod tests {
         let ast_source = root.path().join("main.rs");
         std::fs::write(&ast_source, "fn caller() { main(); }\nfn main() {}\n").unwrap();
         let kernel = build(root.path()).await.unwrap();
-        assert_eq!(kernel.active_verbs().unwrap().len(), 20);
+        let active = kernel
+            .active_verbs()
+            .unwrap()
+            .into_iter()
+            .map(|verb| verb.definition.identity.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        for identity in [
+            "artist:filesystem/read@1.0.0",
+            "artist:session/read@1.0.0",
+            "artist:repository/read@1.0.0",
+            "artist:osproc/run@1.0.0",
+        ] {
+            assert!(
+                active.contains(identity),
+                "provider verb was not published: {identity}"
+            );
+        }
         let seeded = ToolsHandler::new(root.path().join("tools"), Vec::<String>::new())
             .unwrap()
             .registrations()

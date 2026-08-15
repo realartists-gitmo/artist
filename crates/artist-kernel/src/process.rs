@@ -442,6 +442,10 @@ impl DynamicClaimProvider for ProcessResourceProvider {
 }
 
 impl DynamicResourceProvider for ProcessResourceProvider {
+    fn verb_definitions(&self) -> Vec<VerbDefinition> {
+        self.bindings.definitions()
+    }
+
     fn invoke<'a>(
         &'a self,
         verb: &'a VerbId,

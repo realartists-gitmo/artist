@@ -3782,6 +3782,28 @@ pub mod tools {
     }
 
     impl DynamicResourceProvider for DynamicToolsProvider {
+        fn verb_definitions(&self) -> Vec<artist_kernel::VerbDefinition> {
+            [
+                (&self.bindings.read, "read"),
+                (&self.bindings.write, "write"),
+                (&self.bindings.edit, "edit"),
+                (&self.bindings.insert, "insert"),
+                (&self.bindings.delete, "delete"),
+                (&self.bindings.find, "find"),
+                (&self.bindings.grep, "grep"),
+            ]
+            .into_iter()
+            .map(|(identity, function)| {
+                artist_kernel::VerbDefinition::new(
+                    identity.clone(),
+                    function,
+                    function,
+                    format!("Tools {function} provider"),
+                )
+            })
+            .collect()
+        }
+
         fn invoke<'a>(
             &'a self,
             verb: &'a VerbId,
@@ -5004,6 +5026,50 @@ pub mod tools {
                                     DynamicValue::String(ref value) => value,
                                     _ => uri,
                                 })?)
+                            } else if matches!(name.as_str(), "before" | "after") {
+                                match value {
+                                    DynamicValue::S64(value) => {
+                                        DynamicValue::U32(u32::try_from(value).map_err(|_| {
+                                            KernelError::InvalidRequest {
+                                                message: format!("{name} is outside u32 range"),
+                                            }
+                                        })?)
+                                    }
+                                    DynamicValue::U64(value) => {
+                                        DynamicValue::U32(u32::try_from(value).map_err(|_| {
+                                            KernelError::InvalidRequest {
+                                                message: format!("{name} is outside u32 range"),
+                                            }
+                                        })?)
+                                    }
+                                    value => promote(value, uri)?,
+                                }
+                            } else if name == "at" {
+                                match value {
+                                    DynamicValue::Record(mut fields) if fields.len() == 1 => {
+                                        if let Some(value) = fields.remove("top") {
+                                            if matches!(value, DynamicValue::Option(None)) {
+                                                DynamicValue::Variant("top".to_owned(), None)
+                                            } else {
+                                                DynamicValue::Record(fields)
+                                            }
+                                        } else if let Some(value) = fields.remove("bottom") {
+                                            if matches!(value, DynamicValue::Option(None)) {
+                                                DynamicValue::Variant("bottom".to_owned(), None)
+                                            } else {
+                                                DynamicValue::Record(fields)
+                                            }
+                                        } else if let Some(value) = fields.remove("at") {
+                                            DynamicValue::Variant(
+                                                "at".to_owned(),
+                                                Some(Box::new(promote(value, uri)?)),
+                                            )
+                                        } else {
+                                            DynamicValue::Record(fields)
+                                        }
+                                    }
+                                    value => promote(value, uri)?,
+                                }
                             } else {
                                 promote(value, uri)?
                             };
@@ -5233,7 +5299,47 @@ pub mod tools {
     }
 
     pub(crate) fn dynamic_to_json_host(value: DynamicValue) -> Value {
-        dynamic_to_json(&value)
+        fn lower(value: DynamicValue, field: Option<&str>) -> Value {
+            if field == Some("anchor") {
+                if let DynamicValue::List(tokens) = value {
+                    let tokens = tokens
+                        .into_iter()
+                        .filter_map(|token| match token {
+                            DynamicValue::String(token) => Some(token),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    return Value::String(format!("#{}", tokens.join(".")));
+                }
+            }
+            match value {
+                DynamicValue::Record(fields) => Value::Object(
+                    fields
+                        .into_iter()
+                        .map(|(name, value)| (name.clone(), lower(value, Some(&name))))
+                        .collect(),
+                ),
+                DynamicValue::List(values) | DynamicValue::Tuple(values) => {
+                    Value::Array(values.into_iter().map(|value| lower(value, None)).collect())
+                }
+                DynamicValue::Option(None) => Value::Null,
+                DynamicValue::Option(Some(value)) => lower(*value, field),
+                DynamicValue::Result(Ok(value)) => lower(*value, field),
+                DynamicValue::Result(Err(value)) => lower(*value, field),
+                DynamicValue::Variant(name, value) => {
+                    let mut object = serde_json::Map::new();
+                    object.insert(
+                        name,
+                        value
+                            .map(|value| lower(*value, None))
+                            .unwrap_or(Value::Null),
+                    );
+                    Value::Object(object)
+                }
+                value => dynamic_to_json(&value),
+            }
+        }
+        lower(value, None)
     }
 
     pub(crate) fn kernel_error_to_json_host(error: KernelError, uri: &str) -> Value {
@@ -5290,16 +5396,6 @@ pub mod tools {
                     },
                 )))
                 .unwrap();
-            for function in ["read", "write", "edit", "insert", "delete", "find", "grep"] {
-                kernel
-                    .activate_verb(VerbDefinition::new(
-                        identity(function),
-                        function,
-                        "test filesystem provider",
-                        "test filesystem provider",
-                    ))
-                    .unwrap();
-            }
         }
 
         fn register_tools_provider(kernel: &Kernel, handler: ToolsHandler) {
@@ -7741,6 +7837,31 @@ pub mod resources {
     }
 
     impl DynamicResourceProvider for DynamicResourcesProvider {
+        fn verb_definitions(&self) -> Vec<artist_kernel::VerbDefinition> {
+            [
+                (&self.bindings.read, "read"),
+                (&self.bindings.write, "write"),
+                (&self.bindings.edit, "edit"),
+                (&self.bindings.insert, "insert"),
+                (&self.bindings.poll, "poll"),
+                (&self.bindings.run, "run"),
+                (&self.bindings.abort, "abort"),
+                (&self.bindings.delete, "delete"),
+                (&self.bindings.find, "find"),
+                (&self.bindings.grep, "grep"),
+            ]
+            .into_iter()
+            .map(|(identity, function)| {
+                artist_kernel::VerbDefinition::new(
+                    identity.clone(),
+                    function,
+                    function,
+                    format!("Resources {function} provider"),
+                )
+            })
+            .collect()
+        }
+
         fn invoke<'a>(
             &'a self,
             verb: &'a VerbId,
@@ -8101,16 +8222,6 @@ mod tests {
                 ),
             ))
             .unwrap();
-        for function in ["read", "write", "edit", "insert", "delete", "find", "grep"] {
-            kernel
-                .activate_verb(artist_kernel::VerbDefinition::new(
-                    identity(function),
-                    function,
-                    "test filesystem provider",
-                    "test filesystem provider",
-                ))
-                .unwrap();
-        }
     }
 
     fn register_resource_provider(

@@ -207,6 +207,26 @@ impl DynamicClaimProvider for SessionResourceProvider {
 }
 
 impl DynamicResourceProvider for SessionResourceProvider {
+    fn verb_definitions(&self) -> Vec<crate::VerbDefinition> {
+        [
+            (&self.bindings.read, "read"),
+            (&self.bindings.write, "write"),
+            (&self.bindings.poll, "poll"),
+            (&self.bindings.abort, "abort"),
+            (&self.bindings.delete, "delete"),
+        ]
+        .into_iter()
+        .map(|(identity, function)| {
+            crate::VerbDefinition::new(
+                identity.clone(),
+                function,
+                function,
+                format!("Session {function} provider"),
+            )
+        })
+        .collect()
+    }
+
     fn invoke<'a>(
         &'a self,
         verb: &'a VerbId,

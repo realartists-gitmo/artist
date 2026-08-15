@@ -113,15 +113,7 @@ async fn filesystem_provider_executes_delete_through_dynamic_resource_routing() 
     fs::write(&path, "temporary\n").unwrap();
 
     let identity = VerbId::new("artist:filesystem/delete@1.0.0").unwrap();
-    let input_type =
-        DynamicType::Record(BTreeMap::from([("uri".into(), DynamicType::ResourceUri)]));
     let kernel = Kernel::new();
-    kernel
-        .activate_verb(
-            VerbDefinition::new(identity.clone(), "delete", "delete", "delete")
-                .with_contract(input_type, DynamicType::ResourceUri),
-        )
-        .unwrap();
     kernel
         .route_registry()
         .register(identity.clone(), Arc::new(RecordUriRoute))

@@ -89,8 +89,12 @@ impl Kernel {
         &self,
         provider: Arc<dyn crate::DynamicResourceProvider>,
     ) -> Result<(), KernelError> {
+        let definitions = provider.verb_definitions();
         self.inner.resources.register(provider.clone())?;
         self.inner.claims.register(provider)?;
+        if !definitions.is_empty() {
+            self.inner.verbs.activate_packages(definitions)?;
+        }
         Ok(())
     }
 

@@ -417,6 +417,22 @@ impl DynamicClaimProvider for InvocationResourceProvider {
 }
 
 impl DynamicResourceProvider for InvocationResourceProvider {
+    fn verb_definitions(&self) -> Vec<crate::VerbDefinition> {
+        ["read", "find", "write", "poll", "abort", "delete"]
+            .into_iter()
+            .map(|function| {
+                let identity = VerbId::new(format!("artist:invocations/{function}@1.0.0"))
+                    .expect("canonical invocation verb identity");
+                crate::VerbDefinition::new(
+                    identity,
+                    function,
+                    function,
+                    format!("Invocation {function} channel operation"),
+                )
+            })
+            .collect()
+    }
+
     fn invoke<'a>(
         &'a self,
         verb: &'a VerbId,
@@ -449,17 +465,39 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                 "read" => Self::output(&self.store.get(uri)?, channel),
                 "poll" => {
                     let started = std::time::Instant::now();
+                    let pattern = match &input {
+                        DynamicValue::Record(fields) => match fields.get("match") {
+                            Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+                                DynamicValue::String(value) => Some(value.clone()),
+                                _ => None,
+                            },
+                            Some(DynamicValue::String(value)) => Some(value.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
                     loop {
                         let invocation = self.store.get(uri)?;
-                        if !matches!(invocation.status, InvocationStatus::Running) {
-                            break Self::output(&invocation, channel);
+                        let snapshot = Self::output(&invocation, channel);
+                        let matched = pattern
+                            .as_ref()
+                            .is_none_or(|pattern| format!("{snapshot:?}").contains(pattern));
+                        if !matches!(invocation.status, InvocationStatus::Running) && matched {
+                            break snapshot;
                         }
                         let timeout = Self::poll_timeout(&input)
                             .map(|timeout| timeout.saturating_sub(started.elapsed()));
                         if timeout.is_some_and(|timeout| timeout.is_zero())
                             || !self.store.wait_for_invocation_change(uri, timeout).await
                         {
-                            break Self::output(&invocation, channel);
+                            break snapshot;
+                        }
+                        // A channel update is itself a meaningful stream
+                        // event, even while the logical invocation remains
+                        // running. Do not turn the channel poll into a
+                        // status-only wait.
+                        if matched && channel != "status" {
+                            break snapshot;
                         }
                     }
                 }

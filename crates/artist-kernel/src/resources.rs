@@ -1,7 +1,7 @@
 //! Open-ended typed resource-provider registry.
 use crate::{
     ClaimDecision, DynamicClaimProvider, DynamicValue, DynamicVerbResult, KernelError, ResourceUri,
-    VerbId,
+    VerbDefinition, VerbId,
 };
 use futures::future::join_all;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
@@ -25,6 +25,13 @@ pub struct MixedResourceRequest {
 }
 
 pub trait DynamicResourceProvider: DynamicClaimProvider + Send + Sync {
+    /// Concrete verb identities published together with this provider. The
+    /// kernel uses these definitions when resolving open universal calls;
+    /// claims and executable identities therefore cannot drift apart.
+    fn verb_definitions(&self) -> Vec<VerbDefinition> {
+        Vec::new()
+    }
+
     fn invoke<'a>(
         &'a self,
         verb: &'a VerbId,

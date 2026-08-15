@@ -822,6 +822,28 @@ impl DynamicClaimProvider for FileResourceProvider {
 }
 
 impl DynamicResourceProvider for FileResourceProvider {
+    fn verb_definitions(&self) -> Vec<crate::VerbDefinition> {
+        [
+            (&self.bindings.read, "read"),
+            (&self.bindings.write, "write"),
+            (&self.bindings.edit, "edit"),
+            (&self.bindings.insert, "insert"),
+            (&self.bindings.delete, "delete"),
+            (&self.bindings.find, "find"),
+            (&self.bindings.grep, "grep"),
+        ]
+        .into_iter()
+        .map(|(identity, function)| {
+            crate::VerbDefinition::new(
+                identity.clone(),
+                function,
+                function,
+                format!("Native filesystem {function} provider"),
+            )
+        })
+        .collect()
+    }
+
     fn invoke_mixed_batch<'a>(
         &'a self,
         requests: Vec<MixedResourceRequest>,
