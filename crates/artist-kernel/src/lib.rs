@@ -11,6 +11,7 @@ mod dynamic;
 mod error;
 mod filesystem;
 mod handler;
+mod invocation;
 mod operation;
 mod process;
 mod registry;
@@ -33,14 +34,18 @@ pub use error::KernelError;
 pub use filesystem::{FileHandler, FileResourceProvider, FileVerbBindings};
 pub use handler::{
     BoxFuture, ClaimDecision, KernelHandle, ResourceCatalogDoc, ResourceCatalogEntry,
-    ResourceCatalogProvider, ToolDefinition, ToolProvider,
+    ResourceCatalogProvider, ToolDefinition, ToolModelResult, ToolProvider,
 };
+pub use invocation::{Invocation, InvocationResourceProvider, InvocationStatus, InvocationStore};
 pub use operation::VerbId;
 pub use process::{ProcessManager, ProcessResourceProvider, ProcessSnapshot, ProcessVerbBindings};
 pub use registry::Kernel;
 pub use repository::{RepositoryHandler, RepositoryResourceProvider, RepositoryVerbBindings};
 pub use resolver::{is_file_uri, normalize};
-pub use resources::{DynamicResourceProvider, ResourceFuture, ResourceRegistry};
+pub use resources::{
+    DynamicResourceProvider, MixedResourceRequest, ResourceBatchFuture, ResourceFuture,
+    ResourceRegistry, ResourceRequest,
+};
 pub use routing::{DynamicRouteExtractor, ResourceUriValueExtractor, RouteRegistry};
 pub use search::{Pattern, SearchService};
 pub use session::{SessionHandler, SessionResourceProvider, SessionVerbBindings};

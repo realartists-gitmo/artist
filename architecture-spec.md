@@ -99,10 +99,10 @@ behavior.
 
 ## 4. Universal verbs
 
-The model-facing verb set is exactly:
+The shipped model-facing verb set is:
 
 ```text
-read write edit send poll abort delete find grep
+read write edit insert find grep run poll abort delete
 ```
 
 The same grammar applies to every resource. All verbs are batching-native.
@@ -129,20 +129,10 @@ Windows are relative to the locator, such as `(-50,50)`, `(-N,0)`,
 
 ### `poll()`
 
-`poll()` is the blocking counterpart to `read()`. It is bottom-oriented and
-returns the newly available state together with the condition that ended the
-wait.
-
-The initial termination conditions are:
-
-```text
-idle
-match:<regular-expression>
-timeout:<milliseconds>
-lines:<count>
-```
-
-Polling is multi-target and supports `any` and `all` completion modes.
+`poll()` is the blocking counterpart to `read()`. It addresses exactly one
+resource and returns newly observed anchored text together with one reason:
+`changed`, `matched`, `terminated`, or `timeout`. Multiple resources are
+represented by sibling model calls and one native batch.
 
 ### `write()`
 
@@ -165,10 +155,14 @@ information, resolves every edit against one current snapshot, rejects stale,
 colliding, reversed, or overlapping ranges before mutation, and commits the
 rendered file with an atomic same-directory replacement.
 
-### `send()`
+### `insert()`
 
-`send()` supplies interactive input to a live resource: an agent inbox, shell,
-REPL, canvas, or similar session.
+`insert()` performs one anchored insertion. `top` and `bottom` address the
+document boundaries; `at(anchor)` inserts immediately before that anchored
+line. Multiple sibling inserts are one same-resource transaction.
+
+Writable live child nouns use `write()`: process stdin and ctl, and session
+inboxes. There is no separate input verb.
 
 ### `abort()`
 
@@ -278,7 +272,7 @@ resources with live state and readable output.
 
 The minimum shared behavior is:
 
-- `send()` supplies input;
+- `write()` supplies input through an addressable input noun;
 - `read()` returns current state/output;
 - `poll()` waits for state/output;
 - `abort()` stops execution and preserves the record;
@@ -374,7 +368,7 @@ be reintroduced as a parallel bespoke tool surface.
    inclusive anchor ranges and simultaneous edits, rejects invalid edit sets
    before writing, and commits through a temporary-file replacement.
 5. [x] Implement one minimal live-session handler. `session://` resources
-   support creation through `write`, append-only input through `send`,
+   support creation through `write`, append-only input through `/inbox`,
    immediate event snapshots through `read`, blocking `poll` with line,
    match, timeout, and terminal conditions, plus `abort` and `delete`.
    Sessions are synchronized in memory and intentionally do not spawn agents,

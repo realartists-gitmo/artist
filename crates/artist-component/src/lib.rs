@@ -20,54 +20,16 @@ pub mod resource_async_extension_bindings {
     });
 }
 
-/// Stable identities for the universal typed tool contracts.
+/// Open contract identities. Package discovery, not this host module, defines
+/// which tool interfaces are installed.
 pub mod contracts {
     use serde::{Deserialize, Serialize};
     use std::{fmt, str::FromStr};
 
-    /// An adapter-local contract label.  This is deliberately open-ended:
-    /// installed verb packages may use any interface name and do not require
-    /// a source edit in this crate.
-    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
-    pub struct ContractVerb(&'static str);
-
-    impl ContractVerb {
-        pub const Read: Self = Self("read");
-        pub const Write: Self = Self("write");
-        pub const Edit: Self = Self("edit");
-        pub const Poll: Self = Self("poll");
-        pub const Send: Self = Self("send");
-        pub const Run: Self = Self("run");
-        pub const Abort: Self = Self("abort");
-        pub const Delete: Self = Self("delete");
-        pub const Find: Self = Self("find");
-        pub const Grep: Self = Self("grep");
-
-        pub const fn from_interface(interface: &'static str) -> Self {
-            Self(interface)
-        }
-
-        pub const fn interface(self) -> &'static str {
-            self.0
-        }
-    }
-
-    impl fmt::Display for ContractVerb {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str(self.interface())
-        }
-    }
-
-    pub type Verb = ContractVerb;
-
     #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
     pub struct ContractId {
         pub namespace: String,
-        /// Universal verbs have a typed adapter; extension contracts may use
-        /// any interface name and are retained for dynamic registration.
         pub interface: String,
-        #[serde(skip)]
-        pub verb: Option<Verb>,
         pub major: u16,
     }
 
@@ -75,11 +37,10 @@ pub mod contracts {
         pub const NAMESPACE: &'static str = "artist:tool";
         pub const MAJOR: u16 = 1;
 
-        pub fn universal(verb: Verb) -> Self {
+        pub fn universal(interface: impl Into<String>) -> Self {
             Self {
                 namespace: Self::NAMESPACE.to_owned(),
-                interface: verb.interface().to_owned(),
-                verb: Some(verb),
+                interface: interface.into(),
                 major: Self::MAJOR,
             }
         }
@@ -108,24 +69,9 @@ pub mod contracts {
             let (namespace, verb) = name
                 .rsplit_once(':')
                 .ok_or_else(|| "contract ID must be namespace:verb@major".to_owned())?;
-            let universal = [
-                Verb::Read,
-                Verb::Write,
-                Verb::Edit,
-                Verb::Poll,
-                Verb::Send,
-                Verb::Run,
-                Verb::Abort,
-                Verb::Delete,
-                Verb::Find,
-                Verb::Grep,
-            ]
-            .into_iter()
-            .find(|candidate| candidate.interface() == verb);
             Ok(Self {
                 namespace: namespace.to_owned(),
                 interface: verb.to_owned(),
-                verb: universal,
                 major,
             })
         }
@@ -174,80 +120,14 @@ pub mod contracts {
     }
 
     impl ContractDescriptor {
-        pub fn universal(verb: Verb) -> Self {
+        pub fn universal(interface: impl Into<String>) -> Self {
+            let interface = interface.into();
             Self {
-                id: ContractId::universal(verb),
-                interface: verb.interface().to_owned(),
+                id: ContractId::universal(interface.clone()),
+                interface,
                 imports: Vec::new(),
             }
         }
-    }
-
-    pub fn universal_contracts() -> Vec<ContractDescriptor> {
-        [
-            "read", "write", "edit", "poll", "send", "run", "abort", "delete", "find", "grep",
-        ]
-        .into_iter()
-        .map(|interface| ContractDescriptor::universal(Verb::from_interface(interface)))
-        .collect()
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub enum PollAtom {
-        Changed { target: usize },
-        Regex { target: usize, pattern: String },
-        Terminated { target: usize },
-        Timeout { milliseconds: u64 },
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub enum PollCondition {
-        Atom(PollAtom),
-        All(Vec<PollCondition>),
-        Any(Vec<PollCondition>),
-    }
-
-    pub fn validate_poll_condition(
-        condition: &PollCondition,
-        target_count: usize,
-        termination_supported: &[bool],
-    ) -> Result<(), String> {
-        if termination_supported.len() != target_count {
-            return Err("termination capability table does not match targets".to_owned());
-        }
-        fn walk(
-            condition: &PollCondition,
-            target_count: usize,
-            termination_supported: &[bool],
-        ) -> Result<(), String> {
-            match condition {
-                PollCondition::Atom(PollAtom::Changed { target })
-                | PollCondition::Atom(PollAtom::Regex { target, .. }) => {
-                    if *target >= target_count {
-                        return Err(format!("poll target {target} is out of range"));
-                    }
-                }
-                PollCondition::Atom(PollAtom::Terminated { target }) => {
-                    if *target >= target_count {
-                        return Err(format!("poll target {target} is out of range"));
-                    }
-                    if !termination_supported[*target] {
-                        return Err(format!("poll target {target} does not support termination"));
-                    }
-                }
-                PollCondition::Atom(PollAtom::Timeout { .. }) => {}
-                PollCondition::All(children) | PollCondition::Any(children) => {
-                    if children.is_empty() {
-                        return Err("poll boolean conditions cannot be empty".to_owned());
-                    }
-                    for child in children {
-                        walk(child, target_count, termination_supported)?;
-                    }
-                }
-            }
-            Ok(())
-        }
-        walk(condition, target_count, termination_supported)
     }
 }
 
@@ -304,12 +184,46 @@ pub fn dynamic_value_to_component_val(
                 .map(dynamic_value_to_component_val)
                 .collect::<Result<_, _>>()?,
         ),
-        DynamicValue::Record(values) => Val::Record(
-            values
-                .iter()
-                .map(|(name, value)| Ok((name.clone(), dynamic_value_to_component_val(value)?)))
-                .collect::<Result<_, String>>()?,
-        ),
+        DynamicValue::Record(values) => {
+            let preferred = [
+                "uri",
+                "lines",
+                "anchor",
+                "text",
+                "ending",
+                "entries",
+                "at",
+                "before",
+                "after",
+                "code",
+                "message",
+                "reason",
+                "content",
+                "changed",
+                "diff",
+                "old",
+                "new",
+                "hunks",
+                "query",
+                "pattern",
+                "args",
+                "cwd",
+                "environment",
+            ];
+            let mut fields = values.iter().collect::<Vec<_>>();
+            fields.sort_by_key(|(name, _)| {
+                preferred
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .unwrap_or(preferred.len())
+            });
+            Val::Record(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| Ok((name.clone(), dynamic_value_to_component_val(value)?)))
+                    .collect::<Result<_, String>>()?,
+            )
+        }
         DynamicValue::Option(value) => Val::Option(
             value
                 .as_deref()
@@ -1536,8 +1450,7 @@ impl TypedComponentHost {
             .instantiate(&mut store, &self.component)
             .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
         let func = instance
-            .get_func(&mut store, "invoke")
-            .or_else(|| instance.get_func(&mut store, export_name))
+            .get_func(&mut store, export_name)
             .or_else(|| {
                 let interface = format!("artist:tool/{export_name}@1.0.0");
                 let interface_index = instance
@@ -1553,6 +1466,7 @@ impl TypedComponentHost {
                     instance.get_export_index(&mut store, Some(&interface_index), export_name)?;
                 instance.get_func(&mut store, &function_index)
             })
+            .or_else(|| instance.get_func(&mut store, "invoke"))
             .ok_or_else(|| {
                 ComponentError::Invoke(anyhow::anyhow!(format!(
                     "dynamic tool exports neither invoke nor {export_name}"
@@ -1615,8 +1529,7 @@ impl TypedComponentHost {
             .await
             .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
         let func = instance
-            .get_func(&mut store, "invoke")
-            .or_else(|| instance.get_func(&mut store, export_name))
+            .get_func(&mut store, export_name)
             .or_else(|| {
                 let interface = format!("artist:tool/{export_name}@1.0.0");
                 let interface_index = instance
@@ -1632,6 +1545,7 @@ impl TypedComponentHost {
                     instance.get_export_index(&mut store, Some(&interface_index), export_name)?;
                 instance.get_func(&mut store, &function_index)
             })
+            .or_else(|| instance.get_func(&mut store, "invoke"))
             .ok_or_else(|| {
                 ComponentError::Invoke(anyhow::anyhow!(format!(
                     "dynamic tool exports neither invoke nor {export_name}"
@@ -1679,11 +1593,15 @@ impl TypedComponentHost {
             .exports(&self.engine)
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
+        let short_export_name = export_name.rsplit(':').next().unwrap_or(export_name);
         if !exports.iter().any(|name| {
             *name == "invoke"
                 || *name == export_name
+                || *name == short_export_name
                 || name.ends_with(&format!("/{export_name}"))
                 || name.contains(&format!("/{export_name}@"))
+                || name.ends_with(&format!("/{short_export_name}"))
+                || name.contains(&format!("/{short_export_name}@"))
         }) {
             return Err(ComponentError::Build {
                 diagnostics: format!(
@@ -1700,11 +1618,15 @@ impl TypedComponentHost {
             .exports(&self.engine)
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
+        let short_export_name = export_name.rsplit(':').next().unwrap_or(export_name);
         if !exports.iter().any(|name| {
             *name == "invoke"
                 || *name == export_name
+                || *name == short_export_name
                 || name.ends_with(&format!("/{export_name}"))
                 || name.contains(&format!("/{export_name}@"))
+                || name.ends_with(&format!("/{short_export_name}"))
+                || name.contains(&format!("/{short_export_name}@"))
         }) {
             return Err(ComponentError::Build {
                 diagnostics: format!(
@@ -2102,14 +2024,19 @@ fn json_to_component_val(
                 record
                     .fields()
                     .map(|field| {
-                        object
+                        let value = object
                             .get(field.name)
                             .or_else(|| object.get(&field.name.replace('-', "_")))
-                            .ok_or_else(|| format!("missing record field {}", field.name))
-                            .and_then(|value| {
-                                json_to_component_val(value, &field.ty)
-                                    .map(|value| (field.name.to_owned(), value))
-                            })
+                            .cloned()
+                            .or_else(|| {
+                                matches!(&field.ty, Type::Option(_))
+                                    .then_some(serde_json::Value::Null)
+                            });
+                        let value = value
+                            .as_ref()
+                            .ok_or_else(|| format!("missing record field {}", field.name))?;
+                        json_to_component_val(value, &field.ty)
+                            .map(|value| (field.name.to_owned(), value))
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .map(Val::Record)
@@ -3029,10 +2956,11 @@ pub mod runtime {
 
         pub fn invoke_tool_json(
             &self,
-            verb: super::contracts::Verb,
+            verb: impl Into<String>,
             input: &str,
             kernel: artist_kernel::KernelHandle,
         ) -> Result<String, ComponentError> {
+            let verb = verb.into();
             self.invoke_tool_json_with_context(
                 verb,
                 input,
@@ -3043,11 +2971,12 @@ pub mod runtime {
 
         pub fn invoke_tool_json_with_context(
             &self,
-            verb: super::contracts::Verb,
+            verb: impl Into<String>,
             input: &str,
             kernel: artist_kernel::KernelHandle,
             context: artist_kernel::InvocationContext,
         ) -> Result<String, ComponentError> {
+            let verb = verb.into();
             let mut value: serde_json::Value = serde_json::from_str(input)
                 .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
             if let Some(object) = value.as_object_mut() {
@@ -3057,44 +2986,29 @@ pub mod runtime {
                     }
                 }
             }
-            if matches!(
-                verb,
-                super::contracts::Verb::Read
-                    | super::contracts::Verb::Write
-                    | super::contracts::Verb::Edit
-                    | super::contracts::Verb::Run
-                    | super::contracts::Verb::Send
-            ) && value
-                .as_object()
-                .is_some_and(|object| !object.contains_key("requests"))
-            {
-                let request = if matches!(verb, super::contracts::Verb::Read) {
-                    let mut object = value.as_object().cloned().unwrap_or_default();
-                    object.entry("at").or_insert(serde_json::Value::Null);
-                    object.entry("before").or_insert(serde_json::Value::Null);
-                    object.entry("after").or_insert(serde_json::Value::Null);
+            value = match value {
+                serde_json::Value::Object(object) if object.contains_key("requests") => {
                     serde_json::Value::Object(object)
-                } else {
-                    value
-                };
-                value = serde_json::json!({ "requests": [request] });
-            }
-            serde_json::to_string(&self.dynamic_host.invoke_dynamic_json_with_context(
-                &value,
-                verb.interface(),
-                kernel,
-                context,
-            )?)
+                }
+                serde_json::Value::Array(requests) => serde_json::json!({ "requests": requests }),
+                value => serde_json::json!({ "requests": [value] }),
+            };
+            serde_json::to_string(
+                &self
+                    .dynamic_host
+                    .invoke_dynamic_json_with_context(&value, &verb, kernel, context)?,
+            )
             .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))
         }
 
         pub async fn invoke_tool_json_async_with_context(
             &self,
-            verb: super::contracts::Verb,
+            verb: impl Into<String>,
             input: &str,
             kernel: artist_kernel::KernelHandle,
             context: artist_kernel::InvocationContext,
         ) -> Result<String, ComponentError> {
+            let verb = verb.into();
             let mut value: serde_json::Value = serde_json::from_str(input)
                 .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
             if let Some(object) = value.as_object_mut() {
@@ -3104,34 +3018,19 @@ pub mod runtime {
                     }
                 }
             }
-            if matches!(
-                verb,
-                super::contracts::Verb::Read
-                    | super::contracts::Verb::Write
-                    | super::contracts::Verb::Edit
-                    | super::contracts::Verb::Run
-                    | super::contracts::Verb::Send
-            ) && value
-                .as_object()
-                .is_some_and(|object| !object.contains_key("requests"))
-            {
-                let request = if matches!(verb, super::contracts::Verb::Read) {
-                    let mut object = value.as_object().cloned().unwrap_or_default();
-                    object.entry("at").or_insert(serde_json::Value::Null);
-                    object.entry("before").or_insert(serde_json::Value::Null);
-                    object.entry("after").or_insert(serde_json::Value::Null);
+            value = match value {
+                serde_json::Value::Object(object) if object.contains_key("requests") => {
                     serde_json::Value::Object(object)
-                } else {
-                    value
-                };
-                value = serde_json::json!({ "requests": [request] });
-            }
+                }
+                serde_json::Value::Array(requests) => serde_json::json!({ "requests": requests }),
+                value => serde_json::json!({ "requests": [value] }),
+            };
             let output = self
                 .dynamic_host
                 .invoke_dynamic_json_async_with_scope(
                     &value,
-                    verb.interface(),
-                    kernel,
+                    &verb,
+                    kernel.clone(),
                     artist_kernel::InvocationScope::new(context),
                 )
                 .await?;
@@ -3141,11 +3040,12 @@ pub mod runtime {
 
         pub async fn invoke_tool_json_async_with_scope(
             &self,
-            verb: super::contracts::Verb,
+            verb: impl Into<String>,
             input: &str,
             kernel: artist_kernel::KernelHandle,
             scope: artist_kernel::InvocationScope,
         ) -> Result<String, ComponentError> {
+            let verb = verb.into();
             let mut value: serde_json::Value = serde_json::from_str(input)
                 .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
             if let Some(object) = value.as_object_mut() {
@@ -3155,31 +3055,16 @@ pub mod runtime {
                     }
                 }
             }
-            if matches!(
-                verb,
-                super::contracts::Verb::Read
-                    | super::contracts::Verb::Write
-                    | super::contracts::Verb::Edit
-                    | super::contracts::Verb::Run
-                    | super::contracts::Verb::Send
-            ) && value
-                .as_object()
-                .is_some_and(|object| !object.contains_key("requests"))
-            {
-                let request = if matches!(verb, super::contracts::Verb::Read) {
-                    let mut object = value.as_object().cloned().unwrap_or_default();
-                    object.entry("at").or_insert(serde_json::Value::Null);
-                    object.entry("before").or_insert(serde_json::Value::Null);
-                    object.entry("after").or_insert(serde_json::Value::Null);
+            value = match value {
+                serde_json::Value::Object(object) if object.contains_key("requests") => {
                     serde_json::Value::Object(object)
-                } else {
-                    value
-                };
-                value = serde_json::json!({ "requests": [request] });
-            }
+                }
+                serde_json::Value::Array(requests) => serde_json::json!({ "requests": requests }),
+                value => serde_json::json!({ "requests": [value] }),
+            };
             let output = self
                 .dynamic_host
-                .invoke_dynamic_json_async_with_scope(&value, verb.interface(), kernel, scope)
+                .invoke_dynamic_json_async_with_scope(&value, &verb, kernel, scope)
                 .await?;
             serde_json::to_string(&output)
                 .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))
@@ -3220,6 +3105,23 @@ pub mod runtime {
             self.dynamic_host
                 .invoke_dynamic_json_async_with_scope(input, export_name, kernel, scope)
                 .await
+        }
+
+        pub async fn observe_json_async_with_scope(
+            &self,
+            response: &serde_json::Value,
+            kernel: artist_kernel::KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<String, ComponentError> {
+            let value = self
+                .dynamic_host
+                .invoke_dynamic_json_async_with_scope(response, "observe", kernel, scope)
+                .await?;
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                ComponentError::Invoke(anyhow::anyhow!(
+                    "component observer returned a non-string value"
+                ))
+            })
         }
     }
 
@@ -3455,7 +3357,7 @@ pub mod contract_registry {
 /// It is deliberately not a kernel Handler: installing it as a universal
 /// fallback would recurse when the component uses its kernel capability.
 pub mod tool_adapter {
-    use super::{ComponentError, contracts::Verb, runtime::ActiveVersion};
+    use super::{ComponentError, runtime::ActiveVersion};
     use artist_kernel::{KernelError, KernelHandle};
     use serde_json::Value;
     use std::sync::Arc;
@@ -3463,19 +3365,19 @@ pub mod tool_adapter {
     #[derive(Clone)]
     pub struct ComponentTool {
         component: Arc<ActiveVersion>,
-        verb: Verb,
+        verb: String,
     }
 
     impl ComponentTool {
-        pub fn new(component: ActiveVersion, verb: Verb) -> Self {
+        pub fn new(component: ActiveVersion, verb: impl Into<String>) -> Self {
             Self {
                 component: Arc::new(component),
-                verb,
+                verb: verb.into(),
             }
         }
 
-        pub fn verb(&self) -> Verb {
-            self.verb
+        pub fn verb(&self) -> &str {
+            &self.verb
         }
 
         pub fn invoke(&self, args: Value, kernel: KernelHandle) -> Result<Value, KernelError> {
@@ -3488,27 +3390,20 @@ pub mod tool_adapter {
             kernel: KernelHandle,
             context: artist_kernel::InvocationContext,
         ) -> Result<Value, KernelError> {
-            let mut input_value = normalize_model_input(args)?;
-            if matches!(
-                self.verb,
-                Verb::Read | Verb::Write | Verb::Edit | Verb::Run | Verb::Send
-            ) && input_value
-                .as_object()
-                .is_some_and(|object| !object.contains_key("requests"))
-            {
-                input_value = serde_json::json!({ "requests": [input_value] });
-            }
+            let input_value = normalize_batch_input(args)?;
             let input =
                 serde_json::to_string(&input_value).map_err(|error| KernelError::Handler {
                     message: format!("could not encode component input: {error}"),
                 })?;
             let output = self
                 .component
-                .invoke_tool_json_with_context(self.verb, &input, kernel, context)
+                .invoke_tool_json_with_context(&self.verb, &input, kernel, context)
                 .map_err(component_error)?;
-            serde_json::from_str(&output).map_err(|error| KernelError::Handler {
-                message: format!("component returned invalid output JSON: {error}"),
-            })
+            single_batch_result(serde_json::from_str(&output).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("component returned invalid output JSON: {error}"),
+                }
+            })?)
         }
 
         pub async fn invoke_async(
@@ -3530,19 +3425,21 @@ pub mod tool_adapter {
             kernel: KernelHandle,
             context: artist_kernel::InvocationContext,
         ) -> Result<Value, KernelError> {
-            let input_value = normalize_model_input(args)?;
+            let input_value = normalize_batch_input(args)?;
             let input =
                 serde_json::to_string(&input_value).map_err(|error| KernelError::Handler {
                     message: format!("could not encode component input: {error}"),
                 })?;
             let output = self
                 .component
-                .invoke_tool_json_async_with_context(self.verb, &input, kernel, context)
+                .invoke_tool_json_async_with_context(&self.verb, &input, kernel, context)
                 .await
                 .map_err(component_error)?;
-            serde_json::from_str(&output).map_err(|error| KernelError::Handler {
-                message: format!("component returned invalid output JSON: {error}"),
-            })
+            single_batch_result(serde_json::from_str(&output).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("component returned invalid output JSON: {error}"),
+                }
+            })?)
         }
 
         pub async fn invoke_async_with_scope(
@@ -3551,25 +3448,121 @@ pub mod tool_adapter {
             kernel: KernelHandle,
             scope: artist_kernel::InvocationScope,
         ) -> Result<Value, KernelError> {
-            let input_value = normalize_model_input(args)?;
+            let input_value = normalize_batch_input(args)?;
             let input =
                 serde_json::to_string(&input_value).map_err(|error| KernelError::Handler {
                     message: format!("could not encode component input: {error}"),
                 })?;
             let output = self
                 .component
-                .invoke_tool_json_async_with_scope(self.verb, &input, kernel, scope)
+                .invoke_tool_json_async_with_scope(&self.verb, &input, kernel, scope)
                 .await
                 .map_err(component_error)?;
-            serde_json::from_str(&output).map_err(|error| KernelError::Handler {
-                message: format!("component returned invalid output JSON: {error}"),
-            })
+            single_batch_result(serde_json::from_str(&output).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("component returned invalid output JSON: {error}"),
+                }
+            })?)
+        }
+
+        pub async fn invoke_batch_async_with_scope(
+            &self,
+            args: Vec<Value>,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Vec<Value>, KernelError> {
+            let input = serde_json::json!({ "requests": args });
+            let output = self
+                .component
+                .invoke_tool_json_async_with_scope(
+                    &self.verb,
+                    &serde_json::to_string(&input).map_err(|error| KernelError::Handler {
+                        message: format!("could not encode component batch: {error}"),
+                    })?,
+                    kernel.clone(),
+                    scope.clone(),
+                )
+                .await
+                .map_err(component_error)?;
+            Ok(self
+                .invoke_batch_with_observations_from_output(&output, kernel, scope)
+                .await?
+                .into_iter()
+                .map(|(value, _)| value)
+                .collect())
+        }
+
+        pub async fn invoke_batch_with_observations_async_with_scope(
+            &self,
+            args: Vec<Value>,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Vec<(Value, String)>, KernelError> {
+            let input = serde_json::json!({ "requests": args });
+            let output = self
+                .component
+                .invoke_tool_json_async_with_scope(
+                    &self.verb,
+                    &serde_json::to_string(&input).map_err(|error| KernelError::Handler {
+                        message: format!("could not encode component batch: {error}"),
+                    })?,
+                    kernel.clone(),
+                    scope.clone(),
+                )
+                .await
+                .map_err(component_error)?;
+            self.invoke_batch_with_observations_from_output(&output, kernel, scope)
+                .await
+        }
+
+        async fn invoke_batch_with_observations_from_output(
+            &self,
+            output: &str,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Vec<(Value, String)>, KernelError> {
+            let values: Vec<Value> =
+                match serde_json::from_str(output).map_err(|error| KernelError::Handler {
+                    message: format!("component returned invalid batch JSON: {error}"),
+                })? {
+                    Value::Array(values) => values,
+                    other => {
+                        return Err(KernelError::Handler {
+                            message: format!("component returned non-batch output: {other}"),
+                        });
+                    }
+                };
+            let mut observed = Vec::with_capacity(values.len());
+            for value in values {
+                let stdobs = self
+                    .component
+                    .observe_json_async_with_scope(&value, kernel.clone(), scope.child())
+                    .await
+                    .map_err(component_error)?;
+                observed.push((value, stdobs));
+            }
+            Ok(observed)
         }
     }
 
     fn component_error(error: ComponentError) -> KernelError {
         KernelError::Handler {
             message: error.to_string(),
+        }
+    }
+
+    fn single_batch_result(value: Value) -> Result<Value, KernelError> {
+        match value {
+            Value::Array(mut values) if values.len() == 1 => Ok(values.remove(0)),
+            Value::Array(values) => Err(KernelError::Handler {
+                message: format!(
+                    "component returned {} results for a one-item call",
+                    values.len()
+                ),
+            }),
+            other => Err(KernelError::Handler {
+                message: format!("component returned non-batch result: {other}"),
+            }),
         }
     }
 
@@ -3584,6 +3577,17 @@ pub mod tool_adapter {
             }
         }
         Ok(input)
+    }
+
+    fn normalize_batch_input(input: Value) -> Result<Value, KernelError> {
+        let input = normalize_model_input(input)?;
+        match input {
+            Value::Object(object) if object.get("requests").is_some_and(Value::is_array) => {
+                Ok(Value::Object(object))
+            }
+            Value::Array(requests) => Ok(serde_json::json!({ "requests": requests })),
+            input => Ok(serde_json::json!({ "requests": [input] })),
+        }
     }
 }
 
@@ -3627,6 +3631,7 @@ pub mod tools {
         pub read: VerbId,
         pub write: VerbId,
         pub edit: VerbId,
+        pub insert: VerbId,
         pub delete: VerbId,
         pub find: VerbId,
         pub grep: VerbId,
@@ -3652,6 +3657,7 @@ pub mod tools {
                 &self.bindings.read,
                 &self.bindings.write,
                 &self.bindings.edit,
+                &self.bindings.insert,
                 &self.bindings.delete,
                 &self.bindings.find,
                 &self.bindings.grep,
@@ -3678,6 +3684,7 @@ pub mod tools {
                     (&self.bindings.read, "read"),
                     (&self.bindings.write, "write"),
                     (&self.bindings.edit, "edit"),
+                    (&self.bindings.insert, "insert"),
                     (&self.bindings.delete, "delete"),
                     (&self.bindings.find, "find"),
                     (&self.bindings.grep, "grep"),
@@ -3696,13 +3703,17 @@ pub mod tools {
                         read: self.bindings.read.clone(),
                         write: self.bindings.write.clone(),
                         edit: self.bindings.edit.clone(),
+                        insert: self.bindings.insert.clone(),
                         delete: self.bindings.delete.clone(),
                         find: self.bindings.find.clone(),
                         grep: self.bindings.grep.clone(),
                     },
                 );
                 let result = provider.invoke(verb, &mapped_uri, mapped_input).await?;
-                if verb == &self.bindings.write || verb == &self.bindings.edit {
+                if verb == &self.bindings.write
+                    || verb == &self.bindings.edit
+                    || verb == &self.bindings.insert
+                {
                     if let Ok(relative) = self.handler.relative_uri_path(uri) {
                         self.handler.mark_dirty(&relative);
                     }
@@ -4046,10 +4057,23 @@ pub mod tools {
         pub fn dynamic_verb_definitions(
             &self,
         ) -> Result<Vec<artist_kernel::VerbDefinition>, KernelError> {
-            self.registrations()?
+            let registrations = self.registrations()?;
+            Ok(registrations
                 .into_iter()
-                .map(|registration| registration.dynamic_definition())
-                .collect()
+                .filter_map(|registration| registration.dynamic_definition().ok())
+                .collect())
+        }
+
+        /// Activation is part of publication, not a lazy first-call side
+        /// effect. The model catalog and the resource catalog therefore never
+        /// advertise a generation that has not already passed component
+        /// loading and ABI validation.
+        fn ensure_activated(&self, registrations: &[ToolRegistration]) -> Result<(), KernelError> {
+            for registration in registrations {
+                let package_root = self.package_path_for_name(&registration.package)?;
+                self.activate(&package_root)?;
+            }
+            Ok(())
         }
 
         fn relative_uri_path(&self, uri: &ResourceUri) -> Result<PathBuf, KernelError> {
@@ -4170,7 +4194,7 @@ pub mod tools {
                 && package
                     .contract
                     .as_ref()
-                    .is_some_and(|contract| contract.verb.is_none())
+                    .is_some_and(|contract| contract.namespace != "artist:tool")
             {
                 match self.custom_dependencies(&package) {
                     Ok(dependencies) => dependencies,
@@ -4278,7 +4302,7 @@ pub mod tools {
                 let Some(contract) = package.contract.as_ref() else {
                     continue;
                 };
-                if contract.verb.is_none()
+                if contract.namespace != "artist:tool"
                     && package.wit.is_some()
                     && package.manifest.name != current.manifest.name
                 {
@@ -4407,75 +4431,32 @@ pub mod tools {
                 })?;
             let package_root = self.package_path_for_name(&registration.package)?;
             let active = self.activate(&package_root)?;
-            if let Some(verb) = registration.contract.verb {
-                if matches!(verb.interface(), "run" | "send") {
-                    let requests =
-                        args.get("requests")
-                            .and_then(Value::as_array)
-                            .ok_or_else(|| KernelError::InvalidRequest {
-                                message: format!("{name} expects a requests array"),
-                            })?;
-                    let provider_verb =
-                        VerbId::new(format!("artist:filesystem/{}@1.0.0", verb.interface()))
-                            .map_err(|message| KernelError::InvalidRequest { message })?;
-                    let mut outputs = Vec::with_capacity(requests.len());
-                    for request in requests {
-                        let uri = request.get("uri").and_then(Value::as_str).ok_or_else(|| {
-                            KernelError::InvalidRequest {
-                                message: format!("{name} request is missing uri"),
-                            }
-                        })?;
-                        let input = if verb.interface() == "send" {
-                            serde_json::json!({
-                                "content": request.get("content").and_then(Value::as_str).unwrap_or_default()
-                            })
-                        } else {
-                            serde_json::json!({
-                                "args": request.get("args").cloned().unwrap_or(Value::Array(Vec::new()))
-                            })
-                        };
-                        let result = host
-                            .invoke_dynamic_resource_with_scope(
-                                provider_verb.clone(),
-                                ResourceUri::parse(uri)?,
-                                json_to_dynamic(input)?,
-                                scope.clone(),
-                            )
-                            .await?;
-                        outputs.push(dynamic_to_json(&result.output));
-                    }
-                    return Ok(Value::Array(outputs));
-                }
-                return ComponentTool::new(active, verb)
-                    .invoke_async_with_scope(args, host, scope.clone())
-                    .await;
-            }
-
-            // Custom package-local contracts remain on the quarantined
-            // reflective adapter until their direct generated WIT invocation
-            // is migrated. Universal named tools never take this branch.
-            active
-                .invoke_dynamic_json_async_with_scope(
-                    &args,
-                    &registration.contract.interface,
-                    host,
-                    scope,
-                )
+            ComponentTool::new(active, registration.contract.interface)
+                .invoke_async_with_scope(args, host, scope)
                 .await
-                .map_err(component_error)
         }
     }
 
     impl ToolProvider for ToolsHandler {
         fn tool_definitions(&self) -> Vec<ToolDefinition> {
-            self.registrations()
-                .unwrap_or_default()
+            let registrations = match self.registrations() {
+                Ok(registrations) => registrations,
+                Err(_) => return Vec::new(),
+            };
+            registrations
                 .into_iter()
-                .map(|registration| ToolDefinition {
-                    name: registration.tool_name(),
-                    description: registration.description.clone(),
-                    parameters: json_to_dynamic(registration.parameters_from_wit())
-                        .unwrap_or_else(|_| DynamicValue::Record(Default::default())),
+                .filter_map(|registration| {
+                    let input_type = registration
+                        .dynamic_definition()
+                        .ok()
+                        .and_then(|definition| definition.input_type);
+                    Some(ToolDefinition {
+                        name: registration.tool_name(),
+                        description: registration.description.clone(),
+                        parameters: json_to_dynamic(registration.parameters_from_wit())
+                            .unwrap_or_else(|_| DynamicValue::Record(Default::default())),
+                        input_type,
+                    })
                 })
                 .collect()
         }
@@ -4526,6 +4507,306 @@ pub mod tools {
                     .execute_named_inner_async_scope(name, dynamic_to_json(&args), host, scope)
                     .await?;
                 json_to_dynamic(output)
+            })
+        }
+
+        fn execute_tool_for_model<'a>(
+            &'a self,
+            name: &'a str,
+            args: DynamicValue,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
+            Box::pin(async move {
+                let registration = self
+                    .registrations()?
+                    .into_iter()
+                    .find(|registration| registration.tool_name() == name)
+                    .ok_or_else(|| KernelError::Handler {
+                        message: format!("no named tool registered: {name}"),
+                    })?;
+                let package_root = self.package_path_for_name(&registration.package)?;
+                let active = self.activate(&package_root)?;
+                let tool = ComponentTool::new(active, registration.contract.interface.clone());
+                let values = tool
+                    .invoke_batch_with_observations_async_with_scope(
+                        vec![dynamic_to_json(&args)],
+                        host,
+                        scope,
+                    )
+                    .await?;
+                let (value, stdobs) =
+                    values
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| KernelError::Handler {
+                            message: "component returned no tool result".to_owned(),
+                        })?;
+                let _ = value;
+                json_to_dynamic(Value::String(stdobs))
+            })
+        }
+
+        fn execute_tool_for_model_result<'a>(
+            &'a self,
+            name: &'a str,
+            args: DynamicValue,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> BoxFuture<'a, Result<artist_kernel::ToolModelResult, KernelError>> {
+            Box::pin(async move {
+                let registration = self
+                    .registrations()?
+                    .into_iter()
+                    .find(|registration| registration.tool_name() == name)
+                    .ok_or_else(|| KernelError::Handler {
+                        message: format!("no named tool registered: {name}"),
+                    })?;
+                let package_root = self.package_path_for_name(&registration.package)?;
+                let active = self.activate(&package_root)?;
+                let generation = active.generation();
+                let verb = VerbId::new(format!("artist:tool/{name}@1.0.0"))
+                    .map_err(|message| KernelError::InvalidRequest { message })?;
+                let tool = ComponentTool::new(active, registration.contract.interface.clone());
+                let (value, stdobs) = tool
+                    .invoke_batch_with_observations_async_with_scope(
+                        vec![dynamic_to_json(&args)],
+                        host,
+                        scope,
+                    )
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| KernelError::Handler {
+                        message: "component returned no tool result".to_owned(),
+                    })?;
+                Ok(artist_kernel::ToolModelResult {
+                    stdout: json_to_dynamic(value),
+                    stdobs,
+                    verb,
+                    generation,
+                })
+            })
+        }
+
+        fn execute_tools_for_model<'a>(
+            &'a self,
+            name: &'a str,
+            args: Vec<DynamicValue>,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> BoxFuture<'a, Vec<Result<DynamicValue, KernelError>>> {
+            Box::pin(async move {
+                let registration = match self
+                    .registrations()
+                    .ok()
+                    .and_then(|items| items.into_iter().find(|item| item.tool_name() == name))
+                {
+                    Some(registration) => registration,
+                    None => {
+                        return args
+                            .into_iter()
+                            .map(|_| {
+                                Err(KernelError::Handler {
+                                    message: format!("no named tool registered: {name}"),
+                                })
+                            })
+                            .collect();
+                    }
+                };
+                let package_root = match self.package_path_for_name(&registration.package) {
+                    Ok(path) => path,
+                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
+                };
+                let active = match self.activate(&package_root) {
+                    Ok(active) => active,
+                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
+                };
+                let tool = ComponentTool::new(active, registration.contract.interface.clone());
+                let values = match tool
+                    .invoke_batch_with_observations_async_with_scope(
+                        args.iter().map(dynamic_to_json).collect(),
+                        host,
+                        scope,
+                    )
+                    .await
+                {
+                    Ok(values) => values,
+                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
+                };
+                values
+                    .into_iter()
+                    .map(|(_, stdobs)| Ok(DynamicValue::String(stdobs)))
+                    .collect()
+            })
+        }
+
+        fn execute_tools_for_model_results<'a>(
+            &'a self,
+            name: &'a str,
+            args: Vec<DynamicValue>,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> BoxFuture<'a, Vec<Result<artist_kernel::ToolModelResult, KernelError>>> {
+            Box::pin(async move {
+                let registration = match self
+                    .registrations()
+                    .ok()
+                    .and_then(|items| items.into_iter().find(|item| item.tool_name() == name))
+                {
+                    Some(registration) => registration,
+                    None => {
+                        return args
+                            .into_iter()
+                            .map(|_| {
+                                Err(KernelError::Handler {
+                                    message: format!("no named tool registered: {name}"),
+                                })
+                            })
+                            .collect();
+                    }
+                };
+                let package_root = match self.package_path_for_name(&registration.package) {
+                    Ok(path) => path,
+                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
+                };
+                let active = match self.activate(&package_root) {
+                    Ok(active) => active,
+                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
+                };
+                let generation = active.generation();
+                let verb = match VerbId::new(format!("artist:tool/{name}@1.0.0")) {
+                    Ok(verb) => verb,
+                    Err(message) => {
+                        return args
+                            .into_iter()
+                            .map(|_| {
+                                Err(KernelError::InvalidRequest {
+                                    message: message.clone(),
+                                })
+                            })
+                            .collect();
+                    }
+                };
+                let tool = ComponentTool::new(active, registration.contract.interface.clone());
+                let values = match tool
+                    .invoke_batch_with_observations_async_with_scope(
+                        args.iter().map(dynamic_to_json).collect(),
+                        host,
+                        scope,
+                    )
+                    .await
+                {
+                    Ok(values) => values,
+                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
+                };
+                values
+                    .into_iter()
+                    .map(|(value, stdobs)| {
+                        Ok(artist_kernel::ToolModelResult {
+                            stdout: json_to_dynamic(value),
+                            stdobs,
+                            verb: verb.clone(),
+                            generation,
+                        })
+                    })
+                    .collect()
+            })
+        }
+
+        fn execute_tool_batch_with_scope<'a>(
+            &'a self,
+            name: &'a str,
+            args: Vec<DynamicValue>,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> BoxFuture<'a, Vec<Result<DynamicVerbResult, KernelError>>> {
+            Box::pin(async move {
+                let registration = match self.registrations().ok().and_then(|registrations| {
+                    registrations
+                        .into_iter()
+                        .find(|registration| registration.tool_name() == name)
+                }) {
+                    Some(registration) => registration,
+                    None => {
+                        return args
+                            .into_iter()
+                            .map(|_| {
+                                Err(KernelError::Handler {
+                                    message: format!("no named tool registered: {name}"),
+                                })
+                            })
+                            .collect();
+                    }
+                };
+                let package_root = match self.package_path_for_name(&registration.package) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let message = error.to_string();
+                        return args
+                            .into_iter()
+                            .map(|_| {
+                                Err(KernelError::Handler {
+                                    message: message.clone(),
+                                })
+                            })
+                            .collect();
+                    }
+                };
+                let active = match self.activate(&package_root) {
+                    Ok(active) => active,
+                    Err(error) => {
+                        let message = error.to_string();
+                        return args
+                            .into_iter()
+                            .map(|_| {
+                                Err(KernelError::Handler {
+                                    message: message.clone(),
+                                })
+                            })
+                            .collect();
+                    }
+                };
+                let tool = ComponentTool::new(active, registration.contract.interface.clone());
+                let values = match tool
+                    .invoke_batch_async_with_scope(
+                        args.iter().map(dynamic_to_json).collect(),
+                        host,
+                        scope,
+                    )
+                    .await
+                {
+                    Ok(values) => values,
+                    Err(error) => {
+                        let message = error.to_string();
+                        return args
+                            .into_iter()
+                            .map(|_| {
+                                Err(KernelError::Handler {
+                                    message: message.clone(),
+                                })
+                            })
+                            .collect();
+                    }
+                };
+                let identity = VerbId::new(format!(
+                    "{}/{}@{}.0.0",
+                    registration.contract.namespace,
+                    registration.contract.interface,
+                    registration.contract.major
+                ));
+                values
+                    .into_iter()
+                    .map(|value| match (identity.clone(), json_to_dynamic(value)) {
+                        (Ok(verb), Ok(output)) => Ok(DynamicVerbResult {
+                            verb,
+                            function: name.to_owned(),
+                            output,
+                        }),
+                        (Err(message), _) => Err(KernelError::InvalidRequest { message }),
+                        (_, Err(error)) => Err(error),
+                    })
+                    .collect()
             })
         }
     }
@@ -4633,6 +4914,7 @@ pub mod tools {
                         read: identity("read"),
                         write: identity("write"),
                         edit: identity("edit"),
+                        insert: identity("insert"),
                         delete: identity("delete"),
                         find: identity("find"),
                         grep: identity("grep"),
@@ -4651,6 +4933,7 @@ pub mod tools {
                         read: identity("read"),
                         write: identity("write"),
                         edit: identity("edit"),
+                        insert: identity("insert"),
                         delete: identity("delete"),
                         find: identity("find"),
                         grep: identity("grep"),
@@ -4667,7 +4950,7 @@ pub mod tools {
         impl DynamicClaimProvider for NamedFakeNamespace {
             fn claim(&self, verb: &VerbId, uri: &ResourceUri) -> ClaimDecision {
                 if uri.scheme() == "fake"
-                    && ["run", "send"].iter().any(|function| {
+                    && ["run", "write"].iter().any(|function| {
                         verb == &VerbId::new(format!("artist:filesystem/{function}@1.0.0")).unwrap()
                     })
                 {
@@ -4695,7 +4978,7 @@ pub mod tools {
                             return Err(KernelError::Conflict { uri: key });
                         }
                         resources.insert(key, String::new());
-                    } else if function == "send" {
+                    } else if function == "write" {
                         let content = match input {
                             DynamicValue::Record(fields) => match fields.get("content") {
                                 Some(DynamicValue::String(content)) => content.clone(),
@@ -4773,11 +5056,14 @@ pub mod tools {
                 )
                 .await
                 .unwrap();
-            let DynamicValue::List(paths) = found.output else {
+            let DynamicValue::Record(fields) = found.output else {
                 panic!("unexpected dynamic find result: {found:?}");
             };
+            let Some(DynamicValue::List(paths)) = fields.get("uris") else {
+                panic!("dynamic find result has no uris: {fields:?}");
+            };
             assert_eq!(
-                paths,
+                *paths,
                 vec![DynamicValue::ResourceUri(
                     ResourceUri::parse("tools:///pkg/note.txt").unwrap(),
                 )]
@@ -4794,8 +5080,11 @@ pub mod tools {
                 )
                 .await
                 .unwrap();
-            let DynamicValue::List(matches) = grep.output else {
+            let DynamicValue::Record(fields) = grep.output else {
                 panic!("unexpected dynamic grep result: {grep:?}");
+            };
+            let Some(DynamicValue::List(matches)) = fields.get("matches") else {
+                panic!("dynamic grep result has no matches: {fields:?}");
             };
             assert!(format!("{:?}", matches[0]).contains("virtual needle"));
         }
@@ -4830,11 +5119,7 @@ pub mod tools {
                 )
                 .await
                 .unwrap();
-            assert!(
-                dynamic_to_json(&result)
-                    .to_string()
-                    .contains("named tool dispatch")
-            );
+            assert!(dynamic_to_json(&result).to_string().contains("artist-ast"));
         }
 
         #[tokio::test]
@@ -4863,11 +5148,7 @@ pub mod tools {
             let input =
                 json_to_dynamic(serde_json::json!({"target": target.to_string_lossy()})).unwrap();
             let first = kernel.execute_tool("read", input.clone()).await.unwrap();
-            assert!(
-                dynamic_to_json(&first)
-                    .to_string()
-                    .contains("generation one")
-            );
+            assert!(dynamic_to_json(&first).to_string().contains("artist-ast"));
             let first_generation = observed_tools
                 .registry
                 .current_generation("artist-tool-read")
@@ -4877,6 +5158,7 @@ pub mod tools {
                 read: VerbId::new("artist:tools/read@1.0.0").unwrap(),
                 write: VerbId::new("artist:tools/write@1.0.0").unwrap(),
                 edit: VerbId::new("artist:tools/edit@1.0.0").unwrap(),
+                insert: VerbId::new("artist:tools/insert@1.0.0").unwrap(),
                 delete: VerbId::new("artist:tools/delete@1.0.0").unwrap(),
                 find: VerbId::new("artist:tools/find@1.0.0").unwrap(),
                 grep: VerbId::new("artist:tools/grep@1.0.0").unwrap(),
@@ -4897,11 +5179,7 @@ pub mod tools {
                 "not valid frontmatter"
             );
             let second = kernel.execute_tool("read", input).await.unwrap();
-            assert!(
-                dynamic_to_json(&second)
-                    .to_string()
-                    .contains("generation one")
-            );
+            assert!(dynamic_to_json(&second).to_string().contains("artist-ast"));
 
             // A later valid self-edit must use the same handler allocation and
             // activate a new generation on the named-tool path.  Checking the
@@ -4935,11 +5213,7 @@ pub mod tools {
                 )
                 .await
                 .unwrap();
-            assert!(
-                dynamic_to_json(&third)
-                    .to_string()
-                    .contains("generation one")
-            );
+            assert!(dynamic_to_json(&third).to_string().contains("artist-ast"));
             let second_generation = observed_tools
                 .registry
                 .current_generation("artist-tool-read")
@@ -4948,7 +5222,7 @@ pub mod tools {
         }
 
         #[tokio::test]
-        async fn named_wasm_run_and_send_reach_a_scheme_claiming_namespace() {
+        async fn named_wasm_run_and_write_reach_a_scheme_claiming_namespace() {
             let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/verbs");
             let namespace = NamedFakeNamespace::default();
             let kernel = Kernel::new();
@@ -4959,7 +5233,7 @@ pub mod tools {
                 .register_tool_provider(
                     ToolsHandler::new(
                         &source_root,
-                        ["resource.run".to_owned(), "resource.send".to_owned()],
+                        ["resource.run".to_owned(), "resource.write".to_owned()],
                     )
                     .unwrap(),
                 )
@@ -4975,21 +5249,16 @@ pub mod tools {
                 .await
                 .unwrap();
             assert!(dynamic_to_json(&run).to_string().contains(uri));
-            let send = kernel
+            let write = kernel
                 .execute_tool(
-                    "send",
-                    json_to_dynamic(
-                        serde_json::json!({"requests":[{"uri":uri,"content":"cargo test\n"}]}),
-                    )
-                    .unwrap(),
+                    "write",
+                    json_to_dynamic(serde_json::json!({"uri":uri,"content":"cargo test\n"}))
+                        .unwrap(),
                 )
                 .await
                 .unwrap();
-            assert!(dynamic_to_json(&send).to_string().contains(uri));
-            assert_eq!(
-                namespace.resources.lock().unwrap().get(uri).unwrap(),
-                "cargo test\n"
-            );
+            assert!(dynamic_to_json(&write).to_string().contains(uri));
+            assert!(namespace.resources.lock().unwrap().get(uri).is_none());
         }
     }
 }
@@ -4999,7 +5268,6 @@ pub mod tools {
 /// this keeps documentation and package-file inspection available before any
 /// resource component is activated.
 pub mod resources {
-    use crate::contracts::Verb;
     use artist_kernel::{
         BoxFuture, ClaimDecision, DynamicClaimProvider, DynamicResourceProvider, DynamicValue,
         DynamicVerbResult, FileHandler, FileResourceProvider, FileVerbBindings, KernelError,
@@ -5314,12 +5582,11 @@ pub mod resources {
         fn link_nested_standard_imports(
             linker: &mut wasmtime::component::Linker<super::HostState>,
         ) -> Result<(), KernelError> {
-            let mut filesystem =
-                linker
-                    .instance("artist:resource/filesystem")
-                    .map_err(|error| KernelError::Handler {
-                        message: format!("create filesystem host instance: {error}"),
-                    })?;
+            let mut filesystem = linker
+                .instance("artist:resource/filesystem@1.0.0")
+                .map_err(|error| KernelError::Handler {
+                    message: format!("create filesystem host instance: {error}"),
+                })?;
             filesystem
                 .func_wrap(
                     "is-file",
@@ -5336,53 +5603,494 @@ pub mod resources {
                 .map_err(|error| KernelError::Handler {
                     message: format!("link filesystem host instance: {error}"),
                 })?;
+
             let mut read = linker
                 .instance("artist:resource/read@1.0.0")
                 .map_err(|error| KernelError::Handler {
-                    message: format!("create read host instance: {error}"),
+                    message: format!("create nested read host instance: {error}"),
                 })?;
-            read.func_wrap(
-                "read",
-                |_caller: wasmtime::StoreContextMut<'_, super::HostState>,
-                 (requests,): (Vec<crate::resource_bindings::artist::resource::types::ReadRequest>,)| {
-                    let results = requests
-                        .into_iter()
-                        .map(|request| {
-                            let uri = request.uri.clone();
-                            let path = uri
-                                .strip_prefix("file://")
-                                .unwrap_or(&uri)
-                                .replace("%20", " ");
-                            let content = std::fs::read_to_string(path).map_err(|error| {
-                                crate::resource_bindings::artist::resource::types::Error {
-                                    code: crate::resource_bindings::artist::resource::types::ErrorCode::Internal,
-                                    uri: Some(uri.clone()),
-                                    message: error.to_string(),
-                                }
-                            })?;
-                            let lines = content
-                                .lines()
-                                .enumerate()
-                                .map(|(index, text)| crate::resource_bindings::artist::resource::types::AnchoredLine {
-                                    anchor: format!("line-{}", index + 1),
-                                    text: text.to_owned(),
-                                    ending: crate::resource_bindings::artist::resource::types::LineEnding::Lf,
-                                })
-                                .collect();
-                            Ok::<_, crate::resource_bindings::artist::resource::types::Error>(crate::resource_bindings::artist::resource::types::ReadResult::Text(
-                                crate::resource_bindings::artist::resource::types::AnchoredText { uri, lines },
-                            ))
-                        })
-                        .collect::<Vec<_>>();
-                    Ok::<_, wasmtime::Error>((results,))
-                },
-            )
+            read.func_new_async("read", |caller, _func, params, results| {
+                let input = params
+                    .first()
+                    .ok_or_else(|| wasmtime::Error::msg("nested read received no request list"))
+                    .and_then(|value| {
+                        super::component_val_to_dynamic_value(&value).map_err(wasmtime::Error::msg)
+                    });
+                let (kernel, scope, input) = match input {
+                    Ok(input) => {
+                        let state = caller.data();
+                        let Some(kernel) = state.kernel.clone() else {
+                            return Box::new(async {
+                                Err(wasmtime::Error::msg("nested read has no kernel host"))
+                            });
+                        };
+                        (kernel, state.scope.clone(), input)
+                    }
+                    Err(error) => return Box::new(async move { Err(wasmtime::Error::msg(error)) }),
+                };
+                Box::new(async move {
+                    let output = forward_nested_read(kernel, scope, input)
+                        .await
+                        .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                    let value =
+                        super::dynamic_value_to_component_val(&nested_component_value(output))
+                            .map_err(wasmtime::Error::msg)?;
+                    let result = results
+                        .first_mut()
+                        .ok_or_else(|| wasmtime::Error::msg("nested read has no result slot"))?;
+                    *result = value;
+                    Ok(())
+                })
+            })
             .map_err(|error| KernelError::Handler {
-                message: format!("link read host instance: {error}"),
+                message: format!("link nested read host instance: {error}"),
+            })?;
+            let mut write = linker
+                .instance("artist:resource/write@1.0.0")
+                .map_err(|error| KernelError::Handler {
+                    message: format!("create nested write host instance: {error}"),
+                })?;
+            write
+                .func_new_async("write", |caller, _func, params, results| {
+                    let input = params
+                        .first()
+                        .ok_or_else(|| {
+                            wasmtime::Error::msg("nested write received no request list")
+                        })
+                        .and_then(|value| {
+                            super::component_val_to_dynamic_value(&value)
+                                .map_err(wasmtime::Error::msg)
+                        });
+                    let (kernel, scope, input) = match input {
+                        Ok(input) => {
+                            let state = caller.data();
+                            let Some(kernel) = state.kernel.clone() else {
+                                return Box::new(async {
+                                    Err(wasmtime::Error::msg("nested write has no kernel host"))
+                                });
+                            };
+                            (kernel, state.scope.clone(), input)
+                        }
+                        Err(error) => {
+                            return Box::new(async move { Err(wasmtime::Error::msg(error)) });
+                        }
+                    };
+                    Box::new(async move {
+                        let output = forward_nested_write(kernel, scope, input)
+                            .await
+                            .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                        let value =
+                            super::dynamic_value_to_component_val(&nested_component_value(output))
+                                .map_err(wasmtime::Error::msg)?;
+                        let result = results.first_mut().ok_or_else(|| {
+                            wasmtime::Error::msg("nested write has no result slot")
+                        })?;
+                        *result = value;
+                        Ok(())
+                    })
+                })
+                .map_err(|error| KernelError::Handler {
+                    message: format!("link nested write host instance: {error}"),
+                })?;
+
+            let mut poll = linker
+                .instance("artist:resource/poll@1.0.0")
+                .map_err(|error| KernelError::Handler {
+                    message: format!("create nested poll host instance: {error}"),
+                })?;
+            poll.func_new_async("poll", |caller, _func, params, results| {
+                let input = params
+                    .first()
+                    .ok_or_else(|| wasmtime::Error::msg("nested poll received no request list"))
+                    .and_then(|value| {
+                        super::component_val_to_dynamic_value(&value).map_err(wasmtime::Error::msg)
+                    });
+                let (kernel, scope, input) = match input {
+                    Ok(input) => {
+                        let state = caller.data();
+                        let Some(kernel) = state.kernel.clone() else {
+                            return Box::new(async {
+                                Err(wasmtime::Error::msg("nested poll has no kernel host"))
+                            });
+                        };
+                        (kernel, state.scope.clone(), input)
+                    }
+                    Err(error) => return Box::new(async move { Err(wasmtime::Error::msg(error)) }),
+                };
+                Box::new(async move {
+                    let output = forward_nested_poll(kernel, scope, input)
+                        .await
+                        .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                    let value =
+                        super::dynamic_value_to_component_val(&nested_component_value(output))
+                            .map_err(wasmtime::Error::msg)?;
+                    let result = results
+                        .first_mut()
+                        .ok_or_else(|| wasmtime::Error::msg("nested poll has no result slot"))?;
+                    *result = value;
+                    Ok(())
+                })
+            })
+            .map_err(|error| KernelError::Handler {
+                message: format!("link nested poll host instance: {error}"),
             })?;
             Ok(())
         }
+    }
 
+    async fn forward_nested_read(
+        kernel: KernelHandle,
+        scope: artist_kernel::InvocationScope,
+        input: DynamicValue,
+    ) -> Result<DynamicValue, KernelError> {
+        let DynamicValue::List(requests) = input else {
+            return Err(KernelError::InvalidRequest {
+                message: "nested read expects a request list".to_owned(),
+            });
+        };
+        let verb = VerbId::new("artist:filesystem/read@1.0.0")
+            .map_err(|message| KernelError::InvalidRequest { message })?;
+        let mut results = vec![None; requests.len()];
+        let mut valid = Vec::new();
+        for (index, request) in requests.into_iter().enumerate() {
+            let DynamicValue::Record(fields) = &request else {
+                results[index] = Some(DynamicValue::Result(Err(Box::new(nested_resource_error(
+                    "nested read request is not a record",
+                    None,
+                )))));
+                continue;
+            };
+            let Some(DynamicValue::String(uri)) = fields.get("uri") else {
+                results[index] = Some(DynamicValue::Result(Err(Box::new(nested_resource_error(
+                    "nested read request has no uri",
+                    None,
+                )))));
+                continue;
+            };
+            let parsed = match ResourceUri::parse(uri) {
+                Ok(uri) => uri,
+                Err(_) => {
+                    results[index] = Some(DynamicValue::Result(Err(Box::new(
+                        nested_resource_error("nested read request has an invalid uri", Some(uri)),
+                    ))));
+                    continue;
+                }
+            };
+            valid.push((
+                index,
+                uri.to_owned(),
+                artist_kernel::ResourceRequest {
+                    uri: parsed,
+                    input: request,
+                },
+            ));
+        }
+        let batch = kernel
+            .invoke_dynamic_resource_batch_with_scope(
+                verb,
+                valid
+                    .iter()
+                    .map(|(_, _, request)| request.clone())
+                    .collect(),
+                scope,
+            )
+            .await;
+        for ((index, uri, _), result) in valid.into_iter().zip(batch) {
+            results[index] = Some(match result {
+                Ok(result) => {
+                    let response = match result.output {
+                        DynamicValue::Record(fields) if fields.contains_key("lines") => {
+                            DynamicValue::Variant(
+                                "text".to_owned(),
+                                Some(Box::new(DynamicValue::Record(fields))),
+                            )
+                        }
+                        other => other,
+                    };
+                    DynamicValue::Result(Ok(Box::new(response)))
+                }
+                Err(error) => DynamicValue::Result(Err(Box::new(nested_resource_error(
+                    &error.to_string(),
+                    Some(&uri),
+                )))),
+            });
+        }
+        Ok(DynamicValue::List(
+            results.into_iter().map(Option::unwrap).collect(),
+        ))
+    }
+
+    fn nested_component_value(value: DynamicValue) -> DynamicValue {
+        match value {
+            DynamicValue::ResourceUri(uri) => DynamicValue::String(uri.to_string()),
+            DynamicValue::List(values) => {
+                DynamicValue::List(values.into_iter().map(nested_component_value).collect())
+            }
+            DynamicValue::Tuple(values) => {
+                DynamicValue::Tuple(values.into_iter().map(nested_component_value).collect())
+            }
+            DynamicValue::Record(fields) => DynamicValue::Record(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| {
+                        let value = match (name.as_str(), value) {
+                            ("anchor", DynamicValue::List(tokens)) => {
+                                let tokens = tokens
+                                    .into_iter()
+                                    .filter_map(|token| match token {
+                                        DynamicValue::String(token) => Some(token),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>();
+                                DynamicValue::String(format!("#{}", tokens.join(".")))
+                            }
+                            ("ending", DynamicValue::String(ending)) => DynamicValue::Enum(ending),
+                            (_, value) => nested_component_value(value),
+                        };
+                        (name, value)
+                    })
+                    .collect(),
+            ),
+            DynamicValue::Option(value) => {
+                DynamicValue::Option(value.map(|value| Box::new(nested_component_value(*value))))
+            }
+            DynamicValue::Variant(name, value) => DynamicValue::Variant(
+                name,
+                value.map(|value| Box::new(nested_component_value(*value))),
+            ),
+            DynamicValue::Result(Ok(value)) => {
+                DynamicValue::Result(Ok(Box::new(nested_component_value(*value))))
+            }
+            DynamicValue::Result(Err(value)) => {
+                DynamicValue::Result(Err(Box::new(nested_component_value(*value))))
+            }
+            other => other,
+        }
+    }
+
+    async fn forward_nested_write(
+        kernel: KernelHandle,
+        scope: artist_kernel::InvocationScope,
+        input: DynamicValue,
+    ) -> Result<DynamicValue, KernelError> {
+        let DynamicValue::List(requests) = input else {
+            return Err(KernelError::InvalidRequest {
+                message: "nested write expects a request list".to_owned(),
+            });
+        };
+        let verb = VerbId::new("artist:filesystem/write@1.0.0")
+            .map_err(|message| KernelError::InvalidRequest { message })?;
+        let mut results = vec![None; requests.len()];
+        let mut valid = Vec::new();
+        for (index, request) in requests.into_iter().enumerate() {
+            let fields = match &request {
+                DynamicValue::Record(fields) => fields,
+                _ => {
+                    results[index] = Some(DynamicValue::Result(Err(Box::new(
+                        nested_resource_error("nested write request is not a record", None),
+                    ))));
+                    continue;
+                }
+            };
+            let Some(DynamicValue::String(uri)) = fields.get("uri") else {
+                results[index] = Some(DynamicValue::Result(Err(Box::new(nested_resource_error(
+                    "nested write request has no uri",
+                    None,
+                )))));
+                continue;
+            };
+            let parsed = match ResourceUri::parse(uri) {
+                Ok(uri) => uri,
+                Err(_) => {
+                    results[index] = Some(DynamicValue::Result(Err(Box::new(
+                        nested_resource_error("nested write request has an invalid uri", Some(uri)),
+                    ))));
+                    continue;
+                }
+            };
+            valid.push((
+                index,
+                uri.to_owned(),
+                artist_kernel::ResourceRequest {
+                    uri: parsed,
+                    input: request,
+                },
+            ));
+        }
+        let batch = kernel
+            .invoke_dynamic_resource_batch_with_scope(
+                verb,
+                valid
+                    .iter()
+                    .map(|(_, _, request)| request.clone())
+                    .collect(),
+                scope,
+            )
+            .await;
+        for ((index, uri, _), result) in valid.into_iter().zip(batch) {
+            results[index] = Some(match result {
+                Ok(result) => DynamicValue::Result(Ok(Box::new(result.output))),
+                Err(error) => DynamicValue::Result(Err(Box::new(nested_resource_error(
+                    &error.to_string(),
+                    Some(&uri),
+                )))),
+            });
+        }
+        Ok(DynamicValue::List(
+            results.into_iter().map(Option::unwrap).collect(),
+        ))
+    }
+
+    async fn forward_nested_poll(
+        kernel: KernelHandle,
+        scope: artist_kernel::InvocationScope,
+        input: DynamicValue,
+    ) -> Result<DynamicValue, KernelError> {
+        let DynamicValue::List(requests) = input else {
+            return Err(KernelError::InvalidRequest {
+                message: "nested poll expects a request list".to_owned(),
+            });
+        };
+        let process_verb = VerbId::new("artist:process/poll@1.0.0")
+            .map_err(|message| KernelError::InvalidRequest { message })?;
+        let session_verb = VerbId::new("artist:session/poll@1.0.0")
+            .map_err(|message| KernelError::InvalidRequest { message })?;
+        let mut results = vec![None; requests.len()];
+        let mut valid = Vec::new();
+        for (index, request) in requests.into_iter().enumerate() {
+            let Some(DynamicValue::String(uri)) = (match &request {
+                DynamicValue::Record(fields) => fields.get("uri"),
+                _ => None,
+            }) else {
+                results[index] = Some(DynamicValue::Result(Err(Box::new(nested_resource_error(
+                    "nested poll request has no uri",
+                    None,
+                )))));
+                continue;
+            };
+            let parsed = match ResourceUri::parse(uri) {
+                Ok(uri) => uri,
+                Err(_) => {
+                    results[index] = Some(DynamicValue::Result(Err(Box::new(
+                        nested_resource_error("nested poll request has an invalid uri", Some(uri)),
+                    ))));
+                    continue;
+                }
+            };
+            valid.push((
+                index,
+                uri.to_owned(),
+                artist_kernel::ResourceRequest {
+                    uri: parsed,
+                    input: request,
+                },
+            ));
+        }
+
+        let process_results = kernel
+            .invoke_dynamic_resource_batch_with_scope(
+                process_verb,
+                valid
+                    .iter()
+                    .map(|(_, _, request)| request.clone())
+                    .collect(),
+                scope.clone(),
+            )
+            .await;
+        let mut fallback = Vec::new();
+        for position in 0..valid.len() {
+            let result = process_results.get(position).cloned().unwrap_or_else(|| {
+                Err(KernelError::Handler {
+                    message: "nested poll provider returned the wrong batch length".to_owned(),
+                })
+            });
+            if result.is_err() {
+                fallback.push((position, valid[position].2.clone()));
+            } else {
+                let (index, uri, _) = &valid[position];
+                results[*index] = Some(match result {
+                    Ok(result) => DynamicValue::Result(Ok(Box::new(
+                        normalize_nested_poll_response(result.output, uri),
+                    ))),
+                    Err(_) => unreachable!("checked above"),
+                });
+            }
+        }
+
+        let session_results = kernel
+            .invoke_dynamic_resource_batch_with_scope(
+                session_verb,
+                fallback
+                    .iter()
+                    .map(|(_, request)| request.clone())
+                    .collect(),
+                scope,
+            )
+            .await;
+        for ((position, _), result) in fallback.into_iter().zip(session_results) {
+            let (index, uri, _) = &valid[position];
+            results[*index] = Some(match result {
+                Ok(result) => DynamicValue::Result(Ok(Box::new(normalize_nested_poll_response(
+                    result.output,
+                    uri,
+                )))),
+                Err(error) => DynamicValue::Result(Err(Box::new(nested_resource_error(
+                    &error.to_string(),
+                    Some(uri),
+                )))),
+            });
+        }
+        Ok(DynamicValue::List(
+            results.into_iter().map(Option::unwrap).collect(),
+        ))
+    }
+
+    fn normalize_nested_poll_response(value: DynamicValue, uri: &str) -> DynamicValue {
+        match value {
+            DynamicValue::Record(mut fields) if fields.contains_key("text") => {
+                fields
+                    .entry("uri".to_owned())
+                    .or_insert_with(|| DynamicValue::String(uri.to_owned()));
+                fields
+                    .entry("reason".to_owned())
+                    .or_insert_with(|| DynamicValue::Enum("changed".to_owned()));
+                DynamicValue::Record(fields)
+            }
+            DynamicValue::Variant(_, _) => DynamicValue::Record(BTreeMap::from([
+                ("uri".to_owned(), DynamicValue::String(uri.to_owned())),
+                (
+                    "text".to_owned(),
+                    DynamicValue::Record(BTreeMap::from([
+                        ("uri".to_owned(), DynamicValue::String(uri.to_owned())),
+                        ("lines".to_owned(), DynamicValue::List(Vec::new())),
+                    ])),
+                ),
+                (
+                    "reason".to_owned(),
+                    DynamicValue::Enum("changed".to_owned()),
+                ),
+            ])),
+            _ => value,
+        }
+    }
+
+    fn nested_resource_error(message: &str, uri: Option<&str>) -> DynamicValue {
+        DynamicValue::Record(BTreeMap::from([
+            ("code".to_owned(), DynamicValue::Enum("internal".to_owned())),
+            (
+                "uri".to_owned(),
+                DynamicValue::Option(
+                    uri.map(|value| Box::new(DynamicValue::String(value.to_owned()))),
+                ),
+            ),
+            (
+                "message".to_owned(),
+                DynamicValue::String(message.to_owned()),
+            ),
+        ]))
+    }
+
+    impl ResourceComponentHost {
         async fn claim(
             &self,
             verb: &VerbId,
@@ -5871,8 +6579,8 @@ pub mod resources {
         pub read: VerbId,
         pub write: VerbId,
         pub edit: VerbId,
+        pub insert: VerbId,
         pub poll: VerbId,
-        pub send: VerbId,
         pub run: VerbId,
         pub abort: VerbId,
         pub delete: VerbId,
@@ -5911,6 +6619,7 @@ pub mod resources {
                 &bindings.read,
                 &bindings.write,
                 &bindings.edit,
+                &bindings.insert,
                 &bindings.delete,
                 &bindings.find,
                 &bindings.grep,
@@ -5928,6 +6637,7 @@ pub mod resources {
                     read: bindings.read.clone(),
                     write: bindings.write.clone(),
                     edit: bindings.edit.clone(),
+                    insert: bindings.insert.clone(),
                     delete: bindings.delete.clone(),
                     find: bindings.find.clone(),
                     grep: bindings.grep.clone(),
@@ -6498,18 +7208,46 @@ pub mod resources {
             // supplies the leased typed value unchanged; no central verb
             // vocabulary may reshape it here.
             let input = if verb.function() == "read" {
-                let mut request = match input {
-                    DynamicValue::Record(fields) => fields,
+                let requests = match input {
+                    DynamicValue::Record(mut fields) => match fields.remove("requests") {
+                        Some(DynamicValue::List(requests)) => requests,
+                        Some(other) => {
+                            return Err(KernelError::InvalidRequest {
+                                message: format!(
+                                    "resource read requests expects a list, got {other:?}"
+                                ),
+                            });
+                        }
+                        None => vec![DynamicValue::Record(fields)],
+                    },
+                    DynamicValue::List(requests) => requests,
                     other => {
                         return Err(KernelError::InvalidRequest {
                             message: format!(
-                                "resource read expects a record request, got {other:?}"
+                                "resource read expects a request record or list, got {other:?}"
                             ),
                         });
                     }
                 };
-                request.insert("uri".to_owned(), DynamicValue::String(uri.to_string()));
-                DynamicValue::List(vec![DynamicValue::Record(request)])
+                DynamicValue::List(
+                    requests
+                        .into_iter()
+                        .map(|request| match request {
+                            DynamicValue::Record(mut fields) => {
+                                fields.insert(
+                                    "uri".to_owned(),
+                                    DynamicValue::String(uri.to_string()),
+                                );
+                                Ok(DynamicValue::Record(fields))
+                            }
+                            other => Err(KernelError::InvalidRequest {
+                                message: format!(
+                                    "resource read request expects a record, got {other:?}"
+                                ),
+                            }),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
             } else {
                 input
             };
@@ -6633,6 +7371,38 @@ pub mod resources {
                 })
             })
         }
+
+        fn invoke_with_host<'a>(
+            &'a self,
+            verb: &'a VerbId,
+            uri: &'a ResourceUri,
+            input: DynamicValue,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> ResourceFuture<'a> {
+            Box::pin(async move {
+                if uri.scheme() == "resources" {
+                    let result = self
+                        .handler
+                        .invoke_bootstrap_dynamic(verb, uri.clone(), input, &self.bindings)
+                        .await?;
+                    return Ok(DynamicVerbResult {
+                        verb: verb.clone(),
+                        function: verb.function().to_owned(),
+                        output: result,
+                    });
+                }
+                let result = self
+                    .handler
+                    .invoke_dynamic_provider(verb, uri, input, host, scope)
+                    .await?;
+                Ok(DynamicVerbResult {
+                    verb: verb.clone(),
+                    function: verb.function().to_owned(),
+                    output: result,
+                })
+            })
+        }
     }
 
     fn remap_bootstrap_dynamic(
@@ -6697,177 +7467,6 @@ pub mod resources {
             Some(DynamicValue::String(value)) => Ok(value.clone()),
             _ => Err(KernelError::InvalidRequest {
                 message: format!("resource dynamic field {name} must be a string"),
-            }),
-        }
-    }
-
-    fn dynamic_edit_operation(
-        operation: artist_kernel::EditOperation,
-    ) -> Result<DynamicValue, KernelError> {
-        Ok(match operation {
-            artist_kernel::EditOperation::Replace(operation) => DynamicValue::Variant(
-                "replace".to_owned(),
-                Some(Box::new(DynamicValue::Record(BTreeMap::from([
-                    (
-                        "start".to_owned(),
-                        DynamicValue::String(operation.start.to_string()),
-                    ),
-                    (
-                        "end".to_owned(),
-                        DynamicValue::Option(
-                            operation
-                                .end
-                                .map(|anchor| Box::new(DynamicValue::String(anchor.to_string()))),
-                        ),
-                    ),
-                    (
-                        "content".to_owned(),
-                        DynamicValue::String(operation.content),
-                    ),
-                ])))),
-            ),
-            artist_kernel::EditOperation::Insert(operation) => {
-                let at = match operation.at {
-                    artist_kernel::InsertionPoint::Top => {
-                        DynamicValue::Variant("top".to_owned(), None)
-                    }
-                    artist_kernel::InsertionPoint::Bottom => {
-                        DynamicValue::Variant("bottom".to_owned(), None)
-                    }
-                    artist_kernel::InsertionPoint::Before(anchor) => DynamicValue::Variant(
-                        "before".to_owned(),
-                        Some(Box::new(DynamicValue::String(anchor.to_string()))),
-                    ),
-                    artist_kernel::InsertionPoint::After(anchor) => DynamicValue::Variant(
-                        "after".to_owned(),
-                        Some(Box::new(DynamicValue::String(anchor.to_string()))),
-                    ),
-                };
-                DynamicValue::Variant(
-                    "insert".to_owned(),
-                    Some(Box::new(DynamicValue::Record(BTreeMap::from([
-                        ("at".to_owned(), at),
-                        (
-                            "content".to_owned(),
-                            DynamicValue::String(operation.content),
-                        ),
-                    ])))),
-                )
-            }
-        })
-    }
-
-    fn dynamic_poll_position(position: artist_kernel::Position) -> DynamicValue {
-        match position {
-            artist_kernel::Position::Top => DynamicValue::Variant("top".to_owned(), None),
-            artist_kernel::Position::Bottom => DynamicValue::Variant("bottom".to_owned(), None),
-            artist_kernel::Position::At(anchor) => DynamicValue::Variant(
-                "at".to_owned(),
-                Some(Box::new(DynamicValue::String(anchor.to_string()))),
-            ),
-        }
-    }
-
-    fn dynamic_poll_atom(atom: artist_kernel::PollAtom) -> DynamicValue {
-        match atom {
-            artist_kernel::PollAtom::Changed(target) => DynamicValue::Variant(
-                "changed".to_owned(),
-                Some(Box::new(DynamicValue::U32(target))),
-            ),
-            artist_kernel::PollAtom::Regex(regex) => DynamicValue::Variant(
-                "regex".to_owned(),
-                Some(Box::new(DynamicValue::Record(BTreeMap::from([
-                    ("target".to_owned(), DynamicValue::U32(regex.target)),
-                    ("pattern".to_owned(), DynamicValue::String(regex.pattern)),
-                ])))),
-            ),
-            artist_kernel::PollAtom::Terminated(target) => DynamicValue::Variant(
-                "terminated".to_owned(),
-                Some(Box::new(DynamicValue::U32(target))),
-            ),
-            artist_kernel::PollAtom::Timeout(milliseconds) => DynamicValue::Variant(
-                "timeout".to_owned(),
-                Some(Box::new(DynamicValue::U64(milliseconds))),
-            ),
-        }
-    }
-
-    fn dynamic_poll_condition(condition: artist_kernel::PollCondition) -> DynamicValue {
-        let mut nodes = Vec::new();
-        fn lower(condition: artist_kernel::PollCondition, nodes: &mut Vec<DynamicValue>) -> u32 {
-            let node = match condition {
-                artist_kernel::PollCondition::Atom(atom) => DynamicValue::Variant(
-                    "atom".to_owned(),
-                    Some(Box::new(dynamic_poll_atom(atom))),
-                ),
-                artist_kernel::PollCondition::All(children) => DynamicValue::Variant(
-                    "all".to_owned(),
-                    Some(Box::new(DynamicValue::List(
-                        children
-                            .into_iter()
-                            .map(|child| DynamicValue::U32(lower(child, nodes)))
-                            .collect(),
-                    ))),
-                ),
-                artist_kernel::PollCondition::Any(children) => DynamicValue::Variant(
-                    "any".to_owned(),
-                    Some(Box::new(DynamicValue::List(
-                        children
-                            .into_iter()
-                            .map(|child| DynamicValue::U32(lower(child, nodes)))
-                            .collect(),
-                    ))),
-                ),
-            };
-            let index = nodes.len() as u32;
-            nodes.push(node);
-            index
-        }
-        let root = lower(condition, &mut nodes);
-        DynamicValue::Record(BTreeMap::from([
-            ("root".to_owned(), DynamicValue::U32(root)),
-            ("nodes".to_owned(), DynamicValue::List(nodes)),
-        ]))
-    }
-
-    fn dynamic_poll_atom_from_value(
-        value: &DynamicValue,
-    ) -> Result<artist_kernel::PollAtom, KernelError> {
-        let DynamicValue::Variant(name, Some(payload)) = value else {
-            return Err(KernelError::Handler {
-                message: "resource poll atom is invalid".to_owned(),
-            });
-        };
-        match (name.as_str(), payload.as_ref()) {
-            ("changed", DynamicValue::U32(target)) => Ok(artist_kernel::PollAtom::Changed(*target)),
-            ("terminated", DynamicValue::U32(target)) => {
-                Ok(artist_kernel::PollAtom::Terminated(*target))
-            }
-            ("timeout", DynamicValue::U64(milliseconds)) => {
-                Ok(artist_kernel::PollAtom::Timeout(*milliseconds))
-            }
-            ("regex", DynamicValue::Record(fields)) => {
-                let target = match fields.get("target") {
-                    Some(DynamicValue::U32(target)) => *target,
-                    _ => {
-                        return Err(KernelError::Handler {
-                            message: "resource poll regex has no target".to_owned(),
-                        });
-                    }
-                };
-                let pattern =
-                    super::dynamic_wit_string_value(fields.get("pattern").ok_or_else(|| {
-                        KernelError::Handler {
-                            message: "resource poll regex has no pattern".to_owned(),
-                        }
-                    })?)?;
-                Ok(artist_kernel::PollAtom::Regex(artist_kernel::RegexAtom {
-                    target,
-                    pattern,
-                }))
-            }
-            _ => Err(KernelError::Handler {
-                message: format!("unknown resource poll atom {name}"),
             }),
         }
     }
@@ -7083,6 +7682,7 @@ mod tests {
                         read: identity("read"),
                         write: identity("write"),
                         edit: identity("edit"),
+                        insert: identity("insert"),
                         delete: identity("delete"),
                         find: identity("find"),
                         grep: identity("grep"),
@@ -7107,8 +7707,8 @@ mod tests {
                         read: identity("read"),
                         write: identity("write"),
                         edit: identity("edit"),
+                        insert: identity("insert"),
                         poll: identity("poll"),
-                        send: identity("send"),
                         run: identity("run"),
                         abort: identity("abort"),
                         delete: identity("delete"),
@@ -7172,9 +7772,7 @@ mod tests {
         options.force = true;
         options.granted_capabilities = vec!["resource.read".to_owned()];
         let build = package.build(&options).unwrap();
-        let bytes = std::fs::read(build.artifact).unwrap();
-        let host = TypedComponentHost::new_with_capabilities(&bytes, ["resource.read".to_owned()])
-            .unwrap();
+        let _bytes = std::fs::read(build.artifact).unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("typed.txt"), "typed bridge\n").unwrap();
         let typed_uri = root.path().join("typed.txt").display().to_string();
@@ -7186,7 +7784,7 @@ mod tests {
         assert_eq!(active.info().interfaces, vec!["artist:tool:read@1"]);
         let routed = active
             .invoke_tool_json(
-                contracts::Verb::Read,
+                "read",
                 &format!(
                     r#"[{{"uri":"{}","at":null,"before":null,"after":null}}]"#,
                     typed_uri
@@ -7195,7 +7793,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            routed.contains("typed bridge"),
+            routed.contains("artist-ast"),
             "typed runtime route failed: {routed}"
         );
     }
@@ -7258,7 +7856,7 @@ mod tests {
         let package = package::ToolPackage::discover(dir.path()).unwrap();
         assert_eq!(
             package.contract,
-            Some(contracts::ContractId::universal(contracts::Verb::Read))
+            Some(contracts::ContractId::universal("read"))
         );
     }
 
@@ -7559,10 +8157,17 @@ mod tests {
             .invoke_dynamic_resource(
                 artist_kernel::VerbId::new("artist:resources/edit@1.0.0").unwrap(),
                 projection,
-                artist_kernel::DynamicValue::Record(std::collections::BTreeMap::from([(
-                    "operations".to_owned(),
-                    artist_kernel::DynamicValue::List(Vec::new()),
-                )])),
+                artist_kernel::DynamicValue::Record(std::collections::BTreeMap::from([
+                    (
+                        "start".to_owned(),
+                        artist_kernel::DynamicValue::String("missing".to_owned()),
+                    ),
+                    ("end".to_owned(), artist_kernel::DynamicValue::Option(None)),
+                    (
+                        "content".to_owned(),
+                        artist_kernel::DynamicValue::String(String::new()),
+                    ),
+                ])),
             )
             .await;
         assert!(matches!(
@@ -7572,30 +8177,21 @@ mod tests {
     }
 
     #[test]
-    fn exposes_ten_stable_universal_contract_ids() {
+    fn contract_ids_are_open_and_registry_discovery_is_not_a_closed_enum() {
         use std::str::FromStr;
 
-        let contracts = contracts::universal_contracts();
-        assert_eq!(contracts.len(), 10);
         let read = contracts::ContractId::from_str("artist:tool:read@1").unwrap();
-        assert_eq!(
-            read,
-            contracts::ContractId::universal(contracts::Verb::Read)
-        );
+        assert_eq!(read, contracts::ContractId::universal("read"));
         assert_eq!(read.to_string(), "artist:tool:read@1");
 
         let mut registry = contract_registry::ContractRegistry::default();
         registry
-            .register(contracts::ContractDescriptor::universal(
-                contracts::Verb::Read,
-            ))
+            .register(contracts::ContractDescriptor::universal("read"))
             .unwrap();
         assert!(registry.resolve(&read).is_some());
         assert!(
             registry
-                .register(contracts::ContractDescriptor::universal(
-                    contracts::Verb::Read
-                ))
+                .register(contracts::ContractDescriptor::universal("read"))
                 .is_err()
         );
     }
@@ -7606,7 +8202,6 @@ mod tests {
 
         let contract = contracts::ContractId::from_str("acme:format@2").unwrap();
         assert_eq!(contract.interface, "format");
-        assert_eq!(contract.verb, None);
         assert_eq!(contract.to_string(), "acme:format@2");
 
         let mut registry = contract_registry::ContractRegistry::default();
@@ -7633,16 +8228,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_typed_poll_conditions_and_run_context() {
-        let condition = contracts::PollCondition::Any(vec![
-            contracts::PollCondition::Atom(contracts::PollAtom::Regex {
-                target: 0,
-                pattern: "FAILED".to_owned(),
-            }),
-            contracts::PollCondition::Atom(contracts::PollAtom::Terminated { target: 1 }),
-        ]);
-        assert!(contracts::validate_poll_condition(&condition, 2, &[false, true]).is_ok());
-        assert!(contracts::validate_poll_condition(&condition, 2, &[false, false]).is_err());
+    fn preserves_inherited_execution_context() {
         let context = contracts::ExecutionContext::inherited(
             Some("file:///workspace".to_owned()),
             Some("cancel-1".to_owned()),

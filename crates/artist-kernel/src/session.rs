@@ -81,7 +81,6 @@ pub struct SessionHandler {
 pub struct SessionVerbBindings {
     pub read: VerbId,
     pub write: VerbId,
-    pub send: VerbId,
     pub poll: VerbId,
     pub abort: VerbId,
     pub delete: VerbId,
@@ -193,7 +192,6 @@ impl DynamicClaimProvider for SessionResourceProvider {
         let supported = [
             &self.bindings.read,
             &self.bindings.write,
-            &self.bindings.send,
             &self.bindings.poll,
             &self.bindings.abort,
             &self.bindings.delete,
@@ -219,13 +217,14 @@ impl DynamicResourceProvider for SessionResourceProvider {
             let output = if verb == &self.bindings.read {
                 self.handler.dynamic_read(uri.clone()).await?
             } else if verb == &self.bindings.write {
-                self.handler.dynamic_write(uri.clone()).await?
-            } else if verb == &self.bindings.send {
-                self.handler
-                    .dynamic_send(uri.clone(), session_content(&input)?)
-                    .await?
+                let content = if uri.path().ends_with("/inbox") {
+                    session_content(&input)?
+                } else {
+                    String::new()
+                };
+                self.handler.dynamic_write(uri.clone(), content).await?
             } else if verb == &self.bindings.poll {
-                self.handler.dynamic_poll(uri.clone()).await?
+                self.handler.dynamic_poll(uri.clone(), input).await?
             } else if verb == &self.bindings.abort {
                 self.handler.dynamic_abort(uri.clone()).await?
             } else if verb == &self.bindings.delete {
@@ -247,30 +246,32 @@ impl DynamicResourceProvider for SessionResourceProvider {
 
 impl SessionHandler {
     async fn dynamic_read(&self, uri: ResourceUri) -> Result<DynamicValue, KernelError> {
-        let session = self.lookup(&ResourceAddress::uri(uri.clone())).await?;
+        let session = self
+            .lookup(&ResourceAddress::uri(session_root(&uri)?))
+            .await?;
         let state = session.state.lock().await;
         let text = session_read_window(&uri, &snapshot(&state, 0), None, None, None)?;
         Ok(session_text(text))
     }
 
-    async fn dynamic_write(&self, uri: ResourceUri) -> Result<DynamicValue, KernelError> {
-        self.create(&ResourceAddress::uri(uri.clone())).await?;
-        Ok(session_text(AnchoredText {
-            uri,
-            lines: Vec::new(),
-        }))
-    }
-
-    async fn dynamic_send(
+    async fn dynamic_write(
         &self,
         uri: ResourceUri,
         content: String,
     ) -> Result<DynamicValue, KernelError> {
-        let session = self.lookup(&ResourceAddress::uri(uri.clone())).await?;
+        if !uri.path().ends_with("/inbox") {
+            self.create(&ResourceAddress::uri(uri.clone())).await?;
+            return Ok(session_text(AnchoredText {
+                uri,
+                lines: Vec::new(),
+            }));
+        }
+        let target = ResourceUri::parse(uri.to_string().trim_end_matches("/inbox"))?;
+        let session = self.lookup(&ResourceAddress::uri(target)).await?;
         let mut state = session.state.lock().await;
         if state.status.terminal() {
             return Err(KernelError::InvalidRequest {
-                message: "cannot send to an aborted session".to_owned(),
+                message: "cannot write to an aborted session".to_owned(),
             });
         }
         let seq = state.next_seq;
@@ -285,34 +286,75 @@ impl SessionHandler {
         Ok(DynamicValue::ResourceUri(uri))
     }
 
-    async fn dynamic_poll(&self, uri: ResourceUri) -> Result<DynamicValue, KernelError> {
-        let session = self.lookup(&ResourceAddress::uri(uri.clone())).await?;
+    async fn dynamic_poll(
+        &self,
+        uri: ResourceUri,
+        input: DynamicValue,
+    ) -> Result<DynamicValue, KernelError> {
+        let session = self
+            .lookup(&ResourceAddress::uri(session_root(&uri)?))
+            .await?;
+        let (pattern, timeout_ms) = poll_options(&input)?;
+        let matcher = pattern
+            .as_deref()
+            .map(regex::Regex::new)
+            .transpose()
+            .map_err(|error| KernelError::InvalidPattern {
+                message: error.to_string(),
+            })?;
+        let timeout = timeout_ms.map(std::time::Duration::from_millis);
         loop {
             let notified = session.changed.notified();
             let state = session.state.lock().await;
-            if state.status.terminal() || !state.events.is_empty() {
+            let accumulated = state
+                .events
+                .iter()
+                .map(|event| event.data.as_str())
+                .collect::<String>();
+            let matched = matcher
+                .as_ref()
+                .is_some_and(|matcher| matcher.is_match(&accumulated));
+            if state.status.terminal() || matched || (matcher.is_none() && !state.events.is_empty())
+            {
                 let value = snapshot(&state, 0);
                 let text = anchored_session_window(&uri, &value, None, None)?;
-                let satisfied = if state.status.terminal() {
-                    vec![DynamicValue::String("terminated".to_owned())]
+                let reason = if matched {
+                    "matched"
+                } else if state.status.terminal() {
+                    "terminated"
                 } else {
-                    vec![DynamicValue::String("changed".to_owned())]
+                    "changed"
                 };
                 return Ok(DynamicValue::Record(BTreeMap::from([
-                    (
-                        "text".to_owned(),
-                        DynamicValue::List(vec![session_text(text)]),
-                    ),
-                    ("satisfied".to_owned(), DynamicValue::List(satisfied)),
+                    ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+                    ("text".to_owned(), session_text(text)),
+                    ("reason".to_owned(), DynamicValue::String(reason.to_owned())),
                 ])));
             }
             drop(state);
-            notified.await;
+            if let Some(timeout) = timeout {
+                if tokio::time::timeout(timeout, notified).await.is_err() {
+                    let state = session.state.lock().await;
+                    let text = anchored_session_window(&uri, &snapshot(&state, 0), None, None)?;
+                    return Ok(DynamicValue::Record(BTreeMap::from([
+                        ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+                        ("text".to_owned(), session_text(text)),
+                        (
+                            "reason".to_owned(),
+                            DynamicValue::String("timeout".to_owned()),
+                        ),
+                    ])));
+                }
+            } else {
+                notified.await;
+            }
         }
     }
 
     async fn dynamic_abort(&self, uri: ResourceUri) -> Result<DynamicValue, KernelError> {
-        let session = self.lookup(&ResourceAddress::uri(uri.clone())).await?;
+        let session = self
+            .lookup(&ResourceAddress::uri(session_root(&uri)?))
+            .await?;
         let mut state = session.state.lock().await;
         state.status = Status::Aborted;
         drop(state);
@@ -321,11 +363,23 @@ impl SessionHandler {
     }
 
     async fn dynamic_delete(&self, uri: ResourceUri) -> Result<DynamicValue, KernelError> {
-        let key = uri.to_string();
+        let key = session_root(&uri)?.to_string();
         if self.sessions.write().await.remove(&key).is_none() {
             return Err(KernelError::NotFound { uri: key });
         }
         Ok(DynamicValue::ResourceUri(uri))
+    }
+}
+
+fn session_root(uri: &ResourceUri) -> Result<ResourceUri, KernelError> {
+    if uri.path().ends_with("/inbox") {
+        ResourceUri::parse(uri.to_string().trim_end_matches("/inbox")).map_err(|error| {
+            KernelError::InvalidUri {
+                message: error.to_string(),
+            }
+        })
+    } else {
+        Ok(uri.clone())
     }
 }
 
@@ -336,13 +390,56 @@ fn session_content(input: &DynamicValue) -> Result<String, KernelError> {
         {
             Some(DynamicValue::String(value)) => Ok(value.clone()),
             _ => Err(KernelError::InvalidRequest {
-                message: "session send requires a content string".to_owned(),
+                message: "session inbox requires a content string".to_owned(),
             }),
         },
         _ => Err(KernelError::InvalidRequest {
-            message: "session send requires a content string".to_owned(),
+            message: "session inbox requires a content string".to_owned(),
         }),
     }
+}
+
+fn poll_options(input: &DynamicValue) -> Result<(Option<String>, Option<u64>), KernelError> {
+    let DynamicValue::Record(fields) = input else {
+        return Ok((None, None));
+    };
+    let pattern = match fields.get("match") {
+        None | Some(DynamicValue::Option(None)) => None,
+        Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+            DynamicValue::String(value) => Some(value.clone()),
+            _ => {
+                return Err(KernelError::InvalidPattern {
+                    message: "poll match must be a string".into(),
+                });
+            }
+        },
+        Some(DynamicValue::String(value)) => Some(value.clone()),
+        _ => {
+            return Err(KernelError::InvalidPattern {
+                message: "poll match must be a string".into(),
+            });
+        }
+    };
+    let timeout_ms = match fields.get("timeout-ms") {
+        None | Some(DynamicValue::Option(None)) => None,
+        Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+            DynamicValue::U64(value) => Some(*value),
+            DynamicValue::S64(value) if *value >= 0 => Some(*value as u64),
+            _ => {
+                return Err(KernelError::InvalidRequest {
+                    message: "poll timeout-ms must be u64".into(),
+                });
+            }
+        },
+        Some(DynamicValue::U64(value)) => Some(*value),
+        Some(DynamicValue::S64(value)) if *value >= 0 => Some(*value as u64),
+        _ => {
+            return Err(KernelError::InvalidRequest {
+                message: "poll timeout-ms must be u64".into(),
+            });
+        }
+    };
+    Ok((pattern, timeout_ms))
 }
 
 fn session_line(line: AnchoredLine) -> DynamicValue {

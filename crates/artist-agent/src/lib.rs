@@ -35,7 +35,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use capture::{CaptureHook, ToolMeta};
-use resource_tool::named_tools;
+use resource_tool::{BatchedRunEvent, named_tools, run_batched_agent};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -407,16 +407,15 @@ where
             deadline_ms: None,
             correlation_id: Some(run_id.clone()),
         };
+        let dynamic_tools = named_tools(
+            handles.kernel.clone(),
+            invocation_context.clone(),
+            handles.cancel.clone(),
+        )
+        .await;
         let agent = builder
             .preamble(&system_prompt)
-            .dynamic_tools(
-                named_tools(
-                    handles.kernel.clone(),
-                    invocation_context,
-                    handles.cancel.clone(),
-                )
-                .await,
-            )
+            .dynamic_tools(dynamic_tools.clone())
             .memory(attempt_memory)
             .conversation(handles.conversation_id.clone())
             .add_hook(steering::SteeringHook(handles.steering.clone()))
@@ -429,6 +428,93 @@ where
             model: model.to_owned(),
             reasoning_effort: provider.reasoning_effort.clone(),
         });
+
+        // The sans-IO driver receives the entire CallTools set from Rig's
+        // AgentRun and executes it through Artist's grouped batch boundary.
+        // This is the only execution path for the configured agent.
+        if batched_driver_enabled() {
+            let output = run_batched_agent(
+                client.completion_model(model),
+                seed_prompt.clone(),
+                seed_history.clone(),
+                Some(system_prompt),
+                dynamic_tools,
+                handles.kernel.clone(),
+                invocation_context,
+                handles.cancel.clone(),
+                |event| match event {
+                    BatchedRunEvent::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    } => on_event(PromptEvent::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    })
+                    .map_err(|error| error.to_string()),
+                    BatchedRunEvent::ToolExecutionStart { id, name } => {
+                        handles
+                            .lifecycle
+                            .emit(LifecycleEvent::ToolStarted(format!("main:{id}")));
+                        on_event(PromptEvent::ToolExecutionStart { id, name })
+                            .map_err(|error| error.to_string())
+                    }
+                    BatchedRunEvent::ToolResult {
+                        id,
+                        content,
+                        duration_ms,
+                    } => {
+                        let steering = handles.steering.take_for_batched();
+                        let content = if steering.is_empty() {
+                            content
+                        } else {
+                            format!(
+                                "{}\n\n{}",
+                                content,
+                                steering
+                                    .iter()
+                                    .map(|message| {
+                                        format!("<user_steering>\n{message}\n</user_steering>")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n")
+                            )
+                        };
+                        handles
+                            .lifecycle
+                            .emit(LifecycleEvent::ToolFinished(format!("main:{id}")));
+                        on_event(PromptEvent::ToolResult {
+                            id,
+                            content,
+                            outcome: None,
+                            duration_ms: Some(duration_ms),
+                            images: 0,
+                        })
+                        .map_err(|error| error.to_string())
+                    }
+                    BatchedRunEvent::Text(text) => {
+                        on_event(PromptEvent::TextDelta(text)).map_err(|error| error.to_string())
+                    }
+                    BatchedRunEvent::Reasoning(reasoning) => {
+                        on_event(PromptEvent::ReasoningSummaryDelta(reasoning))
+                            .map_err(|error| error.to_string())
+                    }
+                },
+            )
+            .await
+            .map_err(|error| anyhow!(error))?;
+            handles
+                .memory
+                .append(
+                    &handles.conversation_id,
+                    vec![seed_prompt.clone(), Message::assistant(output)],
+                )
+                .await
+                .context("persist batched agent turn")?;
+            run_recorder.record(RunFinished::Completed);
+            return Ok(RunOutcome::Completed);
+        }
 
         let mut stream = agent.stream_prompt(seed_prompt.clone()).await;
         let mut streamed_assistant_text = String::new();
@@ -634,6 +720,10 @@ where
             }
         }
     }
+}
+
+fn batched_driver_enabled() -> bool {
+    true
 }
 
 /// Provider parameters shared by every request attempt in a turn.

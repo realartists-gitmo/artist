@@ -1,6 +1,9 @@
 package artist:tool@1.0.0;
 interface find {
-    use artist:%resource/types@1.0.0.{find-request, uri, error};
-    find: func(request: find-request) -> result<list<uri>, error>;
+    use artist:%resource/types@1.0.0.{error, uri};
+    record find-request { root: uri, query: string }
+    record find-response { uris: list<uri> }
+    find: func(requests: list<find-request>) -> list<result<find-response, error>>;
+    observe: func(response: result<find-response, error>) -> string;
 }
 world tool-world { export find; }

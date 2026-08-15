@@ -19,8 +19,8 @@ async fn resources_handler_is_available_through_dynamic_resource_registry() {
             read: read.clone(),
             write: VerbId::new("artist:resource/write@1.0.0").unwrap(),
             edit: VerbId::new("artist:resource/edit@1.0.0").unwrap(),
+            insert: VerbId::new("artist:resource/insert@1.0.0").unwrap(),
             poll: VerbId::new("artist:resource/poll@1.0.0").unwrap(),
-            send: VerbId::new("artist:resource/send@1.0.0").unwrap(),
             run: VerbId::new("artist:resource/run@1.0.0").unwrap(),
             abort: VerbId::new("artist:resource/abort@1.0.0").unwrap(),
             delete: VerbId::new("artist:resource/delete@1.0.0").unwrap(),
@@ -60,17 +60,11 @@ async fn resources_handler_is_available_through_dynamic_resource_registry() {
         .invoke(
             &edit,
             &uri,
-            DynamicValue::Record(BTreeMap::from([(
-                "operations".into(),
-                DynamicValue::List(vec![DynamicValue::Variant(
-                    "replace".into(),
-                    Some(Box::new(DynamicValue::Record(BTreeMap::from([
-                        ("start".into(), anchor),
-                        ("end".into(), DynamicValue::Option(None)),
-                        ("content".into(), DynamicValue::String("edited docs".into())),
-                    ])))),
-                )]),
-            )])),
+            DynamicValue::Record(BTreeMap::from([
+                ("start".into(), anchor),
+                ("end".into(), DynamicValue::Option(None)),
+                ("content".into(), DynamicValue::String("edited docs".into())),
+            ])),
         )
         .await
         .unwrap();

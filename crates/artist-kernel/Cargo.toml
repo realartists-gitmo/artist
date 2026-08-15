@@ -20,6 +20,7 @@ teca = "1.0.0"
 fff-search = { path = "../../vendor/fff/crates/fff-core" }
 regex = "1"
 futures = "0.3"
+libc = "0.2"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 wit-parser = "0.254.0"

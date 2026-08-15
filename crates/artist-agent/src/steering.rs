@@ -54,6 +54,17 @@ impl SteeringHandle {
         self.lock().delivered.drain(..).collect()
     }
 
+    /// Consume steering at the explicit batched-driver tool-result boundary.
+    /// The normal Rig hook performs the same transition; the Artist-owned
+    /// AgentRun driver calls this equivalent operation because it deliberately
+    /// owns the complete sibling result set.
+    pub(crate) fn take_for_batched(&self) -> Vec<String> {
+        let mut state = self.lock();
+        let messages = state.pending.drain(..).collect::<Vec<_>>();
+        state.delivered.extend(messages.iter().cloned());
+        messages
+    }
+
     pub(crate) fn take_original_result(&self, internal_call_id: &str) -> Option<String> {
         self.lock().original_results.remove(internal_call_id)
     }

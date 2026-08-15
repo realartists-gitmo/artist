@@ -1,13 +1,13 @@
 [package]
-name = "artist-tool-send"
+name = "artist-tool-insert"
 version = "0.1.0"
 edition = "2024"
 
 [workspace]
 
 [features]
-default = ["send"]
-send = []
+default = ["insert"]
+insert = []
 
 [lib]
 path = "src/lib.rs"

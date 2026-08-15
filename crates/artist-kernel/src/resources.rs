@@ -3,10 +3,25 @@ use crate::{
     ClaimDecision, DynamicClaimProvider, DynamicValue, DynamicVerbResult, KernelError, ResourceUri,
     VerbId,
 };
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 pub type ResourceFuture<'a> =
     Pin<Box<dyn Future<Output = Result<DynamicVerbResult, KernelError>> + Send + 'a>>;
+pub type ResourceBatchFuture<'a> =
+    Pin<Box<dyn Future<Output = Vec<Result<DynamicVerbResult, KernelError>>> + Send + 'a>>;
+
+#[derive(Clone, Debug)]
+pub struct ResourceRequest {
+    pub uri: ResourceUri,
+    pub input: DynamicValue,
+}
+
+#[derive(Clone, Debug)]
+pub struct MixedResourceRequest {
+    pub verb: VerbId,
+    pub uri: ResourceUri,
+    pub input: DynamicValue,
+}
 
 pub trait DynamicResourceProvider: DynamicClaimProvider + Send + Sync {
     fn invoke<'a>(
@@ -15,6 +30,27 @@ pub trait DynamicResourceProvider: DynamicClaimProvider + Send + Sync {
         uri: &'a ResourceUri,
         input: DynamicValue,
     ) -> ResourceFuture<'a>;
+
+    fn invoke_with_host<'a>(
+        &'a self,
+        verb: &'a VerbId,
+        uri: &'a ResourceUri,
+        input: DynamicValue,
+        _host: crate::KernelHandle,
+        _scope: crate::InvocationScope,
+    ) -> ResourceFuture<'a> {
+        self.invoke(verb, uri, input)
+    }
+
+    fn invoke_batch_with_host<'a>(
+        &'a self,
+        verb: &'a VerbId,
+        requests: Vec<ResourceRequest>,
+        _host: crate::KernelHandle,
+        scope: crate::InvocationScope,
+    ) -> ResourceBatchFuture<'a> {
+        self.invoke_batch(verb, requests, scope)
+    }
 
     /// Invoke a resource after the caller has pinned the active verb
     /// generation. Providers which keep their own replaceable resource
@@ -29,6 +65,50 @@ pub trait DynamicResourceProvider: DynamicClaimProvider + Send + Sync {
     ) -> ResourceFuture<'a> {
         let _ = generation;
         self.invoke(verb, uri, input)
+    }
+
+    fn invoke_batch<'a>(
+        &'a self,
+        verb: &'a VerbId,
+        requests: Vec<ResourceRequest>,
+        scope: crate::InvocationScope,
+    ) -> ResourceBatchFuture<'a> {
+        Box::pin(async move {
+            let mut results = Vec::with_capacity(requests.len());
+            for request in requests {
+                if scope.cancellation.is_cancelled() {
+                    results.push(Err(KernelError::Aborted {
+                        message: "resource batch cancelled".to_owned(),
+                    }));
+                    continue;
+                }
+                results.push(self.invoke(verb, &request.uri, request.input).await);
+            }
+            results
+        })
+    }
+
+    fn invoke_mixed_batch<'a>(
+        &'a self,
+        requests: Vec<MixedResourceRequest>,
+        scope: crate::InvocationScope,
+    ) -> ResourceBatchFuture<'a> {
+        Box::pin(async move {
+            let mut results = Vec::with_capacity(requests.len());
+            for request in requests {
+                if scope.cancellation.is_cancelled() {
+                    results.push(Err(KernelError::Aborted {
+                        message: "resource batch cancelled".to_owned(),
+                    }));
+                } else {
+                    results.push(
+                        self.invoke(&request.verb, &request.uri, request.input)
+                            .await,
+                    );
+                }
+            }
+            results
+        })
     }
 }
 
@@ -71,9 +151,13 @@ impl ResourceRegistry {
         uri: &ResourceUri,
         generation: u64,
     ) -> Result<crate::ClaimedResource, KernelError> {
-        let providers = self.providers.read().map_err(|_| KernelError::Handler {
-            message: "resource registry lock poisoned".into(),
-        })?;
+        let providers = self
+            .providers
+            .read()
+            .map_err(|_| KernelError::Handler {
+                message: "resource registry lock poisoned".into(),
+            })?
+            .clone();
         let mut handles = 0usize;
         let mut reserved = false;
         for provider in providers.iter() {
@@ -174,6 +258,341 @@ impl ResourceRegistry {
         provider
             .invoke_at_generation(verb, uri, generation, input)
             .await
+    }
+
+    pub async fn invoke_with_host(
+        &self,
+        verb: &VerbId,
+        uri: &ResourceUri,
+        input: DynamicValue,
+        host: crate::KernelHandle,
+        scope: crate::InvocationScope,
+    ) -> Result<DynamicVerbResult, KernelError> {
+        let providers = self
+            .providers
+            .read()
+            .map_err(|_| KernelError::Handler {
+                message: "resource registry lock poisoned".into(),
+            })?
+            .clone();
+        let mut selected = None;
+        let mut count = 0;
+        for (index, provider) in providers.iter().enumerate() {
+            if matches!(provider.claim(verb, uri), ClaimDecision::Handle) {
+                selected = Some(index);
+                count += 1;
+            }
+        }
+        match (count, selected) {
+            (1, Some(index)) => {
+                providers[index]
+                    .invoke_with_host(verb, uri, input, host, scope)
+                    .await
+            }
+            (count, _) if count > 1 => {
+                for provider in providers.iter() {
+                    if !matches!(provider.claim(verb, uri), ClaimDecision::Handle) {
+                        continue;
+                    }
+                    match provider
+                        .invoke_with_host(verb, uri, input.clone(), host.clone(), scope.child())
+                        .await
+                    {
+                        Err(KernelError::UnsupportedVerb { .. }) => continue,
+                        result => return result,
+                    }
+                }
+                Err(KernelError::Conflict {
+                    uri: uri.to_string(),
+                })
+            }
+            _ => Err(KernelError::UnsupportedVerb {
+                verb: verb.to_string(),
+                uri: uri.to_string(),
+            }),
+        }
+    }
+
+    pub async fn invoke_batch(
+        &self,
+        verb: &VerbId,
+        requests: Vec<ResourceRequest>,
+        scope: crate::InvocationScope,
+    ) -> Vec<Result<DynamicVerbResult, KernelError>> {
+        let mut groups: BTreeMap<usize, (Arc<dyn DynamicResourceProvider>, Vec<ResourceRequest>)> =
+            BTreeMap::new();
+        let providers = match self.providers.read() {
+            Ok(providers) => providers.clone(),
+            Err(_) => {
+                return requests
+                    .into_iter()
+                    .map(|_| {
+                        Err(KernelError::Handler {
+                            message: "resource registry lock poisoned".into(),
+                        })
+                    })
+                    .collect();
+            }
+        };
+        let mut assignments = Vec::with_capacity(requests.len());
+        for request in requests {
+            let mut selected = None;
+            let mut count = 0;
+            for (index, provider) in providers.iter().enumerate() {
+                if matches!(provider.claim(verb, &request.uri), ClaimDecision::Handle) {
+                    selected = Some(index);
+                    count += 1;
+                }
+            }
+            if count == 1 {
+                let Some(index) = selected else {
+                    assignments.push(Err(KernelError::Handler {
+                        message: "resource arbitration selected no provider".to_owned(),
+                    }));
+                    continue;
+                };
+                assignments.push(Ok(index));
+                groups
+                    .entry(index)
+                    .or_insert_with(|| (Arc::clone(&providers[index]), Vec::new()))
+                    .1
+                    .push(request);
+            } else if count > 1 {
+                assignments.push(Err(KernelError::Conflict {
+                    uri: request.uri.to_string(),
+                }));
+            } else {
+                assignments.push(Err(KernelError::UnsupportedVerb {
+                    verb: verb.to_string(),
+                    uri: request.uri.to_string(),
+                }));
+            }
+        }
+        let mut grouped = BTreeMap::new();
+        for (index, (provider, requests)) in groups {
+            grouped.insert(
+                index,
+                provider.invoke_batch(verb, requests, scope.child()).await,
+            );
+        }
+        let mut offsets = BTreeMap::<usize, usize>::new();
+        assignments
+            .into_iter()
+            .map(|assignment| match assignment {
+                Err(error) => Err(error),
+                Ok(index) => {
+                    let offset = offsets.entry(index).or_insert(0);
+                    let result = grouped.get_mut(&index).and_then(|results| {
+                        let result = results.get(*offset).cloned();
+                        *offset += 1;
+                        result
+                    });
+                    result.unwrap_or_else(|| {
+                        Err(KernelError::Handler {
+                            message: "resource provider returned the wrong batch length".to_owned(),
+                        })
+                    })
+                }
+            })
+            .collect()
+    }
+
+    pub async fn invoke_batch_with_host(
+        &self,
+        verb: &VerbId,
+        requests: Vec<ResourceRequest>,
+        host: crate::KernelHandle,
+        scope: crate::InvocationScope,
+    ) -> Vec<Result<DynamicVerbResult, KernelError>> {
+        let providers = match self.providers.read() {
+            Ok(providers) => providers.clone(),
+            Err(_) => {
+                return requests
+                    .into_iter()
+                    .map(|_| {
+                        Err(KernelError::Handler {
+                            message: "resource registry lock poisoned".into(),
+                        })
+                    })
+                    .collect();
+            }
+        };
+        let mut groups: BTreeMap<usize, Vec<ResourceRequest>> = BTreeMap::new();
+        enum Assignment {
+            Group(usize),
+            Immediate(Result<DynamicVerbResult, KernelError>),
+        }
+        let mut assignments = Vec::with_capacity(requests.len());
+        for request in requests {
+            if scope.cancellation.is_cancelled() {
+                assignments.push(Assignment::Immediate(Err(KernelError::Aborted {
+                    message: "resource batch cancelled".into(),
+                })));
+            } else {
+                let mut selected = None;
+                let mut count = 0;
+                for (index, provider) in providers.iter().enumerate() {
+                    if matches!(provider.claim(verb, &request.uri), ClaimDecision::Handle) {
+                        selected = Some(index);
+                        count += 1;
+                    }
+                }
+                let result = match (count, selected) {
+                    (1, Some(index)) => {
+                        groups.entry(index).or_default().push(request);
+                        Assignment::Group(index)
+                    }
+                    (count, _) if count > 1 => {
+                        let mut fallback = None;
+                        for provider in providers.iter() {
+                            if !matches!(provider.claim(verb, &request.uri), ClaimDecision::Handle)
+                            {
+                                continue;
+                            }
+                            match provider
+                                .invoke_with_host(
+                                    verb,
+                                    &request.uri,
+                                    request.input.clone(),
+                                    host.clone(),
+                                    scope.child(),
+                                )
+                                .await
+                            {
+                                Err(KernelError::UnsupportedVerb { .. }) => continue,
+                                result => {
+                                    fallback = Some(result);
+                                    break;
+                                }
+                            }
+                        }
+                        Assignment::Immediate(fallback.unwrap_or_else(|| {
+                            Err(KernelError::Conflict {
+                                uri: request.uri.to_string(),
+                            })
+                        }))
+                    }
+                    _ => Assignment::Immediate(Err(KernelError::UnsupportedVerb {
+                        verb: verb.to_string(),
+                        uri: request.uri.to_string(),
+                    })),
+                };
+                assignments.push(result);
+            }
+        }
+        let mut grouped = BTreeMap::new();
+        for (index, requests) in groups {
+            grouped.insert(
+                index,
+                providers[index]
+                    .invoke_batch_with_host(verb, requests, host.clone(), scope.child())
+                    .await,
+            );
+        }
+        let mut offsets = BTreeMap::<usize, usize>::new();
+        assignments
+            .into_iter()
+            .map(|assignment| match assignment {
+                Assignment::Immediate(result) => result,
+                Assignment::Group(index) => {
+                    let offset = offsets.entry(index).or_insert(0);
+                    let result = grouped.get_mut(&index).and_then(|results| {
+                        let result = results.get(*offset).cloned();
+                        *offset += 1;
+                        result
+                    });
+                    result.unwrap_or_else(|| {
+                        Err(KernelError::Handler {
+                            message: "resource provider returned the wrong batch length".into(),
+                        })
+                    })
+                }
+            })
+            .collect()
+    }
+
+    pub async fn invoke_mixed_batch(
+        &self,
+        requests: Vec<MixedResourceRequest>,
+        scope: crate::InvocationScope,
+    ) -> Vec<Result<DynamicVerbResult, KernelError>> {
+        let providers = match self.providers.read() {
+            Ok(providers) => providers.clone(),
+            Err(_) => {
+                return requests
+                    .into_iter()
+                    .map(|_| {
+                        Err(KernelError::Handler {
+                            message: "resource registry lock poisoned".into(),
+                        })
+                    })
+                    .collect();
+            }
+        };
+        let mut assignments = Vec::with_capacity(requests.len());
+        let mut groups: BTreeMap<
+            usize,
+            (Arc<dyn DynamicResourceProvider>, Vec<MixedResourceRequest>),
+        > = BTreeMap::new();
+        for request in requests {
+            let selected = providers
+                .iter()
+                .enumerate()
+                .filter(|(_, provider)| {
+                    matches!(
+                        provider.claim(&request.verb, &request.uri),
+                        ClaimDecision::Handle
+                    )
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if selected.len() == 1 {
+                let index = selected[0];
+                assignments.push(Ok(index));
+                groups
+                    .entry(index)
+                    .or_insert_with(|| (Arc::clone(&providers[index]), Vec::new()))
+                    .1
+                    .push(request);
+            } else if selected.len() > 1 {
+                assignments.push(Err(KernelError::Conflict {
+                    uri: request.uri.to_string(),
+                }));
+            } else {
+                assignments.push(Err(KernelError::UnsupportedVerb {
+                    verb: request.verb.to_string(),
+                    uri: request.uri.to_string(),
+                }));
+            }
+        }
+        let mut grouped = BTreeMap::new();
+        for (index, (provider, requests)) in groups {
+            grouped.insert(
+                index,
+                provider.invoke_mixed_batch(requests, scope.child()).await,
+            );
+        }
+        let mut offsets = BTreeMap::<usize, usize>::new();
+        assignments
+            .into_iter()
+            .map(|assignment| match assignment {
+                Err(error) => Err(error),
+                Ok(index) => {
+                    let offset = offsets.entry(index).or_insert(0);
+                    let result = grouped.get_mut(&index).and_then(|results| {
+                        let result = results.get(*offset).cloned();
+                        *offset += 1;
+                        result
+                    });
+                    result.unwrap_or_else(|| {
+                        Err(KernelError::Handler {
+                            message: "resource provider returned the wrong mixed batch length"
+                                .into(),
+                        })
+                    })
+                }
+            })
+            .collect()
     }
 }
 

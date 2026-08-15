@@ -135,6 +135,7 @@ async fn filesystem_provider_executes_delete_through_dynamic_resource_routing() 
                 read: VerbId::new("artist:filesystem/read@1.0.0").unwrap(),
                 write: VerbId::new("artist:filesystem/write@1.0.0").unwrap(),
                 edit: VerbId::new("artist:filesystem/edit@1.0.0").unwrap(),
+                insert: VerbId::new("artist:filesystem/insert@1.0.0").unwrap(),
                 delete: identity.clone(),
                 find: VerbId::new("artist:filesystem/find@1.0.0").unwrap(),
                 grep: VerbId::new("artist:filesystem/grep@1.0.0").unwrap(),
@@ -163,7 +164,6 @@ async fn filesystem_provider_executes_delete_through_dynamic_resource_routing() 
 async fn session_provider_executes_lifecycle_through_dynamic_resource_registry() {
     let kernel = Kernel::new();
     let write = VerbId::new("artist:session/write@1.0.0").unwrap();
-    let send = VerbId::new("artist:session/send@1.0.0").unwrap();
     let read = VerbId::new("artist:session/read@1.0.0").unwrap();
     let poll = VerbId::new("artist:session/poll@1.0.0").unwrap();
     kernel
@@ -172,7 +172,6 @@ async fn session_provider_executes_lifecycle_through_dynamic_resource_registry()
             SessionVerbBindings {
                 read: read.clone(),
                 write: write.clone(),
-                send: send.clone(),
                 poll: poll.clone(),
                 abort: VerbId::new("artist:session/abort@1.0.0").unwrap(),
                 delete: VerbId::new("artist:session/delete@1.0.0").unwrap(),
@@ -188,7 +187,14 @@ async fn session_provider_executes_lifecycle_through_dynamic_resource_registry()
         .unwrap();
     kernel
         .resource_registry()
-        .invoke(&send, &uri, DynamicValue::String("hello".into()))
+        .invoke(
+            &write,
+            &ResourceUri::parse("session://local/dynamic/inbox").unwrap(),
+            DynamicValue::Record(BTreeMap::from([(
+                "content".into(),
+                DynamicValue::String("hello".into()),
+            )])),
+        )
         .await
         .unwrap();
     let result = kernel
@@ -208,7 +214,8 @@ async fn session_provider_executes_lifecycle_through_dynamic_resource_registry()
     let DynamicValue::Record(fields) = result.output else {
         panic!("session poll did not return a typed record");
     };
-    assert!(fields.get("satisfied").is_some());
+    assert!(fields.get("reason").is_some());
+    assert!(fields.get("text").is_some());
 }
 
 #[tokio::test]

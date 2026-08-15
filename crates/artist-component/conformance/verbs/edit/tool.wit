@@ -1,6 +1,9 @@
 package artist:tool@1.0.0;
 interface edit {
-    use artist:%resource/types@1.0.0.{edit-request, edit-result, error};
-    edit: func(requests: list<edit-request>) -> list<result<edit-result, error>>;
+    use artist:%resource/types@1.0.0.{anchor, anchored-text, anchored-diff, error, uri};
+    record edit-request { uri: uri, start: anchor, end: option<anchor>, content: string }
+    record edit-response { uri: uri, changed: list<anchored-text>, diff: anchored-diff }
+    edit: func(requests: list<edit-request>) -> list<result<edit-response, error>>;
+    observe: func(response: result<edit-response, error>) -> string;
 }
 world tool-world { export edit; }

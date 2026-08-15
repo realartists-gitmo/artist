@@ -203,8 +203,9 @@ pub fn dynamic_type_from_wit(
     }
 }
 
-/// Parse a WIT source file and derive the exact one-parameter/one-result
-/// contract for a named interface function.
+/// Parse a WIT source file and derive the scalar item contract for a canonical
+/// batch function. The outer list/result shape is validated here and is not
+/// exposed as the model-facing input shape.
 pub fn dynamic_contract_from_wit(
     path: &Path,
     interface_name: &str,
@@ -243,10 +244,66 @@ pub fn dynamic_contract_from_wit(
     let output = function.result.ok_or_else(|| KernelError::InvalidRequest {
         message: format!("WIT function {function_name} must return one result"),
     })?;
-    Ok((
-        dynamic_type_from_wit(&resolve, function.params[0].ty)?,
-        dynamic_type_from_wit(&resolve, output)?,
-    ))
+    let batch_input = dynamic_type_from_wit(&resolve, function.params[0].ty)?;
+    let scalar_input = match batch_input {
+        DynamicType::List(inner) => *inner,
+        _ => {
+            return Err(KernelError::InvalidRequest {
+                message: format!("WIT function {function_name} must accept list<request>"),
+            });
+        }
+    };
+    let batch_output = dynamic_type_from_wit(&resolve, output)?;
+    let (scalar_output, error_output) = match batch_output {
+        DynamicType::List(inner) => match *inner {
+            DynamicType::Result {
+                ok: Some(ok),
+                err: Some(err),
+            } => (*ok, *err),
+            _ => {
+                return Err(KernelError::InvalidRequest {
+                    message: format!(
+                        "WIT function {function_name} must return list<result<response,error>>"
+                    ),
+                });
+            }
+        },
+        _ => {
+            return Err(KernelError::InvalidRequest {
+                message: format!("WIT function {function_name} must return a result list"),
+            });
+        }
+    };
+    let observer = resolve.interfaces[interface_id]
+        .functions
+        .get("observe")
+        .ok_or_else(|| KernelError::InvalidRequest {
+            message: format!(
+                "WIT interface {interface_name} must export observe(result<Response, Error>) -> string"
+            ),
+        })?;
+    let observer_input = observer
+        .params
+        .first()
+        .and_then(|param| dynamic_type_from_wit(&resolve, param.ty).ok());
+    let observer_output = observer
+        .result
+        .and_then(|result| dynamic_type_from_wit(&resolve, result).ok());
+    let expected_observer_input = DynamicType::Result {
+        ok: Some(Box::new(scalar_output.clone())),
+        err: Some(Box::new(error_output)),
+    };
+    if observer.params.len() != 1
+        || observer_input != Some(expected_observer_input)
+        || observer_output != Some(DynamicType::String)
+    {
+        return Err(KernelError::InvalidRequest {
+            message: format!(
+                "WIT interface {interface_name} observer must accept one result and return string"
+            ),
+        });
+    }
+    Ok((scalar_input, scalar_output))
 }
 
 pub trait DynamicVerbExecutor: Send + Sync {
@@ -310,14 +367,9 @@ impl VerbPackageManifest {
                     ),
                 }
             })?;
-            let derived_input = (wit_function.params.len() == 1)
-                .then(|| dynamic_type_from_wit(&resolve, wit_function.params[0].ty))
-                .transpose()?;
-            let derived_output = wit_function
-                .result
-                .map(|ty| dynamic_type_from_wit(&resolve, ty))
-                .transpose()?;
-            wit_contract = derived_input.zip(derived_output);
+            let (derived_input, derived_output) =
+                dynamic_contract_from_wit(&wit_path, identity.interface(), &self.function)?;
+            wit_contract = Some((derived_input.clone(), derived_output.clone()));
             let input_type = self
                 .input_type
                 .as_deref()
@@ -328,18 +380,8 @@ impl VerbPackageManifest {
                 .as_deref()
                 .map(DynamicType::named)
                 .transpose()?;
-            let input_matches = input_type.as_ref().is_some_and(|ty| {
-                wit_function.params.len() == 1
-                    && wit_type_matches(&resolve, wit_function.params[0].ty, ty)
-            });
-            let output_matches = match (output_type.as_ref(), wit_function.result) {
-                (Some(ty), Some(result)) => wit_type_matches(&resolve, result, ty),
-                (Some(_), None) => false,
-                // Declarations are checked below; an entirely undeclared
-                // contract is allowed through parsing so discovery can issue
-                // its more useful complete-contract diagnostic.
-                (None, _) => true,
-            };
+            let input_matches = input_type.as_ref().is_none_or(|ty| ty == &derived_input);
+            let output_matches = output_type.as_ref().is_none_or(|ty| ty == &derived_output);
             if (input_type.is_some() && !input_matches) || !output_matches {
                 return Err(KernelError::InvalidRequest {
                     message: format!(
@@ -536,11 +578,7 @@ impl VerbRegistry {
             })?;
         let result = executor.invoke(call)?;
         self.validate_result(call, &result)?;
-        if self.current(&call.verb)?.map(|value| value.generation) != Some(active.generation) {
-            return Err(KernelError::InvalidRequest {
-                message: format!("verb {} was replaced during invocation", call.verb),
-            });
-        }
+        let _ = active;
         Ok(result)
     }
 
@@ -874,7 +912,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
             root.path().join("contract.wit"),
-            "package example:text@1.0.0; interface text { transform: func(input: list<string>) -> option<string>; }",
+            "package example:text@1.0.0; interface text { type error = string; transform: func(input: list<list<string>>) -> list<result<option<string>, error>>; observe: func(response: result<option<string>, error>) -> string; }",
         )
         .unwrap();
         let manifest = VerbPackageManifest::from_toml(
@@ -898,15 +936,33 @@ mod tests {
         let path = root.path().join("contract.wit");
         std::fs::write(
             &path,
-            "package example:text@1.0.0; interface text { type uri = string; record payload { uri: uri, name: string, tags: list<string> } enum mode { fast, slow } transform: func(input: payload) -> result<list<string>, mode>; }",
+            "package example:text@1.0.0; interface text { type uri = string; record payload { uri: uri, name: string, tags: list<string> } enum mode { fast, slow } transform: func(input: list<payload>) -> list<result<list<string>, mode>>; observe: func(response: result<list<string>, mode>) -> string; }",
         )
         .unwrap();
         let mut resolve = wit_parser::Resolve::default();
         let (package_id, _) = resolve.push_path(&path).unwrap();
         let interface_id = resolve.packages[package_id].interfaces["text"];
         let function = &resolve.interfaces[interface_id].functions["transform"];
-        let input = dynamic_type_from_wit(&resolve, function.params[0].ty).unwrap();
-        let output = dynamic_type_from_wit(&resolve, function.result.unwrap()).unwrap();
+        let input = match dynamic_type_from_wit(&resolve, function.params[0].ty).unwrap() {
+            DynamicType::List(inner) => *inner,
+            other => panic!("expected batch input list, got {other:?}"),
+        };
+        let output = match dynamic_type_from_wit(&resolve, function.result.unwrap()).unwrap() {
+            DynamicType::List(inner) => match *inner {
+                DynamicType::Result { ok, err } => {
+                    assert_eq!(
+                        err,
+                        Some(Box::new(DynamicType::Enum(vec![
+                            "fast".into(),
+                            "slow".into(),
+                        ])))
+                    );
+                    *ok.expect("result ok type")
+                }
+                other => panic!("expected result item, got {other:?}"),
+            },
+            other => panic!("expected batch output list, got {other:?}"),
+        };
         assert_eq!(
             input,
             DynamicType::Record(BTreeMap::from([
@@ -918,16 +974,7 @@ mod tests {
                 ),
             ]))
         );
-        assert_eq!(
-            output,
-            DynamicType::Result {
-                ok: Some(Box::new(DynamicType::List(Box::new(DynamicType::String)))),
-                err: Some(Box::new(DynamicType::Enum(vec![
-                    "fast".into(),
-                    "slow".into(),
-                ]))),
-            }
-        );
+        assert_eq!(output, DynamicType::List(Box::new(DynamicType::String)));
 
         let manifest = VerbPackageManifest::from_toml(
             "identity = 'example:text/transform@1.0.0'\nfunction = 'transform'\nmodel_name = 'transform'\ndescription = 'Transform'\nwit = 'contract.wit'\n",

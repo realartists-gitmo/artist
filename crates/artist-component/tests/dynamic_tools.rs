@@ -14,7 +14,7 @@ fn discovered_tool_package_projects_to_a_wit_typed_verb_definition() {
     .unwrap();
     fs::write(
         package.join("tool.wit"),
-        "package example:tool@1.0.0; interface echo { echo: func(input: string) -> string; }",
+        "package example:tool@1.0.0; interface echo { type error = string; echo: func(requests: list<string>) -> list<result<string, error>>; observe: func(response: result<string, error>) -> string; }",
     )
     .unwrap();
     fs::write(package.join("src/lib.rs"), "").unwrap();

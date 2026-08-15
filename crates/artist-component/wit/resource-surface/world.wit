@@ -23,33 +23,6 @@ interface types {
 
     record diff-hunk { old: list<anchored-line>, new: list<anchored-line> }
     record anchored-diff { uri: uri, hunks: list<diff-hunk> }
-    record directory-result { uri: uri, entries: list<uri> }
-    variant read-result { text(anchored-text), directory(directory-result) }
-
-    record read-request { uri: uri, at: option<position>, before: option<u32>, after: option<u32> }
-    record write-request { uri: uri, content: string }
-    record write-result { text: anchored-text }
-
-    variant insertion-point { top, bottom, before(anchor), after(anchor) }
-    record replace-operation { start: anchor, end: option<anchor>, content: string }
-    record insert-operation { at: insertion-point, content: string }
-    variant edit-operation { replace(replace-operation), insert(insert-operation) }
-    record edit-request { uri: uri, operations: list<edit-operation> }
-    record edit-result { text: anchored-text, diff: anchored-diff }
-
-    record find-request { roots: list<uri>, query: pattern }
-    variant grep-source { resources(list<uri>), text(list<anchored-text>) }
-    record grep-request { pattern: pattern, source: grep-source }
-    record run-request { uri: uri, args: list<string> }
-    record send-request { uri: uri, content: string }
-    record poll-target { uri: uri, from-position: option<position> }
-    record regex-atom { target: u32, pattern: string }
-    variant poll-atom { changed(u32), regex(regex-atom), terminated(u32), timeout(u64) }
-    variant poll-node { atom(poll-atom), all(list<u32>), any(list<u32>) }
-    record poll-condition-wire { root: u32, nodes: list<poll-node> }
-    record poll-request { targets: list<poll-target>, until: option<poll-condition-wire> }
-    record poll-result { text: list<anchored-text>, satisfied: list<poll-atom> }
-
     enum claim-decision { pass, handle, reserve }
     record claim-request { verb: verb-id, uri: uri }
 }

@@ -1,7 +1,8 @@
 use crate::{
-    ClaimDecision, ClaimRegistry, InvocationContext, InvocationScope, KernelError, KernelHandle,
-    ProcessManager, ResourceCatalogEntry, ResourceCatalogProvider, ResourceRegistry, RouteRegistry,
-    ToolDefinition, ToolProvider, VerbDefinition, VerbRegistry,
+    ClaimDecision, ClaimRegistry, DynamicValue, InvocationContext, InvocationResourceProvider,
+    InvocationScope, InvocationStore, KernelError, KernelHandle, ProcessManager,
+    ResourceCatalogEntry, ResourceCatalogProvider, ResourceRegistry, RouteRegistry, ToolDefinition,
+    ToolProvider, VerbDefinition, VerbRegistry,
 };
 use std::any::Any;
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,7 @@ struct Inner {
     routes: RouteRegistry,
     claims: ClaimRegistry,
     resources: ResourceRegistry,
+    invocations: InvocationStore,
     background: Mutex<Vec<Box<dyn Any + Send>>>,
 }
 
@@ -32,15 +34,28 @@ impl Default for Kernel {
 
 impl Kernel {
     pub fn new() -> Self {
+        let invocations = InvocationStore::default();
+        let resources = ResourceRegistry::default();
+        let claims = ClaimRegistry::default();
+        let invocation_provider = Arc::new(InvocationResourceProvider::new(invocations.clone()));
+        resources
+            .register(invocation_provider.clone())
+            .expect("invocation provider registration");
+        claims
+            .register(invocation_provider)
+            .expect("invocation claim registration");
+        let resource_catalog_providers: RwLock<Vec<Arc<dyn ResourceCatalogProvider>>> =
+            RwLock::new(vec![Arc::new(invocations.clone())]);
         Self {
             inner: Arc::new(Inner {
                 tool_providers: RwLock::new(Vec::new()),
-                resource_catalog_providers: RwLock::new(Vec::new()),
+                resource_catalog_providers,
                 verbs: VerbRegistry::new(),
                 processes: ProcessManager::new(),
                 routes: RouteRegistry::default(),
-                claims: ClaimRegistry::default(),
-                resources: ResourceRegistry::default(),
+                claims,
+                resources,
+                invocations,
                 background: Mutex::new(Vec::new()),
             }),
         }
@@ -64,6 +79,10 @@ impl Kernel {
 
     pub fn resource_registry(&self) -> ResourceRegistry {
         self.inner.resources.clone()
+    }
+
+    pub fn invocation_store(&self) -> InvocationStore {
+        self.inner.invocations.clone()
     }
 
     pub fn register_dynamic_resource_provider(
@@ -114,13 +133,114 @@ impl Kernel {
         uri: crate::ResourceUri,
         input: crate::DynamicValue,
     ) -> Result<crate::DynamicVerbResult, KernelError> {
-        self.inner.resources.invoke(&verb, &uri, input).await
+        if uri.scheme() == "invocations" {
+            return self.inner.resources.invoke(&verb, &uri, input).await;
+        }
+        let invocation = self.inner.invocations.begin(input.clone());
+        let result = self
+            .inner
+            .resources
+            .invoke_with_host(
+                &verb,
+                &uri,
+                input,
+                self.handle(),
+                InvocationScope::new(InvocationContext::default()),
+            )
+            .await;
+        let stdout = result.clone().map(|value| value.output.clone());
+        let stderr = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let _ = self
+            .inner
+            .invocations
+            .complete(&invocation.uri, stdout, "", stderr);
+        result
+    }
+
+    pub async fn invoke_mixed_dynamic_resources(
+        &self,
+        requests: Vec<crate::MixedResourceRequest>,
+        scope: InvocationScope,
+    ) -> Vec<Result<crate::DynamicVerbResult, KernelError>> {
+        let invocations = requests
+            .iter()
+            .map(|request| self.inner.invocations.begin(request.input.clone()))
+            .collect::<Vec<_>>();
+        let results = self
+            .inner
+            .resources
+            .invoke_mixed_batch(requests, scope)
+            .await;
+        for (invocation, result) in invocations.iter().zip(results.iter()) {
+            let stdout = result.clone().map(|value| value.output.clone());
+            let stderr = result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let _ = self
+                .inner
+                .invocations
+                .complete(&invocation.uri, stdout, "", stderr);
+        }
+        results
+    }
+
+    pub async fn invoke_dynamic_resource_batch(
+        &self,
+        verb: crate::VerbId,
+        requests: Vec<crate::ResourceRequest>,
+        scope: InvocationScope,
+    ) -> Vec<Result<crate::DynamicVerbResult, KernelError>> {
+        let invocations = requests
+            .iter()
+            .map(|request| self.inner.invocations.begin(request.input.clone()))
+            .collect::<Vec<_>>();
+        let results = self
+            .inner
+            .resources
+            .invoke_batch_with_host(&verb, requests, self.handle(), scope)
+            .await;
+        for (invocation, result) in invocations.iter().zip(results.iter()) {
+            let stdout = result.clone().map(|value| value.output.clone());
+            let stderr = result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let _ = self
+                .inner
+                .invocations
+                .complete(&invocation.uri, stdout, "", stderr);
+        }
+        results
     }
 
     pub async fn execute_dynamic_resources(
         &self,
         call: crate::DynamicVerbCall,
     ) -> Result<Vec<crate::DynamicResourceResult>, KernelError> {
+        self.execute_dynamic_resources_with_scope(
+            call,
+            InvocationScope::new(InvocationContext::default()),
+        )
+        .await
+    }
+
+    pub async fn execute_dynamic_resources_with_scope(
+        &self,
+        call: crate::DynamicVerbCall,
+        scope: InvocationScope,
+    ) -> Result<Vec<crate::DynamicResourceResult>, KernelError> {
+        if scope.cancellation.is_cancelled() {
+            return Err(KernelError::Aborted {
+                message: "resource dispatch cancelled".to_owned(),
+            });
+        }
         let lease = self.inner.verbs.acquire(&call.verb)?;
         self.inner.verbs.validate_call(&call)?;
         let claims = self
@@ -136,6 +256,11 @@ impl Kernel {
             .collect::<Result<Vec<_>, _>>()?;
         let mut results = Vec::with_capacity(claims.len());
         for claimed in claims {
+            if scope.cancellation.is_cancelled() {
+                return Err(KernelError::Aborted {
+                    message: "resource dispatch cancelled".to_owned(),
+                });
+            }
             if claimed.decision != ClaimDecision::Handle {
                 return Err(KernelError::UnsupportedVerb {
                     verb: call.verb.to_string(),
@@ -220,6 +345,7 @@ impl Kernel {
         args: crate::DynamicValue,
         context: InvocationContext,
     ) -> Result<crate::DynamicValue, KernelError> {
+        let invocation = self.inner.invocations.begin(args.clone());
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
@@ -228,14 +354,36 @@ impl Kernel {
                 .iter()
                 .any(|definition| definition.name == name)
             {
-                return provider
+                let result = provider
                     .execute_tool_with_context(name, args, host, context)
                     .await;
+                let _ = self.inner.invocations.complete(
+                    &invocation.uri,
+                    result.clone(),
+                    "",
+                    result
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                );
+                return result;
             }
         }
-        Err(KernelError::Handler {
+        let result = Err(KernelError::Handler {
             message: format!("no named tool registered: {name}"),
-        })
+        });
+        let _ = self.inner.invocations.complete(
+            &invocation.uri,
+            result.clone(),
+            "",
+            result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        );
+        result
     }
 
     pub async fn execute_tool_with_scope(
@@ -244,6 +392,7 @@ impl Kernel {
         args: crate::DynamicValue,
         scope: InvocationScope,
     ) -> Result<crate::DynamicValue, KernelError> {
+        let invocation = self.inner.invocations.begin(args.clone());
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
@@ -252,30 +401,265 @@ impl Kernel {
                 .iter()
                 .any(|definition| definition.name == name)
             {
-                return provider
+                let result = provider
                     .execute_tool_with_scope(name, args, host, scope)
                     .await;
+                let _ = self.inner.invocations.complete(
+                    &invocation.uri,
+                    result.clone(),
+                    "",
+                    result
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                );
+                return result;
             }
         }
-        Err(KernelError::Handler {
+        let result = Err(KernelError::Handler {
             message: format!("no named tool registered: {name}"),
-        })
+        });
+        let _ = self.inner.invocations.complete(
+            &invocation.uri,
+            result.clone(),
+            "",
+            result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        );
+        result
+    }
+
+    pub async fn execute_tool_for_model(
+        &self,
+        name: &str,
+        args: crate::DynamicValue,
+        scope: InvocationScope,
+    ) -> Result<crate::DynamicValue, KernelError> {
+        let invocation = self.inner.invocations.begin(args.clone());
+        let providers = self.inner.tool_providers.read().await;
+        let host = self.handle();
+        for provider in providers.iter() {
+            if provider
+                .tool_definitions()
+                .iter()
+                .any(|definition| definition.name == name)
+            {
+                let model_result = provider
+                    .execute_tool_for_model_result(name, args, host, scope)
+                    .await;
+                let (stdout, observation) = match model_result {
+                    Ok(value) => (value.stdout, value.stdobs),
+                    Err(error) => (Err(error), String::new()),
+                };
+                let result = stdout
+                    .as_ref()
+                    .map(|_| DynamicValue::String(observation.clone()))
+                    .map_err(Clone::clone);
+                let stderr = stdout
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let _ =
+                    self.inner
+                        .invocations
+                        .complete(&invocation.uri, stdout, observation, stderr);
+                return result;
+            }
+        }
+        let result = Err(KernelError::Handler {
+            message: format!("no named tool registered: {name}"),
+        });
+        let _ = self.inner.invocations.complete(
+            &invocation.uri,
+            result.clone(),
+            "",
+            result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        );
+        result
+    }
+
+    pub async fn execute_tools_for_model(
+        &self,
+        name: &str,
+        args: Vec<crate::DynamicValue>,
+        scope: InvocationScope,
+    ) -> Vec<Result<crate::DynamicValue, KernelError>> {
+        let invocations = args
+            .iter()
+            .cloned()
+            .map(|arg| self.inner.invocations.begin(arg))
+            .collect::<Vec<_>>();
+        let providers = self.inner.tool_providers.read().await;
+        let host = self.handle();
+        for provider in providers.iter() {
+            if provider
+                .tool_definitions()
+                .iter()
+                .any(|definition| definition.name == name)
+            {
+                let model_results = provider
+                    .execute_tools_for_model_results(name, args, host, scope)
+                    .await;
+                let mut results = Vec::with_capacity(invocations.len());
+                for (index, invocation) in invocations.iter().enumerate() {
+                    let model_result = model_results.get(index).cloned().unwrap_or_else(|| {
+                        Err(KernelError::Handler {
+                            message: format!(
+                                "tool provider returned {} results for {} requests",
+                                model_results.len(),
+                                invocations.len()
+                            ),
+                        })
+                    });
+                    match model_result {
+                        Ok(value) => {
+                            let observation = value.stdobs.clone();
+                            let stdout = value.stdout;
+                            let result = stdout
+                                .as_ref()
+                                .map(|_| DynamicValue::String(observation.clone()))
+                                .map_err(Clone::clone);
+                            let stderr = stdout
+                                .as_ref()
+                                .err()
+                                .map(ToString::to_string)
+                                .unwrap_or_default();
+                            let _ = self.inner.invocations.complete(
+                                &invocation.uri,
+                                stdout,
+                                observation,
+                                stderr,
+                            );
+                            results.push(result);
+                        }
+                        Err(error) => {
+                            let result = Err(error.clone());
+                            let _ = self.inner.invocations.complete(
+                                &invocation.uri,
+                                result.clone(),
+                                "",
+                                error.to_string(),
+                            );
+                            results.push(result);
+                        }
+                    }
+                }
+                return results;
+            }
+        }
+        let result = vec![Err(KernelError::Handler {
+            message: format!("no named tool registered: {name}"),
+        })];
+        for (invocation, value) in invocations.iter().zip(result.iter()) {
+            let _ = self
+                .inner
+                .invocations
+                .complete(&invocation.uri, value.clone(), "", "");
+        }
+        result
+    }
+
+    pub async fn execute_tool_batch_with_scope(
+        &self,
+        name: &str,
+        args: Vec<crate::DynamicValue>,
+        scope: InvocationScope,
+    ) -> Vec<Result<crate::DynamicVerbResult, KernelError>> {
+        let invocations = args
+            .iter()
+            .map(|arg| self.inner.invocations.begin(arg.clone()))
+            .collect::<Vec<_>>();
+        let providers = self.inner.tool_providers.read().await;
+        let host = self.handle();
+        for provider in providers.iter() {
+            if provider
+                .tool_definitions()
+                .iter()
+                .any(|definition| definition.name == name)
+            {
+                let results = provider
+                    .execute_tool_batch_with_scope(name, args, host, scope)
+                    .await;
+                for (invocation, result) in invocations.iter().zip(results.iter()) {
+                    let stdout = result.clone().map(|value| value.output.clone());
+                    let stderr = result
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                    let _ = self
+                        .inner
+                        .invocations
+                        .complete(&invocation.uri, stdout, "", stderr);
+                }
+                return results;
+            }
+        }
+        let results: Vec<Result<crate::DynamicVerbResult, KernelError>> =
+            vec![Err(KernelError::Handler {
+                message: format!("no named tool registered: {name}"),
+            })];
+        for (invocation, result) in invocations.iter().zip(results.iter()) {
+            let _ = self.inner.invocations.complete(
+                &invocation.uri,
+                result.clone().map(|value| value.output.clone()),
+                "",
+                "",
+            );
+        }
+        results
     }
 
     pub fn handle(&self) -> KernelHandle {
         let dynamic_kernel = self.clone();
         let direct_dynamic_kernel = self.clone();
+        let direct_dynamic_batch_kernel = direct_dynamic_kernel.clone();
         KernelHandle::with_dispatch(
             Arc::new(move |call, scope| {
                 let kernel = dynamic_kernel.clone();
                 Box::pin(async move {
-                    let _scope = scope.child();
-                    kernel.execute_dynamic_resources(call).await
+                    kernel
+                        .execute_dynamic_resources_with_scope(call, scope.child())
+                        .await
                 })
             }),
-            Arc::new(move |verb, uri, input, _scope| {
+            Arc::new(move |verb, uri, input, scope| {
                 let kernel = direct_dynamic_kernel.clone();
-                Box::pin(async move { kernel.inner.resources.invoke(&verb, &uri, input).await })
+                Box::pin(async move {
+                    if scope.cancellation.is_cancelled() {
+                        return Err(KernelError::Aborted {
+                            message: "resource dispatch cancelled".to_owned(),
+                        });
+                    }
+                    kernel.invoke_dynamic_resource(verb, uri, input).await
+                })
+            }),
+            Arc::new(move |verb, requests, scope| {
+                let kernel = direct_dynamic_batch_kernel.clone();
+                Box::pin(async move {
+                    if scope.cancellation.is_cancelled() {
+                        return requests
+                            .into_iter()
+                            .map(|_| {
+                                Err(KernelError::Aborted {
+                                    message: "resource dispatch cancelled".to_owned(),
+                                })
+                            })
+                            .collect();
+                    }
+                    kernel
+                        .invoke_dynamic_resource_batch(verb, requests, scope)
+                        .await
+                })
             }),
         )
     }

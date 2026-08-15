@@ -1,5 +1,10 @@
 # Harness refactor status
 
+The current source of truth is `CRORTNITE_TOOL_SURFACE_IMPLEMENTATION.md`,
+including its mandatory appended invocation-stream contract. Older notes in
+this file are historical where they describe pre-batch or pre-invocation
+behavior.
+
 Updated 2026-08-14.
 
 This note records the state of the current conformance pass against the latest

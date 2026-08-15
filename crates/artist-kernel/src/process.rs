@@ -1,8 +1,8 @@
-//! Direct executable-file process resources.
+//! Direct executable process resources.
 //!
-//! This module deliberately accepts an executable path and argv separately.
-//! It never invokes a shell, parses shell syntax, allocates a PTY, or exposes
-//! a semantic host API beyond the process itself.
+//! A process is a resource tree. Its root exposes lifecycle state; stdin,
+//! stdout, stderr, and ctl are addressed child nouns. No shell parser or
+//! capability string is involved.
 
 use crate::{
     ClaimDecision, DynamicClaimProvider, DynamicResourceProvider, DynamicType, DynamicValue,
@@ -16,23 +16,21 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessSnapshot {
     pub uri: String,
-    pub output: String,
+    pub running: bool,
     pub exit_code: Option<i32>,
     pub aborted: bool,
-    pub cwd: Option<String>,
-    pub environment: BTreeMap<String, String>,
 }
 
-/// Dynamic contract identities used by the ordinary process resource.
-/// Bindings are supplied by the installed verb packages; the process manager
-/// does not contain a closed list of Artist verbs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessVerbBindings {
     pub run: VerbId,
-    pub send: VerbId,
+    pub write: VerbId,
     pub read: VerbId,
     pub poll: VerbId,
     pub abort: VerbId,
@@ -40,135 +38,143 @@ pub struct ProcessVerbBindings {
 }
 
 impl ProcessVerbBindings {
-    /// Metadata for the installed process verb packages.  The process
-    /// provider supplies execution; these definitions supply the same typed
-    /// registry identity and routing contract used by component packages.
     pub fn definitions(&self) -> Vec<VerbDefinition> {
-        let string = DynamicType::String;
         let uri = DynamicType::ResourceUri;
-        let option_string = || DynamicType::Option(Box::new(DynamicType::String));
+        let content = DynamicType::Record(BTreeMap::from([
+            ("uri".to_owned(), uri.clone()),
+            ("content".to_owned(), DynamicType::String),
+        ]));
+        let run = DynamicType::Record(BTreeMap::from([
+            ("uri".to_owned(), uri.clone()),
+            (
+                "args".to_owned(),
+                DynamicType::List(Box::new(DynamicType::String)),
+            ),
+        ]));
+        let empty = DynamicType::Record(BTreeMap::new());
         let snapshot = DynamicType::Record(BTreeMap::from([
             ("uri".to_owned(), uri.clone()),
-            ("output".to_owned(), string.clone()),
+            ("running".to_owned(), DynamicType::Bool),
             (
                 "exit-code".to_owned(),
                 DynamicType::Option(Box::new(DynamicType::S32)),
             ),
             ("aborted".to_owned(), DynamicType::Bool),
-            ("cwd".to_owned(), option_string()),
+        ]));
+        let output = DynamicType::Record(BTreeMap::from([
+            ("uri".to_owned(), uri.clone()),
+            ("text".to_owned(), DynamicType::String),
+        ]));
+        let read_output = DynamicType::Variant(BTreeMap::from([
+            ("state".to_owned(), Some(snapshot.clone())),
+            ("output".to_owned(), Some(output)),
+        ]));
+        let poll_input = DynamicType::Record(BTreeMap::from([
             (
-                "environment".to_owned(),
-                DynamicType::List(Box::new(DynamicType::Tuple(vec![
-                    string.clone(),
-                    string.clone(),
-                ]))),
+                "match".to_owned(),
+                DynamicType::Option(Box::new(DynamicType::String)),
+            ),
+            (
+                "timeout-ms".to_owned(),
+                DynamicType::Option(Box::new(DynamicType::U64)),
             ),
         ]));
-        let run_input = DynamicType::Record(BTreeMap::from([
-            ("executable".to_owned(), string.clone()),
-            ("target".to_owned(), uri.clone()),
+        let poll_output = DynamicType::Record(BTreeMap::from([
+            ("uri".to_owned(), uri.clone()),
+            ("text".to_owned(), DynamicType::String),
             (
-                "args".to_owned(),
-                DynamicType::List(Box::new(string.clone())),
-            ),
-            ("cwd".to_owned(), option_string()),
-            (
-                "environment".to_owned(),
-                DynamicType::List(Box::new(DynamicType::Tuple(vec![
-                    string.clone(),
-                    string.clone(),
-                ]))),
+                "reason".to_owned(),
+                DynamicType::Enum(vec![
+                    "changed".to_owned(),
+                    "matched".to_owned(),
+                    "terminated".to_owned(),
+                    "timeout".to_owned(),
+                ]),
             ),
         ]));
-        let content_input =
-            DynamicType::Record(BTreeMap::from([("content".to_owned(), string.clone())]));
-        let empty_input = DynamicType::Option(Box::new(string.clone()));
         vec![
-            VerbDefinition::new(
-                self.run.clone(),
-                "run",
-                "process-run",
-                "Execute a direct executable-file process",
-            )
-            .with_contract(run_input, uri.clone())
-            .with_extractor("resource-uri")
-            .with_schema_adapter("wit"),
-            VerbDefinition::new(
-                self.send.clone(),
-                "send",
-                "process-send",
-                "Send bytes to a process stdin",
-            )
-            .with_contract(content_input, uri.clone())
-            .with_extractor("resource-uri")
-            .with_schema_adapter("wit"),
+            VerbDefinition::new(self.run.clone(), "run", "run", "Run a direct executable")
+                .with_contract(
+                    run,
+                    DynamicType::Record(BTreeMap::from([("uri".to_owned(), uri.clone())])),
+                )
+                .with_extractor("resource-uri"),
+            VerbDefinition::new(self.write.clone(), "write", "write", "Write process input")
+                .with_contract(
+                    content,
+                    DynamicType::Record(BTreeMap::from([("uri".to_owned(), uri.clone())])),
+                )
+                .with_extractor("resource-uri"),
             VerbDefinition::new(
                 self.read.clone(),
                 "read",
-                "process-read",
-                "Read a process snapshot",
+                "read",
+                "Read process state or output",
             )
-            .with_contract(empty_input.clone(), snapshot.clone())
-            .with_extractor("resource-uri")
-            .with_schema_adapter("wit"),
-            VerbDefinition::new(
-                self.poll.clone(),
-                "poll",
-                "process-poll",
-                "Poll a process snapshot",
-            )
-            .with_contract(empty_input.clone(), snapshot)
-            .with_extractor("resource-uri")
-            .with_schema_adapter("wit"),
-            VerbDefinition::new(
-                self.abort.clone(),
-                "abort",
-                "process-abort",
-                "Abort a process",
-            )
-            .with_contract(empty_input.clone(), uri.clone())
-            .with_extractor("resource-uri")
-            .with_schema_adapter("wit"),
-            VerbDefinition::new(
-                self.delete.clone(),
-                "delete",
-                "process-delete",
-                "Delete a process resource",
-            )
-            .with_contract(empty_input, uri)
-            .with_extractor("resource-uri")
-            .with_schema_adapter("wit"),
+            .with_contract(empty.clone(), read_output.clone())
+            .with_extractor("resource-uri"),
+            VerbDefinition::new(self.poll.clone(), "poll", "poll", "Poll process state")
+                .with_contract(poll_input, poll_output)
+                .with_extractor("resource-uri"),
+            VerbDefinition::new(self.abort.clone(), "abort", "abort", "Abort a process")
+                .with_contract(
+                    empty.clone(),
+                    DynamicType::Record(BTreeMap::from([("uri".to_owned(), uri.clone())])),
+                )
+                .with_extractor("resource-uri"),
+            VerbDefinition::new(self.delete.clone(), "delete", "delete", "Delete a process")
+                .with_contract(
+                    empty,
+                    DynamicType::Record(BTreeMap::from([("uri".to_owned(), uri)])),
+                )
+                .with_extractor("resource-uri"),
         ]
     }
 }
 
-#[derive(Clone)]
-pub struct ProcessResourceProvider {
-    manager: ProcessManager,
-    bindings: ProcessVerbBindings,
-    capability: String,
-}
-
 struct ProcessState {
     child: Child,
-    output: Arc<Mutex<Vec<u8>>>,
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
     aborted: bool,
-    cwd: Option<String>,
-    environment: BTreeMap<String, String>,
 }
 
 fn spawn_reader<R: Read + Send + 'static>(mut stream: R, output: Arc<Mutex<Vec<u8>>>) {
     std::thread::spawn(move || {
         let mut buffer = [0u8; 4096];
-        while let Ok(size) = stream.read(&mut buffer) {
-            if size == 0 {
-                break;
-            }
-            if let Ok(mut current) = output.lock() {
-                current.extend_from_slice(&buffer[..size]);
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(size) => {
+                    if let Ok(mut current) = output.lock() {
+                        current.extend_from_slice(&buffer[..size]);
+                    }
+                }
             }
         }
     });
+}
+
+#[cfg(unix)]
+fn send_interrupt(child: &Child) -> Result<(), KernelError> {
+    let pid = child.id() as libc::pid_t;
+    // SAFETY: `pid` is obtained from the live Child handle and the call does
+    // not dereference the process; it only delivers SIGINT to that process.
+    let result = unsafe { libc::kill(pid, libc::SIGINT) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(KernelError::Handler {
+            message: std::io::Error::last_os_error().to_string(),
+        })
+    }
+}
+
+#[cfg(not(unix))]
+fn send_interrupt(child: &Child) -> Result<(), KernelError> {
+    child.kill().map_err(|error| KernelError::Handler {
+        message: format!("could not interrupt process: {error}"),
+    })
 }
 
 #[derive(Clone, Default)]
@@ -182,19 +188,11 @@ impl ProcessManager {
         Self::default()
     }
 
-    pub fn run_with_capability(
+    pub fn run(
         &self,
-        capability: &str,
         executable: impl AsRef<Path>,
         args: &[String],
-        cwd: Option<&Path>,
-        environment: &[(String, String)],
     ) -> Result<String, KernelError> {
-        if capability.trim().is_empty() {
-            return Err(KernelError::PermissionDenied {
-                uri: "process://capability".into(),
-            });
-        }
         let executable = executable.as_ref();
         if !executable.is_file() {
             return Err(KernelError::NotFound {
@@ -207,87 +205,122 @@ impl ProcessManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(cwd) = cwd {
-            command.current_dir(cwd);
-        }
-        command.envs(environment.iter().map(|(key, value)| (key, value)));
         let mut child = command.spawn().map_err(|error| KernelError::Handler {
             message: format!("could not execute {}: {error}", executable.display()),
         })?;
-        let output = Arc::new(Mutex::new(Vec::new()));
-        if let Some(stdout) = child.stdout.take() {
-            spawn_reader(stdout, output.clone());
+        let stdout = Arc::new(Mutex::new(Vec::new()));
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        if let Some(stream) = child.stdout.take() {
+            spawn_reader(stream, stdout.clone());
         }
-        if let Some(stderr) = child.stderr.take() {
-            spawn_reader(stderr, output.clone());
+        if let Some(stream) = child.stderr.take() {
+            spawn_reader(stream, stderr.clone());
         }
         let mut next_id = self.next_id.lock().map_err(|_| KernelError::Handler {
-            message: "process id lock poisoned".into(),
+            message: "process id lock poisoned".to_owned(),
         })?;
         *next_id += 1;
         let uri = format!("process://{}", *next_id);
-        drop(next_id);
         self.processes
             .lock()
             .map_err(|_| KernelError::Handler {
-                message: "process registry lock poisoned".into(),
+                message: "process registry lock poisoned".to_owned(),
             })?
             .insert(
                 uri.clone(),
                 Arc::new(Mutex::new(ProcessState {
                     child,
-                    output,
+                    stdout,
+                    stderr,
                     aborted: false,
-                    cwd: cwd.map(|path| path.display().to_string()),
-                    environment: environment.iter().cloned().collect(),
                 })),
             );
         Ok(uri)
     }
 
-    pub fn send(&self, uri: &str, input: &[u8]) -> Result<(), KernelError> {
-        let process = self.lookup(uri)?;
-        let mut process = process.lock().map_err(|_| KernelError::Handler {
-            message: "process lock poisoned".into(),
-        })?;
-        process
-            .child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| KernelError::WrongKind {
-                message: "process stdin is unavailable".into(),
+    fn lookup(&self, uri: &str) -> Result<Arc<Mutex<ProcessState>>, KernelError> {
+        let root = uri.split('/').take(3).collect::<Vec<_>>().join("/");
+        self.processes
+            .lock()
+            .map_err(|_| KernelError::Handler {
+                message: "process registry lock poisoned".to_owned(),
             })?
-            .write_all(input)
-            .map_err(|error| KernelError::Handler {
-                message: format!("could not write process stdin: {error}"),
-            })
+            .get(&root)
+            .cloned()
+            .ok_or_else(|| KernelError::NotFound { uri: root })
     }
 
-    pub fn poll(&self, uri: &str) -> Result<ProcessSnapshot, KernelError> {
+    pub fn write(&self, uri: &str, content: &[u8]) -> Result<(), KernelError> {
         let process = self.lookup(uri)?;
         let mut process = process.lock().map_err(|_| KernelError::Handler {
             message: "process lock poisoned".into(),
         })?;
-        let exit_code = process
+        if uri.ends_with("/ctl") {
+            match content {
+                b"interrupt" => {
+                    send_interrupt(&process.child)?;
+                    Ok(())
+                }
+                b"terminate" => {
+                    process.child.kill().map_err(|error| KernelError::Handler {
+                        message: format!("could not terminate process: {error}"),
+                    })?;
+                    Ok(())
+                }
+                _ => Err(KernelError::InvalidRequest {
+                    message: "unknown process control command".into(),
+                }),
+            }
+        } else {
+            process
+                .child
+                .stdin
+                .as_mut()
+                .ok_or_else(|| KernelError::WrongKind {
+                    message: "process stdin is unavailable".into(),
+                })?
+                .write_all(content)
+                .map_err(|error| KernelError::Handler {
+                    message: format!("could not write process stdin: {error}"),
+                })
+        }
+    }
+
+    pub fn snapshot(&self, uri: &str) -> Result<ProcessSnapshot, KernelError> {
+        let process = self.lookup(uri)?;
+        let mut process = process.lock().map_err(|_| KernelError::Handler {
+            message: "process lock poisoned".into(),
+        })?;
+        let status = process
             .child
             .try_wait()
             .map_err(|error| KernelError::Handler {
                 message: format!("could not poll process: {error}"),
-            })?
-            .and_then(|status| status.code());
-        let output =
-            String::from_utf8_lossy(&process.output.lock().map_err(|_| KernelError::Handler {
-                message: "process output lock poisoned".into(),
-            })?)
-            .into_owned();
+            })?;
         Ok(ProcessSnapshot {
             uri: uri.to_owned(),
-            output,
-            exit_code,
+            running: status.is_none(),
+            exit_code: status.and_then(process_exit_code),
             aborted: process.aborted,
-            cwd: process.cwd.clone(),
-            environment: process.environment.clone(),
         })
+    }
+
+    pub fn output(&self, uri: &str, stderr: bool) -> Result<String, KernelError> {
+        let process = self.lookup(uri)?;
+        let process = process.lock().map_err(|_| KernelError::Handler {
+            message: "process lock poisoned".into(),
+        })?;
+        let bytes = if stderr {
+            process.stderr.clone()
+        } else {
+            process.stdout.clone()
+        };
+        Ok(
+            String::from_utf8_lossy(&bytes.lock().map_err(|_| KernelError::Handler {
+                message: "process output lock poisoned".into(),
+            })?)
+            .into_owned(),
+        )
     }
 
     pub fn abort(&self, uri: &str) -> Result<(), KernelError> {
@@ -303,151 +336,75 @@ impl ProcessManager {
     }
 
     pub fn delete(&self, uri: &str) -> Result<(), KernelError> {
+        let root = uri.split('/').take(3).collect::<Vec<_>>().join("/");
         let process = self
             .processes
             .lock()
             .map_err(|_| KernelError::Handler {
                 message: "process registry lock poisoned".into(),
             })?
-            .remove(uri)
-            .ok_or_else(|| KernelError::NotFound {
-                uri: uri.to_owned(),
-            })?;
+            .remove(&root)
+            .ok_or_else(|| KernelError::NotFound { uri: root.clone() })?;
         if let Ok(mut process) = process.lock() {
             let _ = process.child.kill();
         }
         Ok(())
     }
+}
 
-    fn lookup(&self, uri: &str) -> Result<Arc<Mutex<ProcessState>>, KernelError> {
-        self.processes
-            .lock()
-            .map_err(|_| KernelError::Handler {
-                message: "process registry lock poisoned".into(),
-            })?
-            .get(uri)
-            .cloned()
-            .ok_or_else(|| KernelError::NotFound {
-                uri: uri.to_owned(),
-            })
-    }
+#[derive(Clone)]
+pub struct ProcessResourceProvider {
+    manager: ProcessManager,
+    bindings: ProcessVerbBindings,
 }
 
 impl ProcessResourceProvider {
-    pub fn new(
-        manager: ProcessManager,
-        bindings: ProcessVerbBindings,
-        capability: impl Into<String>,
-    ) -> Self {
-        Self {
-            manager,
-            bindings,
-            capability: capability.into(),
+    pub fn new(manager: ProcessManager, bindings: ProcessVerbBindings) -> Self {
+        Self { manager, bindings }
+    }
+
+    fn record(input: &DynamicValue) -> Result<&BTreeMap<String, DynamicValue>, KernelError> {
+        match input {
+            DynamicValue::Record(fields) => Ok(fields),
+            _ => Err(KernelError::InvalidRequest {
+                message: "process input must be a record".into(),
+            }),
         }
     }
 
-    fn is_process_uri(uri: &ResourceUri) -> bool {
-        uri.scheme() == "process"
-    }
-
-    fn string_field(input: &DynamicValue, field: &str) -> Result<String, KernelError> {
-        let DynamicValue::Record(fields) = input else {
-            return Err(KernelError::InvalidRequest {
-                message: "process input must be a typed record".into(),
-            });
-        };
-        match fields.get(field) {
+    fn string(input: &DynamicValue, field: &str) -> Result<String, KernelError> {
+        match Self::record(input)?.get(field) {
             Some(DynamicValue::String(value)) => Ok(value.clone()),
             Some(DynamicValue::ResourceUri(value)) => Ok(value.to_string()),
             _ => Err(KernelError::InvalidRequest {
-                message: format!("process input field {field} must be a string"),
+                message: format!("process field {field} must be a string"),
             }),
         }
     }
 
-    fn optional_string_field(
-        input: &DynamicValue,
-        field: &str,
-    ) -> Result<Option<String>, KernelError> {
-        let DynamicValue::Record(fields) = input else {
-            return Err(KernelError::InvalidRequest {
-                message: "process input must be a typed record".into(),
-            });
-        };
-        match fields.get(field) {
-            Some(DynamicValue::Option(None)) | None => Ok(None),
-            Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
-                DynamicValue::String(value) => Ok(Some(value.clone())),
-                DynamicValue::ResourceUri(value) => Ok(Some(value.to_string())),
-                _ => Err(KernelError::InvalidRequest {
-                    message: format!("process input field {field} must contain a string"),
-                }),
-            },
-            Some(DynamicValue::String(value)) => Ok(Some(value.clone())),
-            _ => Err(KernelError::InvalidRequest {
-                message: format!("process input field {field} must be optional"),
-            }),
+    fn args(input: &DynamicValue) -> Result<Vec<String>, KernelError> {
+        match Self::record(input)?.get("args") {
+            Some(DynamicValue::List(values)) => values
+                .iter()
+                .map(|value| match value {
+                    DynamicValue::String(value) => Ok(value.clone()),
+                    _ => Err(KernelError::InvalidRequest {
+                        message: "process args must be strings".into(),
+                    }),
+                })
+                .collect(),
+            _ => Ok(Vec::new()),
         }
     }
 
-    fn arguments(input: &DynamicValue) -> Result<Vec<String>, KernelError> {
-        let DynamicValue::Record(fields) = input else {
-            return Err(KernelError::InvalidRequest {
-                message: "process input must be a typed record".into(),
-            });
-        };
-        let Some(DynamicValue::List(values)) = fields.get("args") else {
-            return Ok(Vec::new());
-        };
-        values
-            .iter()
-            .map(|value| match value {
-                DynamicValue::String(value) => Ok(value.clone()),
-                _ => Err(KernelError::InvalidRequest {
-                    message: "process args must be a list of strings".into(),
-                }),
-            })
-            .collect()
+    fn root(uri: &ResourceUri) -> bool {
+        uri.scheme() == "process" && uri.path().matches('/').count() <= 1
     }
 
-    fn environment(input: &DynamicValue) -> Result<Vec<(String, String)>, KernelError> {
-        let DynamicValue::Record(fields) = input else {
-            return Err(KernelError::InvalidRequest {
-                message: "process input must be a typed record".into(),
-            });
-        };
-        let Some(DynamicValue::List(values)) = fields.get("environment") else {
-            return Ok(Vec::new());
-        };
-        values
-            .iter()
-            .map(|value| match value {
-                DynamicValue::Tuple(values) if values.len() == 2 => {
-                    let (DynamicValue::String(name), DynamicValue::String(value)) =
-                        (&values[0], &values[1])
-                    else {
-                        return Err(KernelError::InvalidRequest {
-                            message: "process environment entries must be string tuples".into(),
-                        });
-                    };
-                    Ok((name.clone(), value.clone()))
-                }
-                _ => Err(KernelError::InvalidRequest {
-                    message: "process environment must be a list of string tuples".into(),
-                }),
-            })
-            .collect()
-    }
-
-    fn snapshot_value(snapshot: ProcessSnapshot) -> DynamicValue {
-        DynamicValue::Record(std::collections::BTreeMap::from([
-            (
-                "uri".into(),
-                DynamicValue::ResourceUri(
-                    ResourceUri::parse(&snapshot.uri).expect("process URI is authoritative"),
-                ),
-            ),
-            ("output".into(), DynamicValue::String(snapshot.output)),
+    fn value(uri: ResourceUri, snapshot: ProcessSnapshot) -> DynamicValue {
+        DynamicValue::Record(BTreeMap::from([
+            ("uri".into(), DynamicValue::ResourceUri(uri)),
+            ("running".into(), DynamicValue::Bool(snapshot.running)),
             (
                 "exit-code".into(),
                 DynamicValue::Option(
@@ -457,29 +414,6 @@ impl ProcessResourceProvider {
                 ),
             ),
             ("aborted".into(), DynamicValue::Bool(snapshot.aborted)),
-            (
-                "cwd".into(),
-                DynamicValue::Option(
-                    snapshot
-                        .cwd
-                        .map(|value| Box::new(DynamicValue::String(value))),
-                ),
-            ),
-            (
-                "environment".into(),
-                DynamicValue::List(
-                    snapshot
-                        .environment
-                        .into_iter()
-                        .map(|(name, value)| {
-                            DynamicValue::Tuple(vec![
-                                DynamicValue::String(name),
-                                DynamicValue::String(value),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
         ]))
     }
 }
@@ -487,21 +421,18 @@ impl ProcessResourceProvider {
 impl DynamicClaimProvider for ProcessResourceProvider {
     fn claim(&self, verb: &VerbId, uri: &ResourceUri) -> ClaimDecision {
         if verb == &self.bindings.run {
-            return if uri.scheme() == "file" {
-                ClaimDecision::Handle
-            } else {
-                ClaimDecision::Pass
-            };
+            return (uri.scheme() == "file")
+                .then_some(ClaimDecision::Handle)
+                .unwrap_or(ClaimDecision::Pass);
         }
-        if [
-            &self.bindings.send,
-            &self.bindings.read,
-            &self.bindings.poll,
-            &self.bindings.abort,
-            &self.bindings.delete,
-        ]
-        .contains(&verb)
-            && Self::is_process_uri(uri)
+        let child = uri.scheme() == "process"
+            && (uri.path().ends_with("/stdin") || uri.path().ends_with("/ctl"));
+        if (verb == &self.bindings.write && child)
+            || ((verb == &self.bindings.read
+                || verb == &self.bindings.poll
+                || verb == &self.bindings.abort
+                || verb == &self.bindings.delete)
+                && (uri.scheme() == "process"))
         {
             ClaimDecision::Handle
         } else {
@@ -519,37 +450,63 @@ impl DynamicResourceProvider for ProcessResourceProvider {
     ) -> ResourceFuture<'a> {
         let manager = self.manager.clone();
         let bindings = self.bindings.clone();
-        let capability = self.capability.clone();
         Box::pin(async move {
             let output = if verb == &bindings.run {
-                let executable = Self::string_field(&input, "executable")?;
-                let cwd = Self::optional_string_field(&input, "cwd")?;
-                let cwd = cwd.as_deref().map(Path::new);
-                let args = Self::arguments(&input)?;
-                let environment = Self::environment(&input)?;
-                let process = manager.run_with_capability(
-                    &capability,
-                    executable,
-                    &args,
-                    cwd,
-                    &environment,
+                let executable = Self::string(&input, "uri")?;
+                DynamicValue::Record(BTreeMap::from([(
+                    "uri".into(),
+                    DynamicValue::ResourceUri(ResourceUri::parse(
+                        &manager.run(executable, &Self::args(&input)?)?,
+                    )?),
+                )]))
+            } else if verb == &bindings.write {
+                manager.write(
+                    uri.to_string().as_str(),
+                    Self::string(&input, "content")?.as_bytes(),
                 )?;
-                DynamicValue::ResourceUri(ResourceUri::parse(&process)?)
-            } else if verb == &bindings.send {
-                let content = match &input {
-                    DynamicValue::String(value) => value.clone(),
-                    _ => Self::string_field(&input, "content")?,
-                };
-                manager.send(uri.as_ref().to_string().as_str(), content.as_bytes())?;
-                DynamicValue::ResourceUri(uri.clone())
-            } else if verb == &bindings.read || verb == &bindings.poll {
-                Self::snapshot_value(manager.poll(uri.as_ref().to_string().as_str())?)
+                DynamicValue::Record(BTreeMap::from([(
+                    "uri".into(),
+                    DynamicValue::ResourceUri(uri.clone()),
+                )]))
+            } else if verb == &bindings.poll {
+                Self::poll_value(&manager, uri, &input).await?
+            } else if verb == &bindings.read {
+                if uri.path().ends_with("/stdout") || uri.path().ends_with("/stderr") {
+                    DynamicValue::Variant(
+                        "output".to_owned(),
+                        Some(Box::new(DynamicValue::Record(BTreeMap::from([
+                            ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+                            (
+                                "text".to_owned(),
+                                DynamicValue::String(manager.output(
+                                    uri.to_string().as_str(),
+                                    uri.path().ends_with("/stderr"),
+                                )?),
+                            ),
+                        ])))),
+                    )
+                } else {
+                    let snapshot = manager.snapshot(uri.to_string().as_str())?;
+                    DynamicValue::Variant(
+                        "state".to_owned(),
+                        Some(Box::new(Self::value(
+                            ResourceUri::parse(&snapshot.uri)?,
+                            snapshot,
+                        ))),
+                    )
+                }
             } else if verb == &bindings.abort {
-                manager.abort(uri.as_ref().to_string().as_str())?;
-                DynamicValue::ResourceUri(uri.clone())
+                manager.abort(uri.to_string().as_str())?;
+                DynamicValue::Record(BTreeMap::from([(
+                    "uri".into(),
+                    DynamicValue::ResourceUri(uri.clone()),
+                )]))
             } else if verb == &bindings.delete {
-                manager.delete(uri.as_ref().to_string().as_str())?;
-                DynamicValue::ResourceUri(uri.clone())
+                manager.delete(uri.to_string().as_str())?;
+                DynamicValue::Record(BTreeMap::from([(
+                    "uri".into(),
+                    DynamicValue::ResourceUri(uri.clone()),
+                )]))
             } else {
                 return Err(KernelError::UnsupportedVerb {
                     verb: verb.to_string(),
@@ -565,97 +522,121 @@ impl DynamicResourceProvider for ProcessResourceProvider {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    fn bindings() -> ProcessVerbBindings {
-        ProcessVerbBindings {
-            run: VerbId::new("artist:process/run@1.0.0").unwrap(),
-            send: VerbId::new("artist:process/send@1.0.0").unwrap(),
-            read: VerbId::new("artist:process/read@1.0.0").unwrap(),
-            poll: VerbId::new("artist:process/poll@1.0.0").unwrap(),
-            abort: VerbId::new("artist:process/abort@1.0.0").unwrap(),
-            delete: VerbId::new("artist:process/delete@1.0.0").unwrap(),
+impl ProcessResourceProvider {
+    async fn poll_value(
+        manager: &ProcessManager,
+        uri: &ResourceUri,
+        input: &DynamicValue,
+    ) -> Result<DynamicValue, KernelError> {
+        let (pattern, timeout_ms) = process_poll_options(input)?;
+        let matcher = pattern
+            .as_deref()
+            .map(regex::Regex::new)
+            .transpose()
+            .map_err(|error| KernelError::InvalidPattern {
+                message: error.to_string(),
+            })?;
+        let timeout = timeout_ms.map(std::time::Duration::from_millis);
+        let started = std::time::Instant::now();
+        loop {
+            let snapshot = manager.snapshot(uri.to_string().as_str())?;
+            let text = if uri.path().ends_with("/stderr") {
+                manager.output(uri.to_string().as_str(), true)?
+            } else {
+                manager.output(uri.to_string().as_str(), false)?
+            };
+            if matcher
+                .as_ref()
+                .is_some_and(|matcher| matcher.is_match(&text))
+            {
+                return Ok(DynamicValue::Record(BTreeMap::from([
+                    ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+                    ("text".to_owned(), DynamicValue::String(text)),
+                    (
+                        "reason".to_owned(),
+                        DynamicValue::Enum("matched".to_owned()),
+                    ),
+                ])));
+            }
+            if !snapshot.running {
+                return Ok(DynamicValue::Record(BTreeMap::from([
+                    ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+                    ("text".to_owned(), DynamicValue::String(text)),
+                    (
+                        "reason".to_owned(),
+                        DynamicValue::Enum("terminated".to_owned()),
+                    ),
+                ])));
+            }
+            if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+                return Ok(DynamicValue::Record(BTreeMap::from([
+                    ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+                    ("text".to_owned(), DynamicValue::String(text)),
+                    (
+                        "reason".to_owned(),
+                        DynamicValue::Enum("timeout".to_owned()),
+                    ),
+                ])));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
+}
 
-    #[test]
-    fn process_execution_requires_a_capability_identity() {
-        let manager = ProcessManager::new();
-        assert!(matches!(
-            manager.run_with_capability("", "/bin/true", &[], None, &[]),
-            Err(KernelError::PermissionDenied { .. })
-        ));
-    }
+fn process_exit_code(status: std::process::ExitStatus) -> Option<i32> {
+    status.code().or_else(|| {
+        #[cfg(unix)]
+        {
+            status.signal().map(|signal| 128 + signal)
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    })
+}
 
-    #[test]
-    fn executes_direct_file_without_shell_and_supports_process_lifecycle() {
-        let manager = ProcessManager::new();
-        let uri = manager
-            .run_with_capability("test.process", "/bin/cat", &[], None, &[])
-            .expect("cat executable should be available");
-        manager.send(&uri, b"direct process\n").unwrap();
-        std::thread::sleep(Duration::from_millis(30));
-        assert!(
-            manager
-                .poll(&uri)
-                .unwrap()
-                .output
-                .contains("direct process")
-        );
-        manager.abort(&uri).unwrap();
-        assert!(manager.poll(&uri).unwrap().aborted);
-        manager.delete(&uri).unwrap();
-        assert!(matches!(
-            manager.poll(&uri),
-            Err(KernelError::NotFound { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn process_lifecycle_is_available_through_dynamic_resource_provider() {
-        let manager = ProcessManager::new();
-        let bindings = bindings();
-        let provider =
-            ProcessResourceProvider::new(manager.clone(), bindings.clone(), "test.process");
-        let run_uri = ResourceUri::parse("/bin/cat").unwrap();
-        let input = DynamicValue::Record(std::collections::BTreeMap::from([
-            ("executable".into(), DynamicValue::String("/bin/cat".into())),
-            ("args".into(), DynamicValue::List(Vec::new())),
-            ("cwd".into(), DynamicValue::Option(None)),
-            ("environment".into(), DynamicValue::List(Vec::new())),
-        ]));
-        let result = provider
-            .invoke(&bindings.run, &run_uri, input)
-            .await
-            .unwrap();
-        let DynamicValue::ResourceUri(process_uri) = result.output else {
-            panic!("run did not return a process URI");
-        };
-        provider
-            .invoke(
-                &bindings.send,
-                &process_uri,
-                DynamicValue::String("dynamic process\n".into()),
-            )
-            .await
-            .unwrap();
-        std::thread::sleep(Duration::from_millis(30));
-        let snapshot = provider
-            .invoke(&bindings.read, &process_uri, DynamicValue::Option(None))
-            .await
-            .unwrap();
-        assert!(matches!(snapshot.output, DynamicValue::Record(_)));
-        provider
-            .invoke(&bindings.abort, &process_uri, DynamicValue::Option(None))
-            .await
-            .unwrap();
-        provider
-            .invoke(&bindings.delete, &process_uri, DynamicValue::Option(None))
-            .await
-            .unwrap();
-        assert!(manager.poll(&process_uri.to_string()).is_err());
-    }
+fn process_poll_options(
+    input: &DynamicValue,
+) -> Result<(Option<String>, Option<u64>), KernelError> {
+    let DynamicValue::Record(fields) = input else {
+        return Ok((None, None));
+    };
+    let pattern = match fields.get("match") {
+        None | Some(DynamicValue::Option(None)) => None,
+        Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+            DynamicValue::String(value) => Some(value.clone()),
+            _ => {
+                return Err(KernelError::InvalidPattern {
+                    message: "poll match must be a string".into(),
+                });
+            }
+        },
+        Some(DynamicValue::String(value)) => Some(value.clone()),
+        _ => {
+            return Err(KernelError::InvalidPattern {
+                message: "poll match must be a string".into(),
+            });
+        }
+    };
+    let timeout = match fields.get("timeout-ms") {
+        None | Some(DynamicValue::Option(None)) => None,
+        Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+            DynamicValue::U64(value) => Some(*value),
+            DynamicValue::S64(value) if *value >= 0 => Some(*value as u64),
+            _ => {
+                return Err(KernelError::InvalidRequest {
+                    message: "poll timeout-ms must be u64".into(),
+                });
+            }
+        },
+        Some(DynamicValue::U64(value)) => Some(*value),
+        Some(DynamicValue::S64(value)) if *value >= 0 => Some(*value as u64),
+        _ => {
+            return Err(KernelError::InvalidRequest {
+                message: "poll timeout-ms must be u64".into(),
+            });
+        }
+    };
+    Ok((pattern, timeout))
 }

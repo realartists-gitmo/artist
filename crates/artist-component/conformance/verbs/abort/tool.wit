@@ -1,6 +1,9 @@
 package artist:tool@1.0.0;
 interface abort {
-    use artist:%resource/types@1.0.0.{uri, error};
-    abort: func(uris: list<uri>) -> list<result<uri, error>>;
+    use artist:%resource/types@1.0.0.{error, uri};
+    record uri-request { uri: uri }
+    record uri-response { uri: uri }
+    abort: func(requests: list<uri-request>) -> list<result<uri-response, error>>;
+    observe: func(response: result<uri-response, error>) -> string;
 }
 world tool-world { export abort; }

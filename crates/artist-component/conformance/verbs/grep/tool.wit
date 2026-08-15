@@ -1,7 +1,9 @@
 package artist:tool@1.0.0;
 interface grep {
-    use artist:%resource/types@1.0.0.{grep-request, anchored-text, error};
-    grep: func(request: grep-request) -> result<list<anchored-text>, error>;
-    grep-stream: func(request: grep-request) -> result<stream<anchored-text>, error>;
+    use artist:%resource/types@1.0.0.{anchored-text, error, uri};
+    record grep-request { uri: uri, pattern: string }
+    record grep-response { matches: list<anchored-text> }
+    grep: func(requests: list<grep-request>) -> list<result<grep-response, error>>;
+    observe: func(response: result<grep-response, error>) -> string;
 }
 world tool-world { export grep; }

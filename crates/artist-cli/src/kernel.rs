@@ -10,7 +10,7 @@ use artist_kernel::{
     DynamicValue, FileHandler, FileResourceProvider, FileVerbBindings, Kernel, ProcessManager,
     ProcessResourceProvider, ProcessVerbBindings, RepositoryHandler, RepositoryResourceProvider,
     RepositoryVerbBindings, ResourceAddress, ResourceUri, SessionHandler, SessionResourceProvider,
-    SessionVerbBindings, VerbId,
+    SessionVerbBindings, VerbDefinition, VerbId,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -23,6 +23,19 @@ use std::time::Duration;
 pub async fn build(root: &Path) -> Result<Kernel> {
     let kernel = Kernel::new();
 
+    // The invocation stream is a first-class resource namespace. Its
+    // channel verbs are activated once here; individual tool packages never
+    // need to know how invocation resources are stored or polled.
+    for function in ["read", "write", "poll", "abort", "delete"] {
+        let identity = native_verb("invocations", function);
+        kernel.activate_verb(VerbDefinition::new(
+            identity,
+            function,
+            "invocation-channel",
+            "Read or control one invocation channel",
+        ))?;
+    }
+
     // Native implementations publish their package-owned dynamic identities
     // at the kernel boundary.
     kernel.register_dynamic_resource_provider(Arc::new(FileResourceProvider::new(
@@ -31,6 +44,7 @@ pub async fn build(root: &Path) -> Result<Kernel> {
             read: native_verb("filesystem", "read"),
             write: native_verb("filesystem", "write"),
             edit: native_verb("filesystem", "edit"),
+            insert: native_verb("filesystem", "insert"),
             delete: native_verb("filesystem", "delete"),
             find: native_verb("filesystem", "find"),
             grep: native_verb("filesystem", "grep"),
@@ -41,7 +55,6 @@ pub async fn build(root: &Path) -> Result<Kernel> {
         SessionVerbBindings {
             read: native_verb("session", "read"),
             write: native_verb("session", "write"),
-            send: native_verb("session", "send"),
             poll: native_verb("session", "poll"),
             abort: native_verb("session", "abort"),
             delete: native_verb("session", "delete"),
@@ -57,7 +70,7 @@ pub async fn build(root: &Path) -> Result<Kernel> {
     )))?;
     let process_bindings = ProcessVerbBindings {
         run: native_verb("process", "run"),
-        send: native_verb("process", "send"),
+        write: native_verb("process", "write"),
         read: native_verb("process", "read"),
         poll: native_verb("process", "poll"),
         abort: native_verb("process", "abort"),
@@ -73,19 +86,21 @@ pub async fn build(root: &Path) -> Result<Kernel> {
     kernel.register_dynamic_resource_provider(Arc::new(ProcessResourceProvider::new(
         ProcessManager::new(),
         process_bindings,
-        "process.execute",
     )))?;
     let tools_root = root.join("tools");
     std::fs::create_dir_all(&tools_root)
         .with_context(|| format!("initialize tools root at {}", tools_root.display()))?;
-    seed_universal_tools(&tools_root)?;
+    seed_universal_tools(&tools_root)
+        .with_context(|| format!("seed universal tools at {}", tools_root.display()))?;
     let resources_root = root.join("resources");
     std::fs::create_dir_all(&resources_root)
         .with_context(|| format!("initialize resources root at {}", resources_root.display()))?;
-    seed_ast_resource(&resources_root)?;
+    seed_ast_resource(&resources_root)
+        .with_context(|| format!("seed AST resource at {}", resources_root.display()))?;
     let shared_watcher = SharedWatcher::new();
     let resources = Arc::new(
-        ResourcesHandler::new_with_watcher(&resources_root, Some(&shared_watcher))?
+        ResourcesHandler::new_with_watcher(&resources_root, Some(&shared_watcher))
+            .with_context(|| format!("load resources at {}", resources_root.display()))?
             .without_file_package("artist-ast"),
     );
     kernel.register_dynamic_resource_provider(Arc::new(DynamicResourcesProvider::new(
@@ -94,8 +109,8 @@ pub async fn build(root: &Path) -> Result<Kernel> {
             read: native_verb("resources", "read"),
             write: native_verb("resources", "write"),
             edit: native_verb("resources", "edit"),
+            insert: native_verb("resources", "insert"),
             poll: native_verb("resources", "poll"),
-            send: native_verb("resources", "send"),
             run: native_verb("resources", "run"),
             abort: native_verb("resources", "abort"),
             delete: native_verb("resources", "delete"),
@@ -104,13 +119,15 @@ pub async fn build(root: &Path) -> Result<Kernel> {
         },
     )))?;
     let tools =
-        ToolsHandler::new_with_watcher(&tools_root, Vec::<String>::new(), Some(&shared_watcher))?;
+        ToolsHandler::new_with_watcher(&tools_root, Vec::<String>::new(), Some(&shared_watcher))
+            .with_context(|| format!("load tools at {}", tools_root.display()))?;
     kernel.register_dynamic_resource_provider(Arc::new(DynamicToolsProvider::new(
         Arc::new(tools.clone()),
         ToolsVerbBindings {
             read: native_verb("tools", "read"),
             write: native_verb("tools", "write"),
             edit: native_verb("tools", "edit"),
+            insert: native_verb("tools", "insert"),
             delete: native_verb("tools", "delete"),
             find: native_verb("tools", "find"),
             grep: native_verb("tools", "grep"),
@@ -250,9 +267,9 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/../artist-component/conformance/typed-guest/src/lib.rs"
     ));
-    for entry in std::fs::read_dir(source_root)? {
+    for entry in std::fs::read_dir(&source_root)? {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+        if !entry.file_type()?.is_dir() || !entry.path().join("Cargo.toml").is_file() {
             continue;
         }
         let name = entry.file_name();
@@ -269,13 +286,13 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
             "../typed-guest/src/lib.rs",
         );
         let tool_wit = std::fs::read(entry.path().join("tool.wit"))?;
-        let dependency_wit = std::fs::read(entry.path().join("deps/resource/world.wit"))?;
+        let dependency_wit = std::fs::read(entry.path().join("deps/resource/world.wit"))
+            .or_else(|_| std::fs::read(source_root.join("read/deps/resource/world.wit")))?;
+        let cargo_lock = std::fs::read(entry.path().join("Cargo.lock"))
+            .or_else(|_| std::fs::read(source_root.join("read/Cargo.lock")))?;
         for (relative, bytes) in [
             ("Cargo.toml", manifest.as_bytes().to_vec()),
-            (
-                "Cargo.lock",
-                std::fs::read(entry.path().join("Cargo.lock"))?,
-            ),
+            ("Cargo.lock", cargo_lock),
             ("tool.md", std::fs::read(entry.path().join("tool.md"))?),
             ("src/lib.rs", source.into_bytes()),
             ("typed-guest/src/lib.rs", guest.as_bytes().to_vec()),
@@ -377,8 +394,8 @@ fn dynamic_function(verb: Verb) -> &'static str {
         Verb::Read => "read",
         Verb::Write => "write",
         Verb::Edit => "edit",
+        Verb::Insert => "insert",
         Verb::Run => "run",
-        Verb::Send => "send",
         Verb::Poll => "poll",
         Verb::Abort => "abort",
         Verb::Delete => "delete",
@@ -418,7 +435,7 @@ fn dynamic_input(verb: Verb, args: &Value) -> Result<DynamicValue> {
             ("before".to_owned(), option_u32("before")?),
             ("after".to_owned(), option_u32("after")?),
         ]))),
-        Verb::Write | Verb::Send => Ok(DynamicValue::Record(BTreeMap::from([(
+        Verb::Write => Ok(DynamicValue::Record(BTreeMap::from([(
             "content".to_owned(),
             object
                 .get("content")
@@ -435,6 +452,30 @@ fn dynamic_input(verb: Verb, args: &Value) -> Result<DynamicValue> {
             "pattern".to_owned(),
             string("pattern")?,
         )]))),
+        Verb::Edit => Ok(DynamicValue::Record(BTreeMap::from([
+            ("start".to_owned(), string("start")?),
+            ("end".to_owned(), option_value("end")?),
+            ("content".to_owned(), string("content")?),
+        ]))),
+        Verb::Insert => Ok(DynamicValue::Record(BTreeMap::from([
+            (
+                "at".to_owned(),
+                match object.get("at").and_then(Value::as_str) {
+                    Some("top") => DynamicValue::Variant("top".to_owned(), None),
+                    Some("bottom") => DynamicValue::Variant("bottom".to_owned(), None),
+                    Some(anchor) => DynamicValue::Variant(
+                        "at".to_owned(),
+                        Some(Box::new(DynamicValue::String(anchor.to_owned()))),
+                    ),
+                    None => {
+                        return Err(anyhow!(
+                            "insert requires an at position (top, bottom, or anchor)"
+                        ));
+                    }
+                },
+            ),
+            ("content".to_owned(), string("content")?),
+        ]))),
         Verb::Run => Ok(DynamicValue::Record(BTreeMap::from([(
             "args".to_owned(),
             DynamicValue::List(
@@ -448,68 +489,8 @@ fn dynamic_input(verb: Verb, args: &Value) -> Result<DynamicValue> {
                     .collect(),
             ),
         )]))),
-        Verb::Edit => Ok(DynamicValue::Record(BTreeMap::from([(
-            "operations".to_owned(),
-            DynamicValue::List(
-                object
-                    .get("operations")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .map(dynamic_edit_value)
-                    .collect::<Result<_, _>>()?,
-            ),
-        )]))),
         Verb::Poll | Verb::Abort | Verb::Delete => Ok(DynamicValue::Record(BTreeMap::new())),
     }
-}
-
-fn dynamic_edit_value(value: &Value) -> Result<DynamicValue> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow!("edit operation must be an object"))?;
-    if let Some(replace) = object.get("replace").or_else(|| object.get("Replace")) {
-        let fields = replace
-            .as_object()
-            .ok_or_else(|| anyhow!("replace operation must be an object"))?;
-        return Ok(DynamicValue::Variant(
-            "replace".to_owned(),
-            Some(Box::new(DynamicValue::Record(BTreeMap::from([
-                (
-                    "start".to_owned(),
-                    json_dynamic(fields.get("start").unwrap_or(&Value::Null))?,
-                ),
-                (
-                    "end".to_owned(),
-                    match fields.get("end") {
-                        None | Some(Value::Null) => DynamicValue::Option(None),
-                        Some(value) => DynamicValue::Option(Some(Box::new(json_dynamic(value)?))),
-                    },
-                ),
-                (
-                    "content".to_owned(),
-                    json_dynamic(fields.get("content").unwrap_or(&Value::Null))?,
-                ),
-            ])))),
-        ));
-    }
-    if let Some(insert) = object.get("insert").or_else(|| object.get("Insert")) {
-        let fields = insert
-            .as_object()
-            .ok_or_else(|| anyhow!("insert operation must be an object"))?;
-        let at = json_dynamic(fields.get("at").unwrap_or(&Value::Null))?;
-        return Ok(DynamicValue::Variant(
-            "insert".to_owned(),
-            Some(Box::new(DynamicValue::Record(BTreeMap::from([
-                ("at".to_owned(), at),
-                (
-                    "content".to_owned(),
-                    json_dynamic(fields.get("content").unwrap_or(&Value::Null))?,
-                ),
-            ])))),
-        ));
-    }
-    Err(anyhow!("unknown edit operation"))
 }
 
 fn json_dynamic(value: &Value) -> Result<DynamicValue> {
@@ -651,7 +632,7 @@ mod tests {
         let ast_source = root.path().join("main.rs");
         std::fs::write(&ast_source, "fn caller() { main(); }\nfn main() {}\n").unwrap();
         let kernel = build(root.path()).await.unwrap();
-        assert_eq!(kernel.active_verbs().unwrap().len(), 16);
+        assert_eq!(kernel.active_verbs().unwrap().len(), 20);
         let seeded = ToolsHandler::new(root.path().join("tools"), Vec::<String>::new())
             .unwrap()
             .registrations()

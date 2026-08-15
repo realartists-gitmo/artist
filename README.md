@@ -12,7 +12,7 @@ run the minimal model loop while the VFS kernel is built.
 The intended model-facing contract is one universal set of verbs:
 
 ```text
-read write edit send poll delete find grep
+read write edit insert find grep run poll abort delete
 ```
 
 Schemes such as `repo://`, `agent://`, `session://`, `bash://`,

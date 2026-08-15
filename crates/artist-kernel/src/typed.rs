@@ -3,7 +3,7 @@
 //! JSON is an adapter concern. The kernel dispatches these values directly;
 //! provider-facing JSON schemas are derived by the component layer.
 
-use crate::{Anchor, ClaimDecision, KernelError, ResourceUri};
+use crate::{Anchor, ClaimDecision, ResourceUri};
 use serde::{Deserialize, Serialize};
 use std::{
     any::Any,
@@ -72,54 +72,37 @@ pub struct WriteInput {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ReplaceOperation {
+pub enum InsertionPosition {
+    Top,
+    Bottom,
+    At(Anchor),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EditInput {
+    pub uri: ResourceUri,
     pub start: Anchor,
     pub end: Option<Anchor>,
     pub content: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct InsertOperation {
-    pub at: InsertionPoint,
+pub struct InsertInput {
+    pub uri: ResourceUri,
+    pub at: InsertionPosition,
     pub content: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub enum InsertionPoint {
-    Top,
-    Bottom,
-    Before(Anchor),
-    After(Anchor),
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub enum EditOperation {
-    Replace(ReplaceOperation),
-    Insert(InsertOperation),
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct EditInput {
-    pub uri: ResourceUri,
-    pub operations: Vec<EditOperation>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FindInput {
-    pub roots: Vec<ResourceUri>,
+    pub root: ResourceUri,
     pub query: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub enum GrepSource {
-    Resources(Vec<ResourceUri>),
-    Text(Vec<AnchoredText>),
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GrepInput {
+    pub uri: ResourceUri,
     pub pattern: String,
-    pub source: GrepSource,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -327,21 +310,11 @@ pub struct RunInput {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct SendInput {
-    pub uri: ResourceUri,
-    pub content: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PollTarget {
-    pub uri: ResourceUri,
-    pub from_position: Option<Position>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PollInput {
-    pub targets: Vec<PollTarget>,
-    pub until: Option<PollCondition>,
+    pub uri: ResourceUri,
+    pub from: Option<Position>,
+    pub match_pattern: Option<String>,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -355,13 +328,47 @@ pub enum ReadResult {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WriteResult {
-    pub text: AnchoredText,
+    pub uri: ResourceUri,
+    pub text: Option<AnchoredText>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct EditResult {
-    pub text: AnchoredText,
+    pub uri: ResourceUri,
+    pub changed: Vec<AnchoredText>,
     pub diff: AnchoredDiff,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct InsertResult {
+    pub uri: ResourceUri,
+    pub changed: Vec<AnchoredText>,
+    pub diff: AnchoredDiff,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FindResult {
+    pub uris: Vec<ResourceUri>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GrepResult {
+    pub matches: Vec<AnchoredText>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RunResult {
+    pub uri: ResourceUri,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UriInput {
+    pub uri: ResourceUri,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UriResult {
+    pub uri: ResourceUri,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -377,33 +384,18 @@ pub struct AnchoredDiff {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct RegexAtom {
-    pub target: u32,
-    pub pattern: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub enum PollAtom {
-    Changed(u32),
-    Regex(RegexAtom),
-    Terminated(u32),
-    Timeout(u64),
-}
-
-/// The semantic poll condition. The component ABI may lower this recursive
-/// value to an indexed arena, but the kernel must not make the lowering its
-/// meaning: handlers and native callers need to evaluate the same tree.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub enum PollCondition {
-    Atom(PollAtom),
-    All(Vec<PollCondition>),
-    Any(Vec<PollCondition>),
+pub enum PollReason {
+    Changed,
+    Matched,
+    Terminated,
+    Timeout,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PollResult {
-    pub text: Vec<AnchoredText>,
-    pub satisfied: Vec<PollAtom>,
+    pub uri: ResourceUri,
+    pub text: AnchoredText,
+    pub reason: PollReason,
 }
 
 #[cfg(test)]

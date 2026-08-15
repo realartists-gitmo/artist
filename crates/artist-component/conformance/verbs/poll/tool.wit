@@ -1,7 +1,10 @@
 package artist:tool@1.0.0;
 interface poll {
-    use artist:%resource/types@1.0.0.{poll-request, poll-result, anchored-text, error};
-    poll: func(request: poll-request) -> result<poll-result, error>;
-    poll-stream: func(request: poll-request) -> result<stream<anchored-text>, error>;
+    use artist:%resource/types@1.0.0.{anchor, anchored-text, error, position, uri};
+    record poll-request { uri: uri, from: option<position>, match: option<string>, timeout-ms: option<u64> }
+    enum poll-reason { changed, matched, terminated, timeout }
+    record poll-response { uri: uri, text: anchored-text, reason: poll-reason }
+    poll: func(requests: list<poll-request>) -> list<result<poll-response, error>>;
+    observe: func(response: result<poll-response, error>) -> string;
 }
 world tool-world { export poll; }

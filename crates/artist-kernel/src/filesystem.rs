@@ -1,8 +1,9 @@
 use crate::{
     Anchor, AnchorError, AnchorSet, AnchoredLine, AnchoredText, ClaimDecision,
-    DynamicClaimProvider, DynamicResourceProvider, DynamicValue, DynamicVerbResult, EditOperation,
-    InsertOperation, InsertionPoint, KernelError, Pattern, Position, ReplaceOperation,
-    ResourceFuture, ResourceUri, SearchService, StructuralAnalyzer, StructuralLine, VerbId,
+    DynamicClaimProvider, DynamicResourceProvider, DynamicValue, DynamicVerbResult,
+    InsertionPosition, KernelError, MixedResourceRequest, Pattern, Position, ResourceBatchFuture,
+    ResourceFuture, ResourceRequest, ResourceUri, SearchService, StructuralAnalyzer,
+    StructuralLine, VerbId,
 };
 use cap_std::{ambient_authority, fs::Dir};
 #[cfg(test)]
@@ -25,6 +26,7 @@ pub struct FileVerbBindings {
     pub read: VerbId,
     pub write: VerbId,
     pub edit: VerbId,
+    pub insert: VerbId,
     pub delete: VerbId,
     pub find: VerbId,
     pub grep: VerbId,
@@ -63,6 +65,261 @@ pub struct FileHandler {
 }
 
 impl FileHandler {
+    fn apply_typed_mixed_batch(
+        &self,
+        path: &Path,
+        uri: ResourceUri,
+        inputs: &[(bool, DynamicValue)],
+    ) -> Result<Vec<DynamicValue>, KernelError> {
+        let original = self.cap_read(path).map_err(|error| KernelError::Handler {
+            message: format!("read {}: {error}", path.display()),
+        })?;
+        let (_, lines) = self.structural_lines(path, &original);
+        let anchors = AnchorSet::from_inputs(
+            &lines
+                .iter()
+                .map(StructuralLine::anchor_input)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(anchor_error)?;
+        let old = self.anchored_text(uri.clone(), path, &original)?;
+        let mut operations = Vec::with_capacity(inputs.len());
+        for (order, (is_edit, input)) in inputs.iter().enumerate() {
+            if *is_edit {
+                let start = anchors
+                    .resolve(&dynamic_anchor_field(input, "start")?)
+                    .map_err(anchor_error)?;
+                let end = dynamic_optional_anchor(dynamic_record(input)?, "end")?
+                    .map(|anchor| anchors.resolve(&anchor))
+                    .transpose()
+                    .map_err(anchor_error)?
+                    .unwrap_or(start);
+                if start > end {
+                    return Err(KernelError::Conflict {
+                        uri: uri.to_string(),
+                    });
+                }
+                operations.push((
+                    lines[start].start_byte,
+                    lines[end].end_byte,
+                    order,
+                    true,
+                    dynamic_string_field(input, "content")?.into_bytes(),
+                ));
+            } else {
+                let offset = match dynamic_insertion_position(input)? {
+                    InsertionPosition::Top => 0,
+                    InsertionPosition::Bottom => original.len(),
+                    InsertionPosition::At(anchor) => {
+                        lines[anchors.resolve(&anchor).map_err(anchor_error)?].start_byte
+                    }
+                };
+                operations.push((
+                    offset,
+                    offset,
+                    order,
+                    false,
+                    dynamic_string_field(input, "content")?.into_bytes(),
+                ));
+            }
+        }
+        for (index, left) in operations.iter().enumerate() {
+            for right in operations.iter().skip(index + 1) {
+                let left_edit = left.3;
+                let right_edit = right.3;
+                if left_edit && right_edit && left.0 < right.1 && right.0 < left.1 {
+                    return Err(KernelError::Conflict {
+                        uri: uri.to_string(),
+                    });
+                }
+                if left_edit && !right_edit && right.0 > left.0 && right.0 < left.1 {
+                    return Err(KernelError::Conflict {
+                        uri: uri.to_string(),
+                    });
+                }
+                if right_edit && !left_edit && left.0 > right.0 && left.0 < right.1 {
+                    return Err(KernelError::Conflict {
+                        uri: uri.to_string(),
+                    });
+                }
+            }
+        }
+        operations.sort_by_key(|(start, _, order, _, _)| (*start, *order));
+        let mut rendered = Vec::with_capacity(original.len());
+        let mut cursor = 0;
+        for (start, end, _, _, replacement) in operations {
+            if start < cursor {
+                return Err(KernelError::Conflict {
+                    uri: uri.to_string(),
+                });
+            }
+            rendered.extend_from_slice(&original[cursor..start]);
+            rendered.extend_from_slice(&replacement);
+            cursor = end.max(cursor);
+        }
+        rendered.extend_from_slice(&original[cursor..]);
+        self.cap_atomic_replace(path, &rendered)?;
+        let new = self.anchored_text(uri.clone(), path, &rendered)?;
+        let output = DynamicValue::Record(BTreeMap::from([
+            ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+            (
+                "changed".to_owned(),
+                DynamicValue::List(vec![dynamic_text(new.clone())]),
+            ),
+            (
+                "diff".to_owned(),
+                dynamic_diff(crate::AnchoredDiff {
+                    uri,
+                    hunks: vec![crate::DiffHunk {
+                        old: old.lines,
+                        new: new.lines,
+                    }],
+                }),
+            ),
+        ]));
+        Ok(inputs.iter().map(|_| output.clone()).collect())
+    }
+
+    fn apply_typed_edit_batch(
+        &self,
+        path: &Path,
+        uri: ResourceUri,
+        inputs: &[DynamicValue],
+    ) -> Result<Vec<DynamicValue>, KernelError> {
+        let original = self.cap_read(path).map_err(|error| KernelError::Handler {
+            message: format!("read {}: {error}", path.display()),
+        })?;
+        let (_, lines) = self.structural_lines(path, &original);
+        let anchors = AnchorSet::from_inputs(
+            &lines
+                .iter()
+                .map(StructuralLine::anchor_input)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(anchor_error)?;
+        let old = self.anchored_text(uri.clone(), path, &original)?;
+        let mut ranges = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let start = anchors
+                .resolve(&dynamic_anchor_field(input, "start")?)
+                .map_err(anchor_error)?;
+            let end = dynamic_optional_anchor(dynamic_record(input)?, "end")?
+                .map(|anchor| anchors.resolve(&anchor))
+                .transpose()
+                .map_err(anchor_error)?
+                .unwrap_or(start);
+            if start > end {
+                return Err(KernelError::InvalidAnchor {
+                    message: format!("edit range is reversed: {start}..={end}"),
+                });
+            }
+            ranges.push((
+                lines[start].start_byte,
+                lines[end].end_byte,
+                dynamic_string_field(input, "content")?.into_bytes(),
+            ));
+        }
+        ranges.sort_by_key(|(start, end, _)| (*start, *end));
+        if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+            return Err(KernelError::Conflict {
+                uri: uri.to_string(),
+            });
+        }
+        let mut rendered = Vec::with_capacity(original.len());
+        let mut cursor = 0;
+        for (start, end, replacement) in ranges {
+            rendered.extend_from_slice(&original[cursor..start]);
+            rendered.extend_from_slice(&replacement);
+            cursor = end;
+        }
+        rendered.extend_from_slice(&original[cursor..]);
+        self.cap_atomic_replace(path, &rendered)?;
+        let new = self.anchored_text(uri.clone(), path, &rendered)?;
+        let output = DynamicValue::Record(BTreeMap::from([
+            ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+            (
+                "changed".to_owned(),
+                DynamicValue::List(vec![dynamic_text(new.clone())]),
+            ),
+            (
+                "diff".to_owned(),
+                dynamic_diff(crate::AnchoredDiff {
+                    uri,
+                    hunks: vec![crate::DiffHunk {
+                        old: old.lines,
+                        new: new.lines,
+                    }],
+                }),
+            ),
+        ]));
+        Ok(inputs.iter().map(|_| output.clone()).collect())
+    }
+
+    fn apply_typed_insert_batch(
+        &self,
+        path: &Path,
+        uri: ResourceUri,
+        inputs: &[DynamicValue],
+    ) -> Result<Vec<DynamicValue>, KernelError> {
+        let original = self.cap_read(path).map_err(|error| KernelError::Handler {
+            message: format!("read {}: {error}", path.display()),
+        })?;
+        let (_, lines) = self.structural_lines(path, &original);
+        let anchors = AnchorSet::from_inputs(
+            &lines
+                .iter()
+                .map(StructuralLine::anchor_input)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(anchor_error)?;
+        let old = self.anchored_text(uri.clone(), path, &original)?;
+        let mut inserts = Vec::with_capacity(inputs.len());
+        for (order, input) in inputs.iter().enumerate() {
+            let offset = match dynamic_insertion_position(input)? {
+                InsertionPosition::Top => 0,
+                InsertionPosition::Bottom => original.len(),
+                InsertionPosition::At(anchor) => {
+                    let index = anchors.resolve(&anchor).map_err(anchor_error)?;
+                    lines[index].start_byte
+                }
+            };
+            inserts.push((
+                offset,
+                order,
+                dynamic_string_field(input, "content")?.into_bytes(),
+            ));
+        }
+        inserts.sort_by_key(|(offset, order, _)| (*offset, *order));
+        let mut rendered = Vec::with_capacity(original.len());
+        let mut cursor = 0;
+        for (offset, _, replacement) in inserts {
+            rendered.extend_from_slice(&original[cursor..offset]);
+            rendered.extend_from_slice(&replacement);
+            cursor = offset;
+        }
+        rendered.extend_from_slice(&original[cursor..]);
+        self.cap_atomic_replace(path, &rendered)?;
+        let new = self.anchored_text(uri.clone(), path, &rendered)?;
+        let output = DynamicValue::Record(BTreeMap::from([
+            ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+            (
+                "changed".to_owned(),
+                DynamicValue::List(vec![dynamic_text(new.clone())]),
+            ),
+            (
+                "diff".to_owned(),
+                dynamic_diff(crate::AnchoredDiff {
+                    uri,
+                    hunks: vec![crate::DiffHunk {
+                        old: old.lines,
+                        new: new.lines,
+                    }],
+                }),
+            ),
+        ]));
+        Ok(inputs.iter().map(|_| output.clone()).collect())
+    }
+
     pub fn new(root: impl AsRef<Path>) -> Result<Self, KernelError> {
         let root_path = root.as_ref();
         let root = fs::canonicalize(root_path).map_err(|error| KernelError::Handler {
@@ -431,7 +688,9 @@ impl FileHandler {
         &self,
         path: &Path,
         uri: crate::ResourceUri,
-        operations: &[crate::EditOperation],
+        start_anchor: Anchor,
+        end_anchor: Option<Anchor>,
+        content: String,
     ) -> Result<crate::EditResult, KernelError> {
         let original = self.cap_read(path).map_err(|error| KernelError::Handler {
             message: format!("read {}: {error}", path.display()),
@@ -443,52 +702,23 @@ impl FileHandler {
             .collect::<Vec<_>>();
         let anchors = AnchorSet::from_inputs(&inputs).map_err(anchor_error)?;
         let old = self.anchored_text(uri.clone(), path, &original)?;
-        let mut ranges = Vec::with_capacity(operations.len());
-        for operation in operations {
-            match operation {
-                crate::EditOperation::Replace(replace) => {
-                    let start = anchors.resolve(&replace.start).map_err(anchor_error)?;
-                    let end = replace
-                        .end
-                        .as_ref()
-                        .map(|anchor| anchors.resolve(anchor))
-                        .transpose()
-                        .map_err(anchor_error)?
-                        .unwrap_or(start);
-                    if start > end {
-                        return Err(KernelError::InvalidAnchor {
-                            message: format!("edit range is reversed: {start}..={end}"),
-                        });
-                    }
-                    ranges.push((
-                        lines[start].start_byte,
-                        lines[end].end_byte,
-                        replace.content.as_bytes().to_vec(),
-                    ));
-                }
-                crate::EditOperation::Insert(insert) => {
-                    let offset = match &insert.at {
-                        crate::InsertionPoint::Top => 0,
-                        crate::InsertionPoint::Bottom => original.len(),
-                        crate::InsertionPoint::Before(anchor) => {
-                            let index = anchors.resolve(anchor).map_err(anchor_error)?;
-                            lines[index].start_byte
-                        }
-                        crate::InsertionPoint::After(anchor) => {
-                            let index = anchors.resolve(anchor).map_err(anchor_error)?;
-                            let line = &lines[index];
-                            let terminator = match original.get(line.end_byte..) {
-                                Some([b'\r', b'\n', ..]) => 2,
-                                Some([b'\r' | b'\n', ..]) => 1,
-                                _ => 0,
-                            };
-                            line.end_byte + terminator
-                        }
-                    };
-                    ranges.push((offset, offset, insert.content.as_bytes().to_vec()));
-                }
-            }
+        let start = anchors.resolve(&start_anchor).map_err(anchor_error)?;
+        let end = end_anchor
+            .as_ref()
+            .map(|anchor| anchors.resolve(anchor))
+            .transpose()
+            .map_err(anchor_error)?
+            .unwrap_or(start);
+        if start > end {
+            return Err(KernelError::InvalidAnchor {
+                message: format!("edit range is reversed: {start}..={end}"),
+            });
         }
+        let mut ranges = vec![(
+            lines[start].start_byte,
+            lines[end].end_byte,
+            content.into_bytes(),
+        )];
         ranges.sort_by_key(|(start, end, _)| (*start, *end));
         if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
             return Err(KernelError::InvalidRequest {
@@ -506,12 +736,59 @@ impl FileHandler {
         self.cap_atomic_replace(path, &rendered)?;
         let new = self.anchored_text(uri.clone(), path, &rendered)?;
         Ok(crate::EditResult {
-            text: new.clone(),
+            uri: uri.clone(),
+            changed: vec![new.clone()],
             diff: crate::AnchoredDiff {
                 uri,
                 hunks: vec![crate::DiffHunk {
                     old: old.lines,
                     new: new.lines.clone(),
+                }],
+            },
+        })
+    }
+
+    fn apply_typed_insert(
+        &self,
+        path: &Path,
+        uri: crate::ResourceUri,
+        at: InsertionPosition,
+        content: String,
+    ) -> Result<crate::InsertResult, KernelError> {
+        let original = self.cap_read(path).map_err(|error| KernelError::Handler {
+            message: format!("read {}: {error}", path.display()),
+        })?;
+        let (_, lines) = self.structural_lines(path, &original);
+        let anchors = AnchorSet::from_inputs(
+            &lines
+                .iter()
+                .map(StructuralLine::anchor_input)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(anchor_error)?;
+        let old = self.anchored_text(uri.clone(), path, &original)?;
+        let offset = match at {
+            InsertionPosition::Top => 0,
+            InsertionPosition::Bottom => original.len(),
+            InsertionPosition::At(anchor) => {
+                let index = anchors.resolve(&anchor).map_err(anchor_error)?;
+                lines[index].start_byte
+            }
+        };
+        let mut rendered = Vec::with_capacity(original.len() + content.len());
+        rendered.extend_from_slice(&original[..offset]);
+        rendered.extend_from_slice(content.as_bytes());
+        rendered.extend_from_slice(&original[offset..]);
+        self.cap_atomic_replace(path, &rendered)?;
+        let new = self.anchored_text(uri.clone(), path, &rendered)?;
+        Ok(crate::InsertResult {
+            uri: uri.clone(),
+            changed: vec![new.clone()],
+            diff: crate::AnchoredDiff {
+                uri,
+                hunks: vec![crate::DiffHunk {
+                    old: old.lines,
+                    new: new.lines,
                 }],
             },
         })
@@ -524,6 +801,7 @@ impl DynamicClaimProvider for FileResourceProvider {
             &self.bindings.read,
             &self.bindings.write,
             &self.bindings.edit,
+            &self.bindings.insert,
             &self.bindings.delete,
             &self.bindings.find,
             &self.bindings.grep,
@@ -544,6 +822,160 @@ impl DynamicClaimProvider for FileResourceProvider {
 }
 
 impl DynamicResourceProvider for FileResourceProvider {
+    fn invoke_mixed_batch<'a>(
+        &'a self,
+        requests: Vec<MixedResourceRequest>,
+        scope: crate::InvocationScope,
+    ) -> ResourceBatchFuture<'a> {
+        Box::pin(async move {
+            if !requests.is_empty()
+                && requests
+                    .iter()
+                    .all(|request| request.uri == requests[0].uri)
+                && requests
+                    .iter()
+                    .any(|request| request.verb == self.bindings.write)
+                && requests.iter().any(|request| {
+                    request.verb == self.bindings.edit || request.verb == self.bindings.insert
+                })
+            {
+                return requests
+                    .into_iter()
+                    .map(|request| {
+                        Err(KernelError::Conflict {
+                            uri: request.uri.to_string(),
+                        })
+                    })
+                    .collect();
+            }
+            if !requests.is_empty()
+                && requests
+                    .iter()
+                    .all(|request| request.uri == requests[0].uri)
+                && requests.iter().all(|request| {
+                    request.verb == self.bindings.edit || request.verb == self.bindings.insert
+                })
+            {
+                if scope.cancellation.is_cancelled() {
+                    return requests
+                        .into_iter()
+                        .map(|_| {
+                            Err(KernelError::Aborted {
+                                message: "resource batch cancelled".into(),
+                            })
+                        })
+                        .collect();
+                }
+                let uri = requests[0].uri.clone();
+                let path = match self.handler.typed_path(&uri) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return requests.into_iter().map(|_| Err(error.clone())).collect();
+                    }
+                };
+                let inputs = requests
+                    .iter()
+                    .map(|request| (request.verb == self.bindings.edit, request.input.clone()))
+                    .collect::<Vec<_>>();
+                return match self.handler.apply_typed_mixed_batch(&path, uri, &inputs) {
+                    Ok(outputs) => outputs
+                        .into_iter()
+                        .zip(requests)
+                        .map(|(output, request)| {
+                            Ok(DynamicVerbResult {
+                                verb: request.verb.clone(),
+                                function: request.verb.function().to_owned(),
+                                output,
+                            })
+                        })
+                        .collect(),
+                    Err(error) => requests.into_iter().map(|_| Err(error.clone())).collect(),
+                };
+            }
+            let mut results = Vec::with_capacity(requests.len());
+            for request in requests {
+                if scope.cancellation.is_cancelled() {
+                    results.push(Err(KernelError::Aborted {
+                        message: "resource batch cancelled".into(),
+                    }));
+                } else {
+                    results.push(
+                        self.invoke(&request.verb, &request.uri, request.input)
+                            .await,
+                    );
+                }
+            }
+            results
+        })
+    }
+
+    fn invoke_batch<'a>(
+        &'a self,
+        verb: &'a VerbId,
+        requests: Vec<ResourceRequest>,
+        scope: crate::InvocationScope,
+    ) -> ResourceBatchFuture<'a> {
+        Box::pin(async move {
+            if (verb == &self.bindings.edit || verb == &self.bindings.insert)
+                && !requests.is_empty()
+                && requests
+                    .iter()
+                    .all(|request| request.uri == requests[0].uri)
+            {
+                if scope.cancellation.is_cancelled() {
+                    return requests
+                        .into_iter()
+                        .map(|_| {
+                            Err(KernelError::Aborted {
+                                message: "resource batch cancelled".into(),
+                            })
+                        })
+                        .collect();
+                }
+                let uri = requests[0].uri.clone();
+                let path = match self.handler.typed_path(&uri) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return requests.into_iter().map(|_| Err(error.clone())).collect();
+                    }
+                };
+                let inputs = requests
+                    .iter()
+                    .map(|request| request.input.clone())
+                    .collect::<Vec<_>>();
+                let outputs = if verb == &self.bindings.edit {
+                    self.handler.apply_typed_edit_batch(&path, uri, &inputs)
+                } else {
+                    self.handler.apply_typed_insert_batch(&path, uri, &inputs)
+                };
+                return match outputs {
+                    Ok(outputs) => outputs
+                        .into_iter()
+                        .map(|output| {
+                            Ok(DynamicVerbResult {
+                                verb: verb.clone(),
+                                function: verb.function().to_owned(),
+                                output,
+                            })
+                        })
+                        .collect(),
+                    Err(error) => requests.into_iter().map(|_| Err(error.clone())).collect(),
+                };
+            }
+            let mut results = Vec::with_capacity(requests.len());
+            for request in requests {
+                if scope.cancellation.is_cancelled() {
+                    results.push(Err(KernelError::Aborted {
+                        message: "resource batch cancelled".into(),
+                    }));
+                } else {
+                    results.push(self.invoke(verb, &request.uri, request.input).await);
+                }
+            }
+            results
+        })
+    }
+
     fn invoke<'a>(
         &'a self,
         verb: &'a VerbId,
@@ -562,8 +994,18 @@ impl DynamicResourceProvider for FileResourceProvider {
                 self.handler
                     .dynamic_write(uri.clone(), dynamic_string_field(&input, "content")?)?
             } else if verb == &self.bindings.edit {
-                self.handler
-                    .dynamic_edit(uri.clone(), dynamic_edit_operations(&input)?)?
+                self.handler.dynamic_edit(
+                    uri.clone(),
+                    dynamic_anchor_field(&input, "start")?,
+                    dynamic_optional_anchor(dynamic_record(&input)?, "end")?,
+                    dynamic_string_field(&input, "content")?,
+                )?
+            } else if verb == &self.bindings.insert {
+                self.handler.dynamic_insert(
+                    uri.clone(),
+                    dynamic_insertion_position(&input)?,
+                    dynamic_string_field(&input, "content")?,
+                )?
             } else if verb == &self.bindings.delete {
                 self.handler.dynamic_delete(uri.clone())?
             } else if verb == &self.bindings.find {
@@ -653,18 +1095,50 @@ impl FileHandler {
         let path = self.resolve_for_write(&requested)?;
         self.cap_atomic_replace(&path, content.as_bytes())?;
         let bytes = self.cap_read(&path)?;
-        Ok(dynamic_text(self.anchored_text(uri, &path, &bytes)?))
+        Ok(DynamicValue::Record(BTreeMap::from([
+            ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+            (
+                "text".to_owned(),
+                DynamicValue::Option(Some(Box::new(dynamic_text(
+                    self.anchored_text(uri, &path, &bytes)?,
+                )))),
+            ),
+        ])))
     }
 
     fn dynamic_edit(
         &self,
         uri: ResourceUri,
-        operations: Vec<EditOperation>,
+        start: Anchor,
+        end: Option<Anchor>,
+        content: String,
     ) -> Result<DynamicValue, KernelError> {
         let path = self.typed_path(&uri)?;
-        let result = self.apply_typed_edit(&path, uri, &operations)?;
+        let result = self.apply_typed_edit(&path, uri, start, end, content)?;
         Ok(DynamicValue::Record(BTreeMap::from([
-            ("text".to_owned(), dynamic_text(result.text)),
+            ("uri".to_owned(), DynamicValue::ResourceUri(result.uri)),
+            (
+                "changed".to_owned(),
+                DynamicValue::List(result.changed.into_iter().map(dynamic_text).collect()),
+            ),
+            ("diff".to_owned(), dynamic_diff(result.diff)),
+        ])))
+    }
+
+    fn dynamic_insert(
+        &self,
+        uri: ResourceUri,
+        at: InsertionPosition,
+        content: String,
+    ) -> Result<DynamicValue, KernelError> {
+        let path = self.typed_path(&uri)?;
+        let result = self.apply_typed_insert(&path, uri, at, content)?;
+        Ok(DynamicValue::Record(BTreeMap::from([
+            ("uri".to_owned(), DynamicValue::ResourceUri(result.uri)),
+            (
+                "changed".to_owned(),
+                DynamicValue::List(result.changed.into_iter().map(dynamic_text).collect()),
+            ),
             ("diff".to_owned(), dynamic_diff(result.diff)),
         ])))
     }
@@ -692,20 +1166,22 @@ impl FileHandler {
             .search
             .find_files(&self.typed_path(&uri)?, &Pattern::parse(&query)?)?;
         let mut seen = std::collections::HashSet::new();
-        Ok(DynamicValue::List(
-            paths
-                .into_iter()
-                .filter(|path| seen.insert(path.clone()))
-                .map(|path| {
-                    ResourceUri::parse(&format!(
-                        "{}{}",
-                        path.display(),
-                        if path.is_dir() { "/" } else { "" }
-                    ))
-                    .map(DynamicValue::ResourceUri)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ))
+        let uris = paths
+            .into_iter()
+            .filter(|path| seen.insert(path.clone()))
+            .map(|path| {
+                ResourceUri::parse(&format!(
+                    "{}{}",
+                    path.display(),
+                    if path.is_dir() { "/" } else { "" }
+                ))
+                .map(DynamicValue::ResourceUri)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(DynamicValue::Record(BTreeMap::from([(
+            "uris".to_owned(),
+            DynamicValue::List(uris),
+        )])))
     }
 
     fn dynamic_grep(&self, uri: ResourceUri, pattern: String) -> Result<DynamicValue, KernelError> {
@@ -714,9 +1190,10 @@ impl FileHandler {
             &Pattern::parse(&pattern)?,
             &self.structure,
         )?;
-        Ok(DynamicValue::List(
-            matches.into_iter().map(dynamic_text).collect(),
-        ))
+        Ok(DynamicValue::Record(BTreeMap::from([(
+            "matches".to_owned(),
+            DynamicValue::List(matches.into_iter().map(dynamic_text).collect()),
+        )])))
     }
 }
 
@@ -818,72 +1295,34 @@ fn dynamic_optional_anchor(
     }
 }
 
-fn dynamic_insertion_point(value: &DynamicValue) -> Result<InsertionPoint, KernelError> {
+fn dynamic_anchor_field(input: &DynamicValue, name: &str) -> Result<Anchor, KernelError> {
+    dynamic_record(input)?
+        .get(name)
+        .ok_or_else(|| KernelError::InvalidRequest {
+            message: format!("filesystem dynamic input requires {name}"),
+        })
+        .and_then(dynamic_anchor)
+}
+
+fn dynamic_insertion_position(input: &DynamicValue) -> Result<InsertionPosition, KernelError> {
+    let value = dynamic_record(input)?
+        .get("at")
+        .ok_or_else(|| KernelError::InvalidRequest {
+            message: "filesystem insert input requires at".to_owned(),
+        })?;
     let DynamicValue::Variant(name, value) = value else {
         return Err(KernelError::InvalidRequest {
-            message: "edit insertion point must be a variant".to_owned(),
+            message: "filesystem insert at must be a variant".to_owned(),
         });
     };
     match (name.as_str(), value.as_deref()) {
-        ("top", None) => Ok(InsertionPoint::Top),
-        ("bottom", None) => Ok(InsertionPoint::Bottom),
-        ("before", Some(value)) => Ok(InsertionPoint::Before(dynamic_anchor(value)?)),
-        ("after", Some(value)) => Ok(InsertionPoint::After(dynamic_anchor(value)?)),
+        ("top", None) => Ok(InsertionPosition::Top),
+        ("bottom", None) => Ok(InsertionPosition::Bottom),
+        ("at", Some(value)) => Ok(InsertionPosition::At(dynamic_anchor(value)?)),
         _ => Err(KernelError::InvalidRequest {
-            message: format!("invalid edit insertion point variant {name}"),
+            message: format!("invalid insertion position variant {name}"),
         }),
     }
-}
-
-fn dynamic_edit_operations(input: &DynamicValue) -> Result<Vec<EditOperation>, KernelError> {
-    let Some(DynamicValue::List(values)) = dynamic_record(input)?.get("operations") else {
-        return Err(KernelError::InvalidRequest {
-            message: "filesystem edit input requires operations list".to_owned(),
-        });
-    };
-    values
-        .iter()
-        .map(|value| {
-            let DynamicValue::Variant(name, payload) = value else {
-                return Err(KernelError::InvalidRequest {
-                    message: "edit operation must be a variant".to_owned(),
-                });
-            };
-            let Some(DynamicValue::Record(fields)) = payload.as_deref() else {
-                return Err(KernelError::InvalidRequest {
-                    message: "edit operation variant requires a record".to_owned(),
-                });
-            };
-            match name.as_str() {
-                "replace" => Ok(EditOperation::Replace(ReplaceOperation {
-                    start: dynamic_anchor(fields.get("start").ok_or_else(|| {
-                        KernelError::InvalidRequest {
-                            message: "replace requires start".to_owned(),
-                        }
-                    })?)?,
-                    end: dynamic_optional_anchor(fields, "end")?,
-                    content: dynamic_string_field(
-                        &DynamicValue::Record(fields.clone()),
-                        "content",
-                    )?,
-                })),
-                "insert" => Ok(EditOperation::Insert(InsertOperation {
-                    at: dynamic_insertion_point(fields.get("at").ok_or_else(|| {
-                        KernelError::InvalidRequest {
-                            message: "insert requires at".to_owned(),
-                        }
-                    })?)?,
-                    content: dynamic_string_field(
-                        &DynamicValue::Record(fields.clone()),
-                        "content",
-                    )?,
-                })),
-                _ => Err(KernelError::InvalidRequest {
-                    message: format!("unknown edit operation variant {name}"),
-                }),
-            }
-        })
-        .collect()
 }
 
 fn dynamic_line(line: AnchoredLine) -> DynamicValue {
