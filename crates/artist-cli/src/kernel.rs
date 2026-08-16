@@ -317,26 +317,31 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
         }
         let artifact = package.join("tool.wasm");
         if !artifact.exists() {
-            let cached = entry
-                .path()
-                .join("target/wasm32-wasip2/product")
-                .read_dir()
-                .ok()
-                .and_then(|entries| {
-                    entries
-                        .filter_map(Result::ok)
-                        .map(|entry| entry.path())
-                        .find(|path| {
-                            path.extension()
-                                .is_some_and(|extension| extension == "wasm")
-                        })
+            let name = entry.file_name();
+            let cached = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/wasm32-wasip2/product")
+                .join(format!("artist_tool_{}.wasm", name.to_string_lossy()))
+                .is_file()
+                .then(|| {
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../target/wasm32-wasip2/product")
+                        .join(format!("artist_tool_{}.wasm", name.to_string_lossy()))
                 })
                 .or_else(|| {
-                    let name = entry.file_name();
-                    let cached = Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../../target/wasm32-wasip2/product")
-                        .join(format!("artist_tool_{}.wasm", name.to_string_lossy()));
-                    cached.is_file().then_some(cached)
+                    entry
+                        .path()
+                        .join("target/wasm32-wasip2/product")
+                        .read_dir()
+                        .ok()
+                        .and_then(|entries| {
+                            entries
+                                .filter_map(Result::ok)
+                                .map(|entry| entry.path())
+                                .find(|path| {
+                                    path.extension()
+                                        .is_some_and(|extension| extension == "wasm")
+                                })
+                        })
                 });
             if let Some(cached) = cached {
                 std::fs::copy(cached, artifact)?;
@@ -572,7 +577,11 @@ fn dynamic_cli_result(
         );
     }
     if verb == Verb::Read {
-        if let DynamicValue::Record(fields) = &output {
+        let read_output = match &output {
+            DynamicValue::Variant(_, Some(value)) => value.as_ref(),
+            _ => &output,
+        };
+        if let DynamicValue::Record(fields) = read_output {
             if let Some(DynamicValue::List(lines)) = fields.get("lines") {
                 let content = lines
                     .iter()

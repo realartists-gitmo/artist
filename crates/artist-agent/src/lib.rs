@@ -411,10 +411,12 @@ where
             deadline_ms: None,
             correlation_id: Some(run_id.clone()),
         };
+        let tool_catalog = handles.kernel.tool_definitions().await;
         let dynamic_tools = named_tools(
             handles.kernel.clone(),
             invocation_context.clone(),
             handles.cancel.clone(),
+            tool_catalog.clone(),
         )
         .await;
         let agent = builder
@@ -445,6 +447,7 @@ where
                 seed_history.clone(),
                 Some(system_prompt),
                 dynamic_tools,
+                tool_catalog,
                 handles.kernel.clone(),
                 invocation_context,
                 handles.cancel.clone(),

@@ -26,6 +26,8 @@ struct MutationTransactionState {
     results: Option<Vec<Result<crate::DynamicVerbResult, crate::KernelError>>>,
     failure: Option<crate::KernelError>,
     executing: bool,
+    participants: std::collections::HashSet<String>,
+    sealed: std::collections::HashSet<String>,
 }
 
 impl MutationTransaction {
@@ -37,6 +39,8 @@ impl MutationTransaction {
                 results: None,
                 failure: None,
                 executing: false,
+                participants: std::collections::HashSet::new(),
+                sealed: std::collections::HashSet::new(),
             })),
             changed: Arc::new(Notify::new()),
         })
@@ -45,6 +49,7 @@ impl MutationTransaction {
     pub(crate) fn register(
         &self,
         request: (crate::VerbId, ResourceUri, DynamicValue),
+        participant: String,
     ) -> Result<
         (
             usize,
@@ -58,6 +63,7 @@ impl MutationTransaction {
         if state.results.is_some()
             || state.failure.is_some()
             || state.requests.len() >= self.expected
+            || state.participants.contains(&participant)
         {
             return Err(crate::KernelError::Conflict {
                 uri: request.1.to_string(),
@@ -65,11 +71,26 @@ impl MutationTransaction {
         }
         let slot = state.requests.len();
         state.requests.push(request);
+        state.participants.insert(participant);
         let execute = (state.requests.len() == self.expected && !state.executing).then(|| {
             state.executing = true;
             state.requests.clone()
         });
         Ok((slot, execute))
+    }
+
+    pub fn seal(&self, participant: String) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.failure.is_some() || state.results.is_some() {
+                return;
+            }
+            if !state.participants.contains(&participant) {
+                state.failure = Some(crate::KernelError::Conflict { uri: participant });
+            } else {
+                state.sealed.insert(participant);
+            }
+        }
+        self.changed.notify_waiters();
     }
 
     pub(crate) fn finish(

@@ -1451,7 +1451,23 @@ impl TypedComponentHost {
             .instantiate(&mut store, &self.component)
             .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
         let func = instance
-            .get_func(&mut store, export_name)
+            .get_func(
+                &mut store,
+                &format!("artist:tool/{export_name}@1.0.0#{export_name}"),
+            )
+            .or_else(|| {
+                instance
+                    .get_export_index(
+                        &mut store,
+                        None,
+                        &format!("artist:tool/{export_name}@1.0.0"),
+                    )
+                    .and_then(|interface_index| {
+                        instance.get_export_index(&mut store, Some(&interface_index), export_name)
+                    })
+                    .and_then(|function_index| instance.get_func(&mut store, &function_index))
+            })
+            .or_else(|| instance.get_func(&mut store, export_name))
             .or_else(|| {
                 let interface = format!("artist:tool/{export_name}@1.0.0");
                 let interface_index = instance
@@ -1486,8 +1502,20 @@ impl TypedComponentHost {
                             "dynamic tool input is missing parameter {name}"
                         )))
                     })?;
-                json_to_component_val(value, ty)
-                    .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error)))
+                let value = if *name == "requests" {
+                    value
+                        .as_array()
+                        .and_then(|items| (items.len() == 1).then(|| items[0].get("requests")))
+                        .flatten()
+                        .unwrap_or(value)
+                } else {
+                    value
+                };
+                json_to_component_val(value, ty).map_err(|error| {
+                    ComponentError::Invoke(anyhow::anyhow!(format!(
+                        "{export_name} parameter {name} has type {ty:?}: {error}"
+                    )))
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut results = func
@@ -1530,7 +1558,23 @@ impl TypedComponentHost {
             .await
             .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
         let func = instance
-            .get_func(&mut store, export_name)
+            .get_func(
+                &mut store,
+                &format!("artist:tool/{export_name}@1.0.0#{export_name}"),
+            )
+            .or_else(|| {
+                instance
+                    .get_export_index(
+                        &mut store,
+                        None,
+                        &format!("artist:tool/{export_name}@1.0.0"),
+                    )
+                    .and_then(|interface_index| {
+                        instance.get_export_index(&mut store, Some(&interface_index), export_name)
+                    })
+                    .and_then(|function_index| instance.get_func(&mut store, &function_index))
+            })
+            .or_else(|| instance.get_func(&mut store, export_name))
             .or_else(|| {
                 let interface = format!("artist:tool/{export_name}@1.0.0");
                 let interface_index = instance
@@ -1565,8 +1609,20 @@ impl TypedComponentHost {
                             "dynamic tool input is missing parameter {name}"
                         )))
                     })?;
-                json_to_component_val(value, ty)
-                    .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error)))
+                let value = if *name == "requests" {
+                    value
+                        .as_array()
+                        .and_then(|items| (items.len() == 1).then(|| items[0].get("requests")))
+                        .flatten()
+                        .unwrap_or(value)
+                } else {
+                    value
+                };
+                json_to_component_val(value, ty).map_err(|error| {
+                    ComponentError::Invoke(anyhow::anyhow!(format!(
+                        "{export_name} parameter {name} has type {ty:?}: {error}"
+                    )))
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut results = func
@@ -3945,10 +4001,10 @@ pub mod tool_adapter {
                     }
                 };
             let mut observed = Vec::with_capacity(values.len());
-            for value in values {
+            for (index, value) in values.into_iter().enumerate() {
                 let (stdobs, stderr) = match self
                     .component
-                    .observe_json_async_with_scope(&value, kernel.clone(), scope.child())
+                    .observe_json_async_with_scope(&value, kernel.clone(), scope.batch_scope(index))
                     .await
                 {
                     Ok(stdobs) => (stdobs, String::new()),
@@ -3997,7 +4053,16 @@ pub mod tool_adapter {
     fn normalize_batch_input(input: Value) -> Result<Value, KernelError> {
         let input = normalize_model_input(input)?;
         match input {
-            Value::Object(object) if object.get("requests").is_some_and(Value::is_array) => {
+            Value::Object(mut object) if object.get("requests").is_some_and(Value::is_array) => {
+                if let Some(Value::Array(requests)) = object.get("requests") {
+                    if requests.len() == 1
+                        && requests[0]
+                            .as_object()
+                            .is_some_and(|request| request.get("requests").is_some())
+                    {
+                        return Ok(requests[0].clone());
+                    }
+                }
                 Ok(Value::Object(object))
             }
             Value::Array(requests) => Ok(serde_json::json!({ "requests": requests })),
@@ -4040,7 +4105,8 @@ pub mod tools {
         dirty: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
         known_packages: Arc<Mutex<HashMap<String, (PathBuf, ToolRegistration)>>>,
         published_definitions: Arc<Mutex<HashMap<String, artist_kernel::VerbDefinition>>>,
-        published_generations: Arc<Mutex<HashMap<(String, u64), ToolRegistration>>>,
+        published_generations: Arc<Mutex<HashMap<(String, u64), PublishedToolGeneration>>>,
+        publication_lock: Arc<Mutex<()>>,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4224,6 +4290,7 @@ pub mod tools {
                 known_packages: Arc::clone(&self.known_packages),
                 published_definitions: Arc::clone(&self.published_definitions),
                 published_generations: Arc::clone(&self.published_generations),
+                publication_lock: Arc::clone(&self.publication_lock),
             }
         }
     }
@@ -4240,6 +4307,17 @@ pub mod tools {
         pub input_schema: Option<serde_yaml::Value>,
         pub output_schema: Option<serde_yaml::Value>,
         pub capabilities: Vec<String>,
+    }
+
+    #[derive(Clone)]
+    struct PublishedToolGeneration {
+        active: super::runtime::ActiveVersion,
+        definition: artist_kernel::VerbDefinition,
+        interface: String,
+        input_type: Option<DynamicType>,
+        output_type: Option<DynamicType>,
+        model_schema: DynamicValue,
+        description: String,
     }
 
     impl ToolRegistration {
@@ -4426,6 +4504,7 @@ pub mod tools {
                 known_packages: Arc::new(Mutex::new(HashMap::new())),
                 published_definitions: Arc::new(Mutex::new(HashMap::new())),
                 published_generations: Arc::new(Mutex::new(HashMap::new())),
+                publication_lock: Arc::new(Mutex::new(())),
             };
             let registrations = handler.registrations()?;
             handler.ensure_activated(&registrations);
@@ -4536,6 +4615,7 @@ pub mod tools {
         /// advertise a generation that has not already passed component
         /// loading and ABI validation.
         fn ensure_activated(&self, registrations: &[ToolRegistration]) {
+            let _publication_guard = self.publication_lock.lock().ok();
             let granted = &self.options.granted_capabilities;
             let live = registrations
                 .iter()
@@ -4579,7 +4659,22 @@ pub mod tools {
                                 if let Ok(mut generations) = self.published_generations.lock() {
                                     generations.insert(
                                         (registration.package.clone(), active.generation()),
-                                        registration.clone(),
+                                        PublishedToolGeneration {
+                                            active: active.clone(),
+                                            interface: registration.contract.interface.clone(),
+                                            input_type: definition.input_type.clone(),
+                                            output_type: definition.output_type.clone(),
+                                            model_schema: definition
+                                                .input_type
+                                                .as_ref()
+                                                .map(dynamic_type_schema)
+                                                .and_then(|schema| json_to_dynamic(schema).ok())
+                                                .unwrap_or_else(|| {
+                                                    DynamicValue::Record(Default::default())
+                                                }),
+                                            description: definition.description.clone(),
+                                            definition: definition.clone(),
+                                        },
                                     );
                                 }
                             }
@@ -4766,7 +4861,7 @@ pub mod tools {
             &self,
             package: &str,
             generation: u64,
-        ) -> Result<ToolRegistration, KernelError> {
+        ) -> Result<PublishedToolGeneration, KernelError> {
             self.published_generations
                 .lock()
                 .map_err(|_| KernelError::Handler {
@@ -4777,6 +4872,45 @@ pub mod tools {
                 .ok_or_else(|| KernelError::Conflict {
                     uri: format!("tool generation metadata changed: {package}@{generation}"),
                 })
+        }
+
+        fn published_for_name(
+            &self,
+            name: &str,
+            scope: &artist_kernel::InvocationScope,
+        ) -> Result<(super::runtime::ActiveVersion, PublishedToolGeneration), KernelError> {
+            let candidates = self
+                .published_generations
+                .lock()
+                .map_err(|_| KernelError::Handler {
+                    message: "published generation lock poisoned".into(),
+                })?
+                .iter()
+                .filter(|((package, generation), published)| {
+                    published.definition.function == name
+                        && scope.snapshotted_generation(package).map_or_else(
+                            || self.registry.current_generation(package) == Some(*generation),
+                            |pinned| pinned == *generation,
+                        )
+                })
+                .map(|((package, _), published)| (package.clone(), published.clone()))
+                .collect::<Vec<_>>();
+            let (package, published) =
+                candidates
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| KernelError::Handler {
+                        message: format!("no published generation for tool {name}"),
+                    })?;
+            if scope
+                .snapshotted_generation(&package)
+                .is_some_and(|generation| generation != published.active.generation())
+            {
+                return Err(KernelError::Conflict {
+                    uri: format!("tool generation changed: {package}"),
+                });
+            }
+            Ok((published.active.clone(), published))
         }
 
         fn custom_dependencies(
@@ -4986,37 +5120,35 @@ pub mod tools {
             host: KernelHandle,
             scope: artist_kernel::InvocationScope,
         ) -> Result<Value, KernelError> {
-            let registration = self
-                .registrations()?
-                .into_iter()
-                .find(|registration| registration.tool_name() == name)
-                .ok_or_else(|| KernelError::Handler {
-                    message: format!("no named tool registered: {name}"),
-                })?;
-            let active = self.active_for_scope(&registration.package, &scope)?;
-            let registration =
-                self.registration_for_active(&registration.package, active.generation())?;
-            ComponentTool::new(active, registration.contract.interface)
+            let (active, registration) = self.published_for_name(name, &scope)?;
+            ComponentTool::new(active, registration.interface)
                 .invoke_async_with_scope(args, host, scope)
                 .await
         }
     }
 
     impl ToolProvider for ToolsHandler {
+        fn can_execute_tool(&self, name: &str) -> bool {
+            self.published_generations
+                .lock()
+                .map(|generations| {
+                    generations
+                        .values()
+                        .any(|generation| generation.definition.function == name)
+                })
+                .unwrap_or(false)
+        }
+
         fn tool_definitions(&self) -> Vec<ToolDefinition> {
-            let registrations = match self.registrations() {
-                Ok(registrations) => registrations,
-                Err(_) => return Vec::new(),
-            };
             let _ = self.dynamic_verb_definitions();
             let published = match self.published_definitions.lock() {
                 Ok(published) => published.clone(),
                 Err(_) => return Vec::new(),
             };
-            registrations
+            published
                 .into_iter()
-                .filter_map(|registration| {
-                    let definition = published.get(&registration.package)?;
+                .filter_map(|(package, definition)| {
+                    let generation = self.registry.current_generation(&package)?;
                     let input_type = definition.input_type.clone();
                     Some(ToolDefinition {
                         name: definition.function.clone(),
@@ -5027,6 +5159,8 @@ pub mod tools {
                             .and_then(|schema| json_to_dynamic(schema).ok())
                             .unwrap_or_else(|| DynamicValue::Record(Default::default())),
                         input_type,
+                        package: Some(package),
+                        generation: Some(generation),
                     })
                 })
                 .collect()
@@ -5042,20 +5176,11 @@ pub mod tools {
                 let scope = artist_kernel::InvocationScope::new(
                     artist_kernel::InvocationContext::default(),
                 );
-                let registration = self
-                    .registrations()?
-                    .into_iter()
-                    .find(|registration| registration.tool_name() == name)
-                    .ok_or_else(|| KernelError::Handler {
-                        message: format!("no named tool registered: {name}"),
-                    })?;
-                let active = self.active_for_scope(&registration.package, &scope)?;
-                let registration =
-                    self.registration_for_active(&registration.package, active.generation())?;
+                let (active, registration) = self.published_for_name(name, &scope)?;
                 let output = self
                     .execute_named_inner_async_scope(name, dynamic_to_json(&args), host, scope)
                     .await?;
-                typed_tool_output(&output, &registration)
+                typed_tool_output(&output, registration.output_type.as_ref())
             })
         }
 
@@ -5068,20 +5193,11 @@ pub mod tools {
         ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
                 let scope = artist_kernel::InvocationScope::new(context.clone());
-                let registration = self
-                    .registrations()?
-                    .into_iter()
-                    .find(|registration| registration.tool_name() == name)
-                    .ok_or_else(|| KernelError::Handler {
-                        message: format!("no named tool registered: {name}"),
-                    })?;
-                let active = self.active_for_scope(&registration.package, &scope)?;
-                let registration =
-                    self.registration_for_active(&registration.package, active.generation())?;
+                let (active, registration) = self.published_for_name(name, &scope)?;
                 let output = self
                     .execute_named_inner_async_scope(name, dynamic_to_json(&args), host, scope)
                     .await?;
-                typed_tool_output(&output, &registration)
+                typed_tool_output(&output, registration.output_type.as_ref())
             })
         }
 
@@ -5093,20 +5209,11 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
-                let registration = self
-                    .registrations()?
-                    .into_iter()
-                    .find(|registration| registration.tool_name() == name)
-                    .ok_or_else(|| KernelError::Handler {
-                        message: format!("no named tool registered: {name}"),
-                    })?;
-                let active = self.active_for_scope(&registration.package, &scope)?;
-                let registration =
-                    self.registration_for_active(&registration.package, active.generation())?;
+                let (active, registration) = self.published_for_name(name, &scope)?;
                 let output = self
                     .execute_named_inner_async_scope(name, dynamic_to_json(&args), host, scope)
                     .await?;
-                typed_tool_output(&output, &registration)
+                typed_tool_output(&output, registration.output_type.as_ref())
             })
         }
 
@@ -5118,17 +5225,8 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
-                let registration = self
-                    .registrations()?
-                    .into_iter()
-                    .find(|registration| registration.tool_name() == name)
-                    .ok_or_else(|| KernelError::Handler {
-                        message: format!("no named tool registered: {name}"),
-                    })?;
-                let active = self.active_for_scope(&registration.package, &scope)?;
-                let registration =
-                    self.registration_for_active(&registration.package, active.generation())?;
-                let tool = ComponentTool::new(active, registration.contract.interface.clone());
+                let (active, registration) = self.published_for_name(name, &scope)?;
+                let tool = ComponentTool::new(active, registration.interface.clone());
                 let values = tool
                     .invoke_batch_with_observations_async_with_scope(
                         vec![dynamic_to_json(&args)],
@@ -5155,19 +5253,10 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Result<artist_kernel::ToolModelResult, KernelError>> {
             Box::pin(async move {
-                let registration = self
-                    .registrations()?
-                    .into_iter()
-                    .find(|registration| registration.tool_name() == name)
-                    .ok_or_else(|| KernelError::Handler {
-                        message: format!("no named tool registered: {name}"),
-                    })?;
-                let active = self.active_for_scope(&registration.package, &scope)?;
-                let registration =
-                    self.registration_for_active(&registration.package, active.generation())?;
+                let (active, registration) = self.published_for_name(name, &scope)?;
                 let generation = active.generation();
-                let verb = registration.dynamic_definition()?.identity;
-                let tool = ComponentTool::new(active, registration.contract.interface.clone());
+                let verb = registration.definition.identity.clone();
+                let tool = ComponentTool::new(active, registration.interface.clone());
                 let (value, stdobs, stderr) = tool
                     .invoke_batch_with_observations_async_with_scope(
                         vec![dynamic_to_json(&args)],
@@ -5180,7 +5269,7 @@ pub mod tools {
                     .ok_or_else(|| KernelError::Handler {
                         message: "component returned no tool result".to_owned(),
                     })?;
-                let stdout = typed_tool_output(&value, &registration)?;
+                let stdout = typed_tool_output(&value, registration.output_type.as_ref())?;
                 Ok(artist_kernel::ToolModelResult {
                     stdobs,
                     stderr,
@@ -5199,34 +5288,11 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Vec<Result<DynamicValue, KernelError>>> {
             Box::pin(async move {
-                let registration = match self
-                    .registrations()
-                    .ok()
-                    .and_then(|items| items.into_iter().find(|item| item.tool_name() == name))
-                {
-                    Some(registration) => registration,
-                    None => {
-                        return args
-                            .into_iter()
-                            .map(|_| {
-                                Err(KernelError::Handler {
-                                    message: format!("no named tool registered: {name}"),
-                                })
-                            })
-                            .collect();
-                    }
-                };
-                let active = match self.active_for_scope(&registration.package, &scope) {
-                    Ok(active) => active,
+                let (active, registration) = match self.published_for_name(name, &scope) {
+                    Ok(value) => value,
                     Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
                 };
-                let registration = match self
-                    .registration_for_active(&registration.package, active.generation())
-                {
-                    Ok(registration) => registration,
-                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
-                };
-                let tool = ComponentTool::new(active, registration.contract.interface.clone());
+                let tool = ComponentTool::new(active, registration.interface.clone());
                 let values = match tool
                     .invoke_batch_with_observations_async_with_scope(
                         args.iter().map(dynamic_to_json).collect(),
@@ -5253,39 +5319,13 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Vec<Result<artist_kernel::ToolModelResult, KernelError>>> {
             Box::pin(async move {
-                let registration = match self
-                    .registrations()
-                    .ok()
-                    .and_then(|items| items.into_iter().find(|item| item.tool_name() == name))
-                {
-                    Some(registration) => registration,
-                    None => {
-                        return args
-                            .into_iter()
-                            .map(|_| {
-                                Err(KernelError::Handler {
-                                    message: format!("no named tool registered: {name}"),
-                                })
-                            })
-                            .collect();
-                    }
-                };
-                let active = match self.active_for_scope(&registration.package, &scope) {
-                    Ok(active) => active,
+                let (active, registration) = match self.published_for_name(name, &scope) {
+                    Ok(value) => value,
                     Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
                 };
                 let generation = active.generation();
-                let registration = match self
-                    .registration_for_active(&registration.package, generation)
-                {
-                    Ok(registration) => registration,
-                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
-                };
-                let verb = match registration.dynamic_definition() {
-                    Ok(definition) => definition.identity,
-                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
-                };
-                let tool = ComponentTool::new(active, registration.contract.interface.clone());
+                let verb = registration.definition.identity.clone();
+                let tool = ComponentTool::new(active, registration.interface.clone());
                 let values = match tool
                     .invoke_batch_with_observations_async_with_scope(
                         args.iter().map(dynamic_to_json).collect(),
@@ -5300,7 +5340,7 @@ pub mod tools {
                 values
                     .into_iter()
                     .map(|(value, stdobs, stderr)| {
-                        let stdout = typed_tool_output(&value, &registration)?;
+                        let stdout = typed_tool_output(&value, registration.output_type.as_ref())?;
                         Ok(artist_kernel::ToolModelResult {
                             stdobs,
                             stderr,
@@ -5321,25 +5361,8 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Vec<Result<DynamicVerbResult, KernelError>>> {
             Box::pin(async move {
-                let registration = match self.registrations().ok().and_then(|registrations| {
-                    registrations
-                        .into_iter()
-                        .find(|registration| registration.tool_name() == name)
-                }) {
-                    Some(registration) => registration,
-                    None => {
-                        return args
-                            .into_iter()
-                            .map(|_| {
-                                Err(KernelError::Handler {
-                                    message: format!("no named tool registered: {name}"),
-                                })
-                            })
-                            .collect();
-                    }
-                };
-                let active = match self.active_for_scope(&registration.package, &scope) {
-                    Ok(active) => active,
+                let (active, registration) = match self.published_for_name(name, &scope) {
+                    Ok(value) => value,
                     Err(error) => {
                         let message = error.to_string();
                         return args
@@ -5352,23 +5375,7 @@ pub mod tools {
                             .collect();
                     }
                 };
-                let registration = match self
-                    .registration_for_active(&registration.package, active.generation())
-                {
-                    Ok(registration) => registration,
-                    Err(error) => {
-                        let message = error.to_string();
-                        return args
-                            .into_iter()
-                            .map(|_| {
-                                Err(KernelError::Handler {
-                                    message: message.clone(),
-                                })
-                            })
-                            .collect();
-                    }
-                };
-                let tool = ComponentTool::new(active, registration.contract.interface.clone());
+                let tool = ComponentTool::new(active, registration.interface.clone());
                 let values = match tool
                     .invoke_batch_async_with_scope(
                         args.iter().map(dynamic_to_json).collect(),
@@ -5390,13 +5397,14 @@ pub mod tools {
                             .collect();
                     }
                 };
-                let identity = registration
-                    .dynamic_definition()
-                    .map(|definition| definition.identity);
+                let identity = Ok(registration.definition.identity.clone());
                 values
                     .into_iter()
                     .map(|value| {
-                        match (identity.clone(), typed_tool_output(&value, &registration)) {
+                        match (
+                            identity.clone(),
+                            typed_tool_output(&value, registration.output_type.as_ref()),
+                        ) {
                             (Ok(verb), Ok(output)) => Ok(DynamicVerbResult {
                                 verb,
                                 function: name.to_owned(),
@@ -5717,16 +5725,11 @@ pub mod tools {
 
     fn typed_tool_output(
         value: &Value,
-        registration: &ToolRegistration,
+        output_type: Option<&DynamicType>,
     ) -> Result<DynamicValue, KernelError> {
-        let definition = registration.dynamic_definition()?;
-        let output_type =
-            definition
-                .output_type
-                .as_ref()
-                .ok_or_else(|| KernelError::InvalidRequest {
-                    message: "tool has no output type".into(),
-                })?;
+        let output_type = output_type.ok_or_else(|| KernelError::InvalidRequest {
+            message: "tool has no output type".into(),
+        })?;
         json_to_dynamic_typed(value, output_type)
     }
 
@@ -6786,6 +6789,12 @@ pub mod resources {
                                 "text".to_owned(),
                                 Some(Box::new(DynamicValue::Record(fields))),
                             )
+                        }
+                        DynamicValue::Variant(name, payload) if name == "lines" => {
+                            DynamicValue::Variant("text".to_owned(), payload)
+                        }
+                        DynamicValue::Variant(name, payload) if name == "entries" => {
+                            DynamicValue::Variant("directory".to_owned(), payload)
                         }
                         other => other,
                     };

@@ -738,12 +738,12 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                     let from = poll_cursor(&input);
                     loop {
                         let invocation = self.store.get(uri)?;
-                        let matched = pattern.as_ref().is_none_or(|pattern| {
-                            channel_content(&invocation, channel).contains(pattern)
-                        });
-                        let changed = from
-                            .map_or(channel_revision(&invocation, channel) > 0, |from| {
-                                channel_revision(&invocation, channel) > from
+                        let revision = channel_revision(&invocation, channel);
+                        let changed = from.is_some_and(|from| revision > from);
+                        let eligible = from.is_none() || changed;
+                        let matched = eligible
+                            && pattern.as_ref().is_none_or(|pattern| {
+                                channel_content(&invocation, channel).contains(pattern)
                             });
                         let reason = if pattern.is_some() && matched {
                             "matched"
@@ -756,7 +756,7 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         if (changed || pattern.is_some()) && matched {
                             break snapshot;
                         }
-                        if !matches!(invocation.status, InvocationStatus::Running) && matched {
+                        if !matches!(invocation.status, InvocationStatus::Running) {
                             break snapshot;
                         }
                         let timeout = Self::poll_timeout(&input)
@@ -776,8 +776,18 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                     }
                 }
                 "write" if channel == "stdin" => {
-                    self.store.set_stdin(uri, input.clone())?;
-                    input
+                    let content = match &input {
+                        DynamicValue::Record(fields) => {
+                            fields.get("content").cloned().ok_or_else(|| {
+                                KernelError::InvalidRequest {
+                                    message: "invocation stdin write is missing content".into(),
+                                }
+                            })?
+                        }
+                        value => value.clone(),
+                    };
+                    self.store.set_stdin(uri, content.clone())?;
+                    content
                 }
                 "abort" => {
                     self.store.abort(uri, "invocation aborted")?;

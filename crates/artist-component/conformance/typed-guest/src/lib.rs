@@ -93,7 +93,7 @@ impl exports::artist::tool::read::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::read::ReadResponse, types::Error>) -> String {
-        super::observe(response)
+        observe(response)
     }
 }
 
@@ -114,9 +114,14 @@ fn read_response(
     let success = value.get("ok").ok_or_else(|| {
         error("read host output has neither ok nor err".to_owned(), Some(fallback_uri.to_owned()))
     })?;
-    if success.get("lines").is_some() {
+    if let Some(lines) = success.get("lines") {
+        let text_value = if lines.get("lines").is_some() {
+            lines
+        } else {
+            success
+        };
         return Ok(exports::artist::tool::read::ReadResponse::Text(json_text(
-            success,
+            text_value,
             fallback_uri,
         )?));
     }
@@ -148,13 +153,18 @@ fn read_response(
             exports::artist::tool::read::DirectoryResult { uri, entries },
         ));
     }
-    if success.get("entries").is_some() {
-        let uri = success
+    if let Some(entries_value) = success.get("entries") {
+        let directory = if entries_value.get("entries").is_some() {
+            entries_value
+        } else {
+            success
+        };
+        let uri = directory
             .get("uri")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(fallback_uri)
             .to_owned();
-        let entries = success
+        let entries = directory
             .get("entries")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| error("read directory has no entries", Some(uri.clone())))?
@@ -529,7 +539,7 @@ macro_rules! uri_verb {
             }
 
             fn observe(response: Result<exports::artist::tool::$module::UriResponse, types::Error>) -> String {
-                super::observe(response)
+                observe(response)
             }
         }
     };

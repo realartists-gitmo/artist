@@ -195,7 +195,12 @@ impl Kernel {
         input: crate::DynamicValue,
         scope: InvocationScope,
     ) -> Result<crate::DynamicResourceResult, KernelError> {
-        let (slot, execute) = transaction.register((verb, uri.clone(), input))?;
+        let participant = scope
+            .context
+            .correlation_id
+            .clone()
+            .unwrap_or_else(|| uri.to_string());
+        let (slot, execute) = transaction.register((verb, uri.clone(), input), participant)?;
         if let Some(requests) = execute {
             let mixed = requests
                 .into_iter()
@@ -221,7 +226,9 @@ impl Kernel {
         scope: crate::InvocationScope,
     ) -> Result<Vec<crate::DynamicResourceResult>, KernelError> {
         let verb = self.resolve_resource_verb(&function, &uri)?;
-        if let Some(transaction) = scope.mutation_transaction() {
+        if let Some(transaction) = scope.mutation_transaction()
+            && matches!(function.as_str(), "write" | "edit" | "insert")
+        {
             let result = self
                 .execute_transaction_request(transaction, verb, uri, input, scope)
                 .await
@@ -420,28 +427,45 @@ impl Kernel {
         let invocation = self.inner.invocations.begin(args.clone());
         let mut context = context;
         context.correlation_id = Some(invocation.uri.to_string());
+        let scope = InvocationScope::with_cancellation(
+            context.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .with_invocation_uri(invocation.uri.clone());
+        let scope = self
+            .inner
+            .invocations
+            .subscribe_stdin(&invocation.uri)
+            .map(|receiver| scope.clone().with_stdin_receiver(receiver))
+            .unwrap_or(scope);
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
-            if provider
-                .tool_definitions()
-                .iter()
-                .any(|definition| definition.name == name)
-            {
+            if provider.can_execute_tool(name) {
                 let result = provider
-                    .execute_tool_with_context(name, args, host, context)
+                    .execute_tool_for_model_result(name, args, host, scope)
                     .await;
-                let _ = self.inner.invocations.complete(
-                    &invocation.uri,
-                    result.clone(),
-                    "",
-                    result
-                        .as_ref()
-                        .err()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                );
-                return result;
+                return match result {
+                    Ok(result) => {
+                        let stdout = result.stdout.clone();
+                        let _ = self.inner.invocations.complete(
+                            &invocation.uri,
+                            stdout.clone(),
+                            result.stdobs,
+                            result.stderr,
+                        );
+                        stdout
+                    }
+                    Err(error) => {
+                        let _ = self.inner.invocations.complete(
+                            &invocation.uri,
+                            Err(error.clone()),
+                            "",
+                            error.to_string(),
+                        );
+                        Err(error)
+                    }
+                };
             }
         }
         let result = Err(KernelError::Handler {
@@ -477,25 +501,31 @@ impl Kernel {
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
-            if provider
-                .tool_definitions()
-                .iter()
-                .any(|definition| definition.name == name)
-            {
+            if provider.can_execute_tool(name) {
                 let result = provider
-                    .execute_tool_with_scope(name, args, host, scope)
+                    .execute_tool_for_model_result(name, args, host, scope)
                     .await;
-                let _ = self.inner.invocations.complete(
-                    &invocation.uri,
-                    result.clone(),
-                    "",
-                    result
-                        .as_ref()
-                        .err()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                );
-                return result;
+                return match result {
+                    Ok(result) => {
+                        let stdout = result.stdout.clone();
+                        let _ = self.inner.invocations.complete(
+                            &invocation.uri,
+                            stdout.clone(),
+                            result.stdobs,
+                            result.stderr,
+                        );
+                        stdout
+                    }
+                    Err(error) => {
+                        let _ = self.inner.invocations.complete(
+                            &invocation.uri,
+                            Err(error.clone()),
+                            "",
+                            error.to_string(),
+                        );
+                        Err(error)
+                    }
+                };
             }
         }
         let result = Err(KernelError::Handler {
@@ -531,11 +561,7 @@ impl Kernel {
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
-            if provider
-                .tool_definitions()
-                .iter()
-                .any(|definition| definition.name == name)
-            {
+            if provider.can_execute_tool(name) {
                 let model_result = provider
                     .execute_tool_for_model_result(name, args, host, scope)
                     .await;
@@ -586,11 +612,7 @@ impl Kernel {
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
-            if provider
-                .tool_definitions()
-                .iter()
-                .any(|definition| definition.name == name)
-            {
+            if provider.can_execute_tool(name) {
                 let model_results = provider
                     .execute_tools_for_model_results(name, args, host, scope)
                     .await;
@@ -739,6 +761,17 @@ impl Kernel {
             .iter()
             .map(|arg| self.inner.invocations.begin(arg.clone()))
             .collect::<Vec<_>>();
+        let scopes = invocations
+            .iter()
+            .map(|invocation| {
+                let scoped = scope.clone().with_invocation_uri(invocation.uri.clone());
+                self.inner
+                    .invocations
+                    .subscribe_stdin(&invocation.uri)
+                    .map(|receiver| scoped.clone().with_stdin_receiver(receiver))
+                    .unwrap_or(scoped)
+            })
+            .collect::<Vec<_>>();
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
@@ -747,20 +780,36 @@ impl Kernel {
                 .iter()
                 .any(|definition| definition.name == name)
             {
-                let results = provider
-                    .execute_tool_batch_with_scope(name, args, host, scope)
+                let values = provider
+                    .execute_tools_for_model_results_with_scopes(name, args, host, scopes)
                     .await;
-                for (invocation, result) in invocations.iter().zip(results.iter()) {
-                    let stdout = result.clone().map(|value| value.output.clone());
-                    let stderr = result
-                        .as_ref()
-                        .err()
-                        .map(ToString::to_string)
-                        .unwrap_or_default();
-                    let _ = self
-                        .inner
-                        .invocations
-                        .complete(&invocation.uri, stdout, "", stderr);
+                let results = values
+                    .iter()
+                    .map(|value| match value {
+                        Ok(value) => match &value.stdout {
+                            Ok(output) => Ok(crate::DynamicVerbResult {
+                                verb: value.verb.clone(),
+                                function: name.to_owned(),
+                                output: output.clone(),
+                            }),
+                            Err(error) => Err(error.clone()),
+                        },
+                        Err(error) => Err(error.clone()),
+                    })
+                    .collect::<Vec<_>>();
+                for (invocation, value) in invocations.iter().zip(values.iter()) {
+                    let (stdout, stdobs, stderr) = match value {
+                        Ok(value) => (
+                            value.stdout.clone(),
+                            value.stdobs.clone(),
+                            value.stderr.clone(),
+                        ),
+                        Err(error) => (Err(error.clone()), String::new(), error.to_string()),
+                    };
+                    let _ =
+                        self.inner
+                            .invocations
+                            .complete(&invocation.uri, stdout, stdobs, stderr);
                 }
                 return results;
             }
@@ -996,21 +1045,27 @@ fn canonical_universal_output_type(function: &str) -> Option<crate::DynamicType>
             DynamicType::List(Box::new(line.clone())),
         ),
     ]));
+    let hunk = DynamicType::Record(BTreeMap::from([
+        ("old".to_owned(), DynamicType::List(Box::new(line.clone()))),
+        ("new".to_owned(), DynamicType::List(Box::new(line.clone()))),
+    ]));
     let diff = DynamicType::Record(BTreeMap::from([
         ("uri".to_owned(), uri.clone()),
-        (
-            "before".to_owned(),
-            DynamicType::List(Box::new(line.clone())),
-        ),
-        ("after".to_owned(), DynamicType::List(Box::new(line))),
+        ("hunks".to_owned(), DynamicType::List(Box::new(hunk))),
     ]));
     let record =
         |fields: Vec<(String, DynamicType)>| DynamicType::Record(fields.into_iter().collect());
     Some(match function {
         "read" => DynamicType::Variant(BTreeMap::from([
-            ("text".into(), Some(text)),
             (
-                "directory".into(),
+                "lines".into(),
+                Some(record(vec![
+                    ("uri".into(), uri.clone()),
+                    ("lines".into(), DynamicType::List(Box::new(line.clone()))),
+                ])),
+            ),
+            (
+                "entries".into(),
                 Some(record(vec![
                     ("uri".into(), uri.clone()),
                     ("entries".into(), DynamicType::List(Box::new(uri.clone()))),
@@ -1041,7 +1096,7 @@ fn canonical_universal_output_type(function: &str) -> Option<crate::DynamicType>
                 ]),
             ),
         ]),
-        "run" | "abort" | "delete" => uri,
+        "run" | "abort" | "delete" => record(vec![("uri".into(), uri)]),
         _ => return None,
     })
 }

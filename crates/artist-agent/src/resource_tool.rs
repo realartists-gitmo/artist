@@ -85,6 +85,7 @@ pub async fn run_batched_agent<M>(
     history: Vec<Message>,
     preamble: Option<String>,
     tools: Vec<DynamicTool>,
+    catalog: Vec<artist_kernel::ToolDefinition>,
     kernel: Kernel,
     context: artist_kernel::InvocationContext,
     cancellation: tokio_util::sync::CancellationToken,
@@ -237,6 +238,7 @@ where
                     sibling_calls,
                     context.clone(),
                     cancellation.clone(),
+                    catalog.clone(),
                 )
                 .await;
                 let tool_results = results
@@ -319,12 +321,11 @@ pub async fn execute_sibling_calls(
     calls: Vec<SiblingToolCall>,
     context: artist_kernel::InvocationContext,
     cancellation: tokio_util::sync::CancellationToken,
+    catalog: Vec<artist_kernel::ToolDefinition>,
 ) -> Vec<(String, Result<(Value, bool), String>)> {
-    let definitions = kernel
-        .tool_definitions()
-        .await
+    let definitions = catalog
         .into_iter()
-        .map(|definition| (definition.name.clone(), definition.input_type))
+        .map(|definition| (definition.name.clone(), definition))
         .collect::<BTreeMap<_, _>>();
     let mut grouped = BTreeMap::<String, Vec<(usize, DynamicValue)>>::new();
     let mut results = calls
@@ -332,7 +333,11 @@ pub async fn execute_sibling_calls(
         .map(|call| (call.id.clone(), None))
         .collect::<Vec<_>>();
     for (index, call) in calls.iter().enumerate() {
-        let Some(Some(expected)) = definitions.get(&call.name) else {
+        let Some(definition) = definitions.get(&call.name) else {
+            results[index].1 = Some(Err(format!("tool {} has no active input type", call.name)));
+            continue;
+        };
+        let Some(expected) = definition.input_type.as_ref() else {
             results[index].1 = Some(Err(format!("tool {} has no active input type", call.name)));
             continue;
         };
@@ -389,11 +394,18 @@ pub async fn execute_sibling_calls(
             let kernel = kernel.clone();
             let transaction = transaction.clone();
             let scope = scope.child().with_mutation_transaction(transaction.clone());
+            if let Some(definition) = definitions.get(name) {
+                if let (Some(package), Some(generation)) =
+                    (&definition.package, definition.generation)
+                {
+                    scope.snapshot_generation(package, generation);
+                }
+            }
             let name = name.clone();
             let value = value.clone();
             async move {
                 let result = kernel
-                    .execute_tool_models_for_model(name.as_str(), vec![value], scope)
+                    .execute_tool_models_for_model(name.as_str(), vec![value], scope.clone())
                     .await
                     .into_iter()
                     .next()
@@ -406,9 +418,12 @@ pub async fn execute_sibling_calls(
                     transaction.fail(error.clone());
                 }
                 if let Ok(value) = &result {
-                    if let Err(error) = &value.stdout {
-                        transaction.fail(error.clone());
+                    if let Some(error) = stdout_error(&value.stdout) {
+                        transaction.fail(error);
                     }
+                }
+                if let Some(participant) = scope.context.correlation_id.clone() {
+                    transaction.seal(participant);
                 }
                 result
             }
@@ -418,7 +433,7 @@ pub async fn execute_sibling_calls(
             handled.insert(index);
             results[index].1 = Some(
                 output
-                    .map(|value| (model_result_json(&value), value.stdout.is_err()))
+                    .map(|value| (model_result_json(&value), stdout_is_failure(&value.stdout)))
                     .map_err(|error| error.to_string()),
             );
         }
@@ -431,6 +446,13 @@ pub async fn execute_sibling_calls(
         (!items.is_empty()).then(|| {
             let kernel = kernel.clone();
             let scope = scope.child();
+            if let Some(definition) = definitions.get(&name) {
+                if let (Some(package), Some(generation)) =
+                    (&definition.package, definition.generation)
+                {
+                    scope.snapshot_generation(package, generation);
+                }
+            }
             async move {
                 let values = kernel
                     .execute_tool_models_for_model(
@@ -448,7 +470,7 @@ pub async fn execute_sibling_calls(
         for ((index, _), value) in items.into_iter().zip(values) {
             results[index].1 = Some(
                 value
-                    .map(|value| (model_result_json(&value), value.stdout.is_err()))
+                    .map(|value| (model_result_json(&value), stdout_is_failure(&value.stdout)))
                     .map_err(|error| error.to_string()),
             );
         }
@@ -472,6 +494,22 @@ fn model_result_json(value: &artist_kernel::ToolModelResult) -> Value {
     serde_json::from_str(&value.stdobs).unwrap_or_else(|_| Value::String(value.stdobs.clone()))
 }
 
+fn stdout_is_failure(stdout: &Result<DynamicValue, artist_kernel::KernelError>) -> bool {
+    stdout_error(stdout).is_some()
+}
+
+fn stdout_error(
+    stdout: &Result<DynamicValue, artist_kernel::KernelError>,
+) -> Option<artist_kernel::KernelError> {
+    match stdout {
+        Err(error) => Some(error.clone()),
+        Ok(DynamicValue::Result(Err(error))) => Some(artist_kernel::KernelError::Handler {
+            message: format!("tool returned semantic error: {error:?}"),
+        }),
+        Ok(_) => None,
+    }
+}
+
 fn value_uri(value: &DynamicValue) -> Option<String> {
     let DynamicValue::Record(fields) = value else {
         return None;
@@ -490,14 +528,15 @@ pub async fn named_tools(
     kernel: Kernel,
     context: artist_kernel::InvocationContext,
     cancellation: tokio_util::sync::CancellationToken,
+    catalog: Vec<artist_kernel::ToolDefinition>,
 ) -> Vec<DynamicTool> {
-    kernel
-        .tool_definitions()
-        .await
+    catalog
         .into_iter()
         .map(|definition| {
             let name = definition.name.clone();
             let expected = definition.input_type.clone();
+            let package = definition.package.clone();
+            let generation = definition.generation;
             let callback_kernel = kernel.clone();
             let callback_context = context.clone();
             let callback_cancellation = cancellation.clone();
@@ -509,6 +548,7 @@ pub async fn named_tools(
                     let kernel = callback_kernel.clone();
                     let name = name.clone();
                     let expected = expected.clone();
+                    let package = package.clone();
                     let cancellation = callback_cancellation.clone();
                     let context = tool_context
                         .get::<ArtistToolContext>()
@@ -519,6 +559,9 @@ pub async fn named_tools(
                             context,
                             cancellation,
                         );
+                        if let (Some(package), Some(generation)) = (package, generation) {
+                            scope.snapshot_generation(&package, generation);
+                        }
                         let expected = expected.as_ref().ok_or_else(|| {
                             ToolExecutionError::other(format!(
                                 "tool {name} has no active input type"

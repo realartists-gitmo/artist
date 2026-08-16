@@ -574,25 +574,37 @@ impl ProcessResourceProvider {
             let snapshot = manager.snapshot(uri.to_string().as_str())?;
             let text = if uri.path().ends_with("/stderr") {
                 manager.output(uri.to_string().as_str(), true)?
-            } else {
+            } else if uri.path().ends_with("/stdout") {
                 manager.output(uri.to_string().as_str(), false)?
+            } else {
+                format!(
+                    "running={} exit-code={:?} aborted={}",
+                    snapshot.running, snapshot.exit_code, snapshot.aborted
+                )
             };
             let revision = text.len() as u64;
-            let changed = revision > from.unwrap_or(0);
+            let cursor = from.unwrap_or(0).min(revision) as usize;
+            let observed = String::from_utf8_lossy(&text.as_bytes()[cursor..]).into_owned();
+            let changed = from.is_some() && revision > from.unwrap_or(0);
             if matcher
                 .as_ref()
-                .is_some_and(|matcher| matcher.is_match(&text))
+                .is_some_and(|matcher| matcher.is_match(&observed))
             {
-                return Ok(process_poll_result(uri, text, "matched"));
+                return Ok(process_poll_result(uri, observed, "matched", cursor as u64));
             }
             if changed {
-                return Ok(process_poll_result(uri, text, "changed"));
+                return Ok(process_poll_result(uri, observed, "changed", cursor as u64));
             }
             if !snapshot.running {
-                return Ok(process_poll_result(uri, text, "terminated"));
+                return Ok(process_poll_result(
+                    uri,
+                    observed,
+                    "terminated",
+                    cursor as u64,
+                ));
             }
             if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
-                return Ok(process_poll_result(uri, text, "timeout"));
+                return Ok(process_poll_result(uri, observed, "timeout", cursor as u64));
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
@@ -612,8 +624,8 @@ fn process_exit_code(status: std::process::ExitStatus) -> Option<i32> {
     })
 }
 
-fn process_poll_result(uri: &ResourceUri, text: String, reason: &str) -> DynamicValue {
-    let lines = process_lines(&text);
+fn process_poll_result(uri: &ResourceUri, text: String, reason: &str, base: u64) -> DynamicValue {
+    let lines = process_lines_at(&text, base);
     DynamicValue::Record(BTreeMap::from([
         ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
         (
@@ -635,7 +647,11 @@ fn process_text_value(uri: &ResourceUri, text: String) -> DynamicValue {
 }
 
 fn process_lines(text: &str) -> Vec<DynamicValue> {
-    let mut offset = 0u64;
+    process_lines_at(text, 0)
+}
+
+fn process_lines_at(text: &str, base: u64) -> Vec<DynamicValue> {
+    let mut offset = base;
     let mut lines = Vec::new();
     for chunk in text.split_inclusive('\n') {
         offset += chunk.len() as u64;

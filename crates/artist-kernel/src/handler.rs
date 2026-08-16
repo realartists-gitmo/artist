@@ -20,6 +20,15 @@ pub enum ClaimDecision {
 pub trait ToolProvider: Send + Sync {
     fn tool_definitions(&self) -> Vec<ToolDefinition>;
 
+    /// Whether this provider can execute a name already present in an
+    /// invocation's pinned catalog. This is separate from the current model
+    /// catalog so a renamed/replaced package can finish an older turn.
+    fn can_execute_tool(&self, name: &str) -> bool {
+        self.tool_definitions()
+            .iter()
+            .any(|definition| definition.name == name)
+    }
+
     fn execute_tool<'a>(
         &'a self,
         name: &'a str,
@@ -198,6 +207,10 @@ pub struct ToolDefinition {
     pub description: String,
     pub parameters: crate::DynamicValue,
     pub input_type: Option<crate::DynamicType>,
+    /// Immutable publication identity for dynamic component tools. Native
+    /// providers leave these unset.
+    pub package: Option<String>,
+    pub generation: Option<u64>,
 }
 
 /// The shared kernel surface available to handlers for nested calls.
