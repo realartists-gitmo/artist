@@ -1,8 +1,7 @@
 use crate::{
     ClaimDecision, ClaimRegistry, InvocationContext, InvocationResourceProvider, InvocationScope,
     InvocationStore, KernelError, KernelHandle, ProcessManager, ResourceCatalogEntry,
-    ResourceCatalogProvider, ResourceRegistry, RouteRegistry, ToolDefinition, ToolProvider,
-    VerbDefinition, VerbRegistry,
+    ResourceRegistry, RouteRegistry, ToolDefinition, ToolProvider, VerbDefinition, VerbRegistry,
 };
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -11,7 +10,7 @@ use tokio::sync::RwLock;
 
 struct Inner {
     tool_providers: RwLock<Vec<Arc<dyn ToolProvider>>>,
-    resource_catalog_providers: RwLock<Vec<Arc<dyn ResourceCatalogProvider>>>,
+    resource_catalog_providers: std::sync::RwLock<Vec<Arc<dyn crate::DynamicResourceProvider>>>,
     verbs: VerbRegistry,
     processes: ProcessManager,
     routes: RouteRegistry,
@@ -39,8 +38,9 @@ impl Kernel {
         let resources = ResourceRegistry::default();
         let claims = ClaimRegistry::default();
         let invocation_provider = Arc::new(InvocationResourceProvider::new(invocations.clone()));
-        let resource_catalog_providers: RwLock<Vec<Arc<dyn ResourceCatalogProvider>>> =
-            RwLock::new(vec![Arc::new(invocations.clone())]);
+        let resource_catalog_providers: std::sync::RwLock<
+            Vec<Arc<dyn crate::DynamicResourceProvider>>,
+        > = std::sync::RwLock::new(Vec::new());
         let kernel = Self {
             inner: Arc::new(Inner {
                 tool_providers: RwLock::new(Vec::new()),
@@ -113,7 +113,14 @@ impl Kernel {
             self.inner.verbs.activate_packages(definitions)?;
         }
         self.inner.resources.register(provider.clone())?;
-        self.inner.claims.register(provider)?;
+        self.inner.claims.register(provider.clone())?;
+        self.inner
+            .resource_catalog_providers
+            .write()
+            .map_err(|_| KernelError::Handler {
+                message: "resource catalog provider lock poisoned".to_owned(),
+            })?
+            .push(provider);
         Ok(())
     }
 
@@ -209,7 +216,7 @@ impl Kernel {
                 .map(|(verb, uri, input)| crate::MixedResourceRequest { verb, uri, input })
                 .collect();
             transaction.finish(
-                self.invoke_mixed_dynamic_resources(mixed, scope.without_mutation_transaction())
+                self.invoke_mixed_dynamic_resources(mixed, scope.for_transaction_execution())
                     .await,
             );
         }
@@ -243,7 +250,8 @@ impl Kernel {
             input: input.clone(),
         };
         self.inner.verbs.validate_call(&call)?;
-        if let Some(transaction) = scope.mutation_transaction()
+        if !scope.transaction_execution
+            && let Some(transaction) = scope.mutation_transaction()
             && matches!(function.as_str(), "write" | "edit" | "insert")
         {
             let values = self
@@ -496,8 +504,9 @@ impl Kernel {
         self.inner
             .resource_catalog_providers
             .read()
-            .await
-            .iter()
+            .map(|providers| providers.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
             .flat_map(|provider| provider.resource_catalog())
             .collect()
     }

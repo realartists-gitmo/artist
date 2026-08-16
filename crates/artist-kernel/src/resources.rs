@@ -26,6 +26,10 @@ pub struct MixedResourceRequest {
 }
 
 pub trait DynamicResourceProvider: DynamicClaimProvider + Send + Sync {
+    /// Optional model-facing documentation owned by this provider.
+    fn resource_catalog(&self) -> Vec<crate::ResourceCatalogEntry> {
+        Vec::new()
+    }
     /// Concrete verb identities published together with this provider. The
     /// kernel uses these definitions when resolving open universal calls;
     /// claims and executable identities therefore cannot drift apart.

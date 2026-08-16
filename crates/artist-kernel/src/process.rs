@@ -921,11 +921,21 @@ fn process_lines_at(text: &str, base: u64) -> Vec<DynamicValue> {
 }
 
 fn process_lines_at_bytes(bytes: &[u8], base: u64) -> Vec<DynamicValue> {
-    let mut offset = base;
     let mut lines = Vec::new();
-    for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
-        offset += chunk.len() as u64;
-        let line = chunk.strip_suffix(&[b'\n']).unwrap_or(chunk);
+    let mut start = 0usize;
+    while start < bytes.len() {
+        let mut end = start;
+        while end < bytes.len() && bytes[end] != b'\n' && bytes[end] != b'\r' {
+            end += 1;
+        }
+        let (text_end, terminator_end, ending) = match bytes.get(end) {
+            Some(b'\n') => (end, end + 1, "lf"),
+            Some(b'\r') if bytes.get(end + 1) == Some(&b'\n') => (end, end + 2, "crlf"),
+            Some(b'\r') => (end, end + 1, "cr"),
+            None => (end, end, "none"),
+            _ => unreachable!(),
+        };
+        let offset = base + terminator_end as u64;
         lines.push(DynamicValue::Record(BTreeMap::from([
             (
                 "anchor".to_owned(),
@@ -933,10 +943,14 @@ fn process_lines_at_bytes(bytes: &[u8], base: u64) -> Vec<DynamicValue> {
             ),
             (
                 "text".to_owned(),
-                DynamicValue::String(String::from_utf8_lossy(line).into_owned()),
+                DynamicValue::String(String::from_utf8_lossy(&bytes[start..text_end]).into_owned()),
             ),
-            ("ending".to_owned(), DynamicValue::Enum("lf".to_owned())),
+            ("ending".to_owned(), DynamicValue::Enum(ending.to_owned())),
         ])));
+        if terminator_end == end {
+            break;
+        }
+        start = terminator_end;
     }
     if lines.is_empty() {
         lines.push(DynamicValue::Record(BTreeMap::from([

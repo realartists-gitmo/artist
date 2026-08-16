@@ -8,7 +8,7 @@ wit_bindgen::generate!({
 
 use artist::resource::types;
 // Keep the generated bindings refreshed when package-local WIT dependencies change.
-use artist::tool::read as source_read;
+use artist::resource::read as source_read;
 
 struct AstResource;
 
@@ -46,12 +46,15 @@ impl exports::artist::resource::extension::Guest for AstResource {
         // The production AST provider owns file projections. Keep this
         // optional package available for experimentation without stealing
         // the native route during startup.
-        let _ = request;
-        types::ClaimDecision::Pass
+        if request.uri.contains("/symbols") {
+            types::ClaimDecision::Handle
+        } else {
+            types::ClaimDecision::Pass
+        }
     }
 }
 
-impl exports::artist::tool::read::Guest for AstResource {
+impl exports::artist::resource::read::Guest for AstResource {
     fn read(
         requests: Vec<types::ReadRequest>,
     ) -> Vec<Result<types::ReadResult, types::Error>> {

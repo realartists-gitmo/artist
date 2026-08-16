@@ -28,6 +28,7 @@ struct MutationTransactionState {
     executing: bool,
     participants: std::collections::HashSet<String>,
     sealed: std::collections::HashSet<String>,
+    rollback: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl MutationTransaction {
@@ -41,6 +42,7 @@ impl MutationTransaction {
                 executing: false,
                 participants: std::collections::HashSet::new(),
                 sealed: std::collections::HashSet::new(),
+                rollback: None,
             })),
             changed: Arc::new(Notify::new()),
         })
@@ -106,8 +108,19 @@ impl MutationTransaction {
     pub fn fail(&self, error: crate::KernelError) {
         if let Ok(mut state) = self.state.lock() {
             state.failure = Some(error);
+            if let Some(rollback) = state.rollback.take() {
+                rollback();
+            }
         }
         self.changed.notify_waiters();
+    }
+
+    pub fn set_rollback(&self, rollback: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.rollback.is_none() {
+                state.rollback = Some(rollback);
+            }
+        }
     }
 
     pub(crate) async fn result(
@@ -262,6 +275,7 @@ pub struct InvocationScope {
     generation_handles: Arc<Mutex<HashMap<String, Arc<dyn Any + Send + Sync>>>>,
     pub(crate) claim_decisions: Arc<Mutex<HashMap<String, ClaimDecision>>>,
     pub(crate) mutation_transaction: Option<Arc<MutationTransaction>>,
+    pub(crate) transaction_execution: bool,
     /// Live stdin writes for the logical invocation owning this scope.
     /// Child scopes share the receiver so providers do not need a second
     /// public invocation identity for interactive input.
@@ -305,6 +319,7 @@ impl InvocationScope {
             generation_handles: Arc::new(Mutex::new(HashMap::new())),
             claim_decisions: Arc::new(Mutex::new(HashMap::new())),
             mutation_transaction: None,
+            transaction_execution: false,
             stdin_receiver: None,
             batch_scopes: None,
             routing_stack: Arc::new(Mutex::new(Vec::new())),
@@ -324,6 +339,7 @@ impl InvocationScope {
             generation_handles: Arc::new(Mutex::new(HashMap::new())),
             claim_decisions: Arc::new(Mutex::new(HashMap::new())),
             mutation_transaction: None,
+            transaction_execution: false,
             stdin_receiver: None,
             batch_scopes: None,
             routing_stack: Arc::new(Mutex::new(Vec::new())),
@@ -340,6 +356,7 @@ impl InvocationScope {
             generation_handles: Arc::clone(&self.generation_handles),
             claim_decisions: Arc::clone(&self.claim_decisions),
             mutation_transaction: self.mutation_transaction.clone(),
+            transaction_execution: self.transaction_execution,
             stdin_receiver: self.stdin_receiver.clone(),
             batch_scopes: self.batch_scopes.clone(),
             routing_stack: Arc::clone(&self.routing_stack),
@@ -392,6 +409,12 @@ impl InvocationScope {
 
     pub fn mutation_transaction(&self) -> Option<Arc<MutationTransaction>> {
         self.mutation_transaction.clone()
+    }
+
+    pub(crate) fn for_transaction_execution(&self) -> Self {
+        let mut scope = self.clone();
+        scope.transaction_execution = true;
+        scope
     }
 
     pub(crate) fn without_mutation_transaction(&self) -> Self {

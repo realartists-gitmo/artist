@@ -31,11 +31,13 @@ pub struct Invocation {
     pub stdobs: String,
     pub status: InvocationStatus,
     pub revision: u64,
+    pub status_revision: u64,
     pub stdin_revision: u64,
     pub stdout_revision: u64,
     pub stderr_revision: u64,
     pub stdobs_revision: u64,
     pub channel_history: BTreeMap<String, Vec<(u64, String)>>,
+    pub channel_deltas: BTreeMap<String, Vec<(u64, String)>>,
 }
 
 #[derive(Clone)]
@@ -108,10 +110,12 @@ impl InvocationStore {
         let completed = Invocation {
             stdin_history,
             revision: current.revision + 1,
+            status_revision: current.status_revision + 1,
             stdout_revision: current.revision + 1,
             stderr_revision: current.revision + 1,
             stdobs_revision: current.revision + 1,
             channel_history: current.channel_history.clone(),
+            channel_deltas: current.channel_deltas.clone(),
             ..completed
         };
         let mut completed = completed;
@@ -163,6 +167,7 @@ impl InvocationStore {
         if let Some(stdout) = stdout {
             updated.stdout = Some(stdout);
             updated.stdout_revision = updated.revision;
+            updated.record_channel_delta("stdout");
         }
         if let Some(stderr) = stderr {
             updated.stderr = stderr;
@@ -171,6 +176,7 @@ impl InvocationStore {
         if let Some(stdobs) = stdobs {
             updated.stdobs = stdobs;
             updated.stdobs_revision = updated.revision;
+            updated.record_channel_delta("stdobs");
         }
         record_channel_history(&mut updated);
         values.insert(id, updated.clone());
@@ -196,10 +202,12 @@ impl InvocationStore {
         let stdin_history = current.stdin_history.clone();
         let aborted = Invocation {
             revision: current.revision + 1,
+            status_revision: current.status_revision + 1,
             stdout_revision: current.revision + 1,
             stderr_revision: current.revision + 1,
             stdobs_revision: current.revision + 1,
             channel_history: current.channel_history.clone(),
+            channel_deltas: current.channel_deltas.clone(),
             stdin_history,
             ..Invocation::aborted(current.uri.clone(), current.stdin, stderr)
         };
@@ -263,6 +271,7 @@ impl InvocationStore {
             ..current
         };
         let mut updated = updated;
+        updated.record_channel_delta("stdin");
         record_channel_history(&mut updated);
         if let Ok(senders) = self.stdin_updates.lock() {
             if let Some(sender) = senders.get(&id) {
@@ -495,6 +504,56 @@ fn channel_text(invocation: &Invocation, channel: &str, text: String) -> Dynamic
     )
 }
 
+fn invocation_read_window(
+    invocation: &Invocation,
+    channel: &str,
+    input: &DynamicValue,
+) -> DynamicValue {
+    let content = channel_content(invocation, channel);
+    let mut lines = content
+        .split_inclusive('\n')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    let fields = match input {
+        DynamicValue::Record(fields) => fields,
+        _ => return channel_text(invocation, channel, content),
+    };
+    let position = fields.get("at").and_then(|value| match value {
+        DynamicValue::Option(Some(value)) => match value.as_ref() {
+            DynamicValue::Variant(name, Some(value)) if name == "at" => match value.as_ref() {
+                DynamicValue::String(anchor) => anchor.trim_start_matches('#').parse().ok(),
+                _ => None,
+            },
+            DynamicValue::Variant(name, None) if name == "bottom" => {
+                Some(lines.len().saturating_sub(1) as u64)
+            }
+            _ => Some(0),
+        },
+        _ => None,
+    });
+    let center = position.unwrap_or(0) as usize;
+    let before = optional_u64(fields.get("before")).unwrap_or(0) as usize;
+    let after = optional_u64(fields.get("after")).unwrap_or(0) as usize;
+    let start = center.saturating_sub(before).min(lines.len());
+    let end = center
+        .saturating_add(after)
+        .saturating_add(1)
+        .min(lines.len());
+    channel_text(invocation, channel, lines[start..end].concat())
+}
+
+fn optional_u64(value: Option<&DynamicValue>) -> Option<u64> {
+    match value {
+        Some(DynamicValue::Option(Some(value))) => optional_u64(Some(value.as_ref())),
+        Some(DynamicValue::U64(value)) => Some(*value),
+        Some(DynamicValue::S64(value)) if *value >= 0 => Some(*value as u64),
+        _ => None,
+    }
+}
+
 fn channel_text_record(invocation: &Invocation, channel: &str, text: String) -> DynamicValue {
     let channel_uri = invocation
         .channel_uri(channel)
@@ -589,7 +648,7 @@ fn channel_revision(invocation: &Invocation, channel: &str) -> u64 {
         "stdout" => invocation.stdout_revision,
         "stderr" => invocation.stderr_revision,
         "stdobs" => invocation.stdobs_revision,
-        "status" => invocation.revision,
+        "status" => invocation.status_revision,
         _ => invocation.revision,
     }
 }
@@ -610,7 +669,7 @@ fn channel_content(invocation: &Invocation, channel: &str) -> String {
             .unwrap_or_else(|| "{\"type\":\"pending\"}".to_owned()),
         "stderr" => invocation.stderr.clone(),
         "stdobs" => invocation.stdobs.clone(),
-        "status" => format!("{:?}", invocation.status),
+        "status" => status_text(&invocation.status),
         _ => String::new(),
     }
 }
@@ -623,6 +682,17 @@ fn seed_channel_history(invocation: &mut Invocation) {
             .entry(channel.to_owned())
             .or_default()
             .push((0, content));
+    }
+}
+
+impl Invocation {
+    fn record_channel_delta(&mut self, channel: &str) {
+        let value = channel_content(self, channel);
+        let revision = channel_revision(self, channel);
+        self.channel_deltas
+            .entry(channel.to_owned())
+            .or_default()
+            .push((revision, value));
     }
 }
 
@@ -648,6 +718,16 @@ fn channel_material_after(invocation: &Invocation, channel: &str, from: Option<u
     let Some(from) = from else {
         return current;
     };
+    if let Some(deltas) = invocation.channel_deltas.get(channel) {
+        let material = deltas
+            .iter()
+            .filter(|(revision, _)| *revision > from)
+            .map(|(_, value)| value.as_str())
+            .collect::<String>();
+        if !material.is_empty() {
+            return material;
+        }
+    }
     let Some((_, previous)) = invocation
         .channel_history
         .get(channel)
@@ -725,6 +805,10 @@ impl DynamicClaimProvider for InvocationResourceProvider {
 }
 
 impl DynamicResourceProvider for InvocationResourceProvider {
+    fn resource_catalog(&self) -> Vec<ResourceCatalogEntry> {
+        self.store.resource_catalog()
+    }
+
     fn verb_definitions(&self) -> Vec<crate::VerbDefinition> {
         ["read", "find", "write", "poll", "grep", "abort", "delete"]
             .into_iter()
@@ -789,7 +873,10 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         ),
                     ])))),
                 ),
-                "read" => Self::output(&self.store.get(uri)?, channel),
+                "read" => {
+                    let invocation = self.store.get(uri)?;
+                    invocation_read_window(&invocation, channel, &input)
+                }
                 "grep" => {
                     let pattern = match &input {
                         DynamicValue::Record(fields) => match fields.get("pattern") {
@@ -958,11 +1045,13 @@ impl Invocation {
             stdobs: String::new(),
             status: InvocationStatus::Running,
             revision: 0,
+            status_revision: 0,
             stdin_revision: 0,
             stdout_revision: 0,
             stderr_revision: 0,
             stdobs_revision: 0,
             channel_history: BTreeMap::new(),
+            channel_deltas: BTreeMap::new(),
         }
     }
 
@@ -987,11 +1076,13 @@ impl Invocation {
             stdobs,
             status,
             revision: 0,
+            status_revision: 0,
             stdin_revision: 0,
             stdout_revision: 0,
             stderr_revision: 0,
             stdobs_revision: 0,
             channel_history: BTreeMap::new(),
+            channel_deltas: BTreeMap::new(),
         }
     }
 
@@ -1007,11 +1098,13 @@ impl Invocation {
             stdobs: String::new(),
             status: InvocationStatus::Aborted,
             revision: 0,
+            status_revision: 0,
             stdin_revision: 0,
             stdout_revision: 0,
             stderr_revision: 0,
             stdobs_revision: 0,
             channel_history: BTreeMap::new(),
+            channel_deltas: BTreeMap::new(),
         }
     }
 }

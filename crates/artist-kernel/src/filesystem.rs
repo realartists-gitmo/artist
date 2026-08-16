@@ -926,6 +926,20 @@ impl DynamicResourceProvider for FileResourceProvider {
                     .iter()
                     .map(|request| (request.verb == self.bindings.edit, request.input.clone()))
                     .collect::<Vec<_>>();
+                if let Some(transaction) = scope.mutation_transaction() {
+                    let previous = fs::read(&path).ok();
+                    let existed = path.exists();
+                    let rollback_path = path.clone();
+                    transaction.set_rollback(Arc::new(move || match previous.as_ref() {
+                        Some(bytes) => {
+                            let _ = fs::write(&rollback_path, bytes);
+                        }
+                        None if !existed => {
+                            let _ = fs::remove_file(&rollback_path);
+                        }
+                        None => {}
+                    }));
+                }
                 return match self.handler.apply_typed_mixed_batch(&path, uri, &inputs) {
                     Ok(outputs) => outputs
                         .into_iter()

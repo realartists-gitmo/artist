@@ -105,6 +105,10 @@ pub async fn build(root: &Path) -> Result<Kernel> {
             grep: native_verb("resources", "grep"),
         },
     )))?;
+    // Resource extension activation is independent of publication of the
+    // fixed resources:// verbs. A bad candidate is therefore isolated while
+    // the background publisher prepares the next ready generation.
+    let _ = resources.ensure_activated();
     let tools =
         ToolsHandler::new_with_watcher(&tools_root, Vec::<String>::new(), Some(&shared_watcher))
             .with_context(|| format!("load tools at {}", tools_root.display()))?;
@@ -141,8 +145,43 @@ pub async fn build(root: &Path) -> Result<Kernel> {
         kernel.clone(),
         tools.clone(),
     ));
+    kernel.retain_background(ResourceCatalogWatcher::start(resources));
     kernel.register_tool_provider(tools).await;
     Ok(kernel)
+}
+
+struct ResourceCatalogWatcher {
+    stop: Option<mpsc::Sender<()>>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl ResourceCatalogWatcher {
+    fn start(resources: Arc<ResourcesHandler>) -> Self {
+        let (stop, receiver) = mpsc::channel();
+        let join = thread::spawn(move || {
+            loop {
+                if receiver.recv_timeout(Duration::from_millis(250)).is_ok() {
+                    break;
+                }
+                let _ = resources.ensure_activated();
+            }
+        });
+        Self {
+            stop: Some(stop),
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for ResourceCatalogWatcher {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 fn native_verb(namespace: &str, function: &str) -> VerbId {

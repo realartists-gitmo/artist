@@ -20,6 +20,11 @@ interface filesystem {
     is-file: func(uri: string) -> bool;
 }
 
+interface read {
+    use types.{read-request, read-result, error};
+    read: func(requests: list<read-request>) -> list<result<read-result, error>>;
+}
+
 interface extension {
     use types.{claim-request, claim-decision};
     claim: func(request: claim-request) -> claim-decision;

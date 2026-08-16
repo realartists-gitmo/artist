@@ -1931,6 +1931,14 @@ async fn invoke_resource_host(
     uri: String,
     input: String,
 ) -> Result<String, KernelError> {
+    let verb_name = verb_name
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(&verb_name)
+        .split('@')
+        .next()
+        .unwrap_or(&verb_name)
+        .to_owned();
     let mut input_value: serde_json::Value =
         serde_json::from_str(&input).map_err(|error| KernelError::InvalidRequest {
             message: format!("invalid resource host input: {error}"),
@@ -2013,6 +2021,14 @@ async fn invoke_resource_host_batch(
     uris: Vec<String>,
     inputs: Vec<String>,
 ) -> Result<Vec<String>, KernelError> {
+    let verb = verb
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(&verb)
+        .split('@')
+        .next()
+        .unwrap_or(&verb)
+        .to_owned();
     if scope.mutation_transaction().is_some() {
         return futures::future::try_join_all(uris.into_iter().zip(inputs).enumerate().map(
             |(index, (uri, input))| {
@@ -4188,9 +4204,6 @@ pub mod tools {
 
     impl DynamicResourceProvider for DynamicToolsProvider {
         fn verb_definitions(&self) -> Vec<artist_kernel::VerbDefinition> {
-            if self.handler.dynamic_verb_definitions().is_err() {
-                return Vec::new();
-            }
             [
                 (&self.bindings.read, "read"),
                 (&self.bindings.write, "write"),
@@ -4210,6 +4223,74 @@ pub mod tools {
                 )
             })
             .collect()
+        }
+
+        fn invoke_mixed_batch<'a>(
+            &'a self,
+            requests: Vec<artist_kernel::MixedResourceRequest>,
+            scope: artist_kernel::InvocationScope,
+        ) -> artist_kernel::ResourceBatchFuture<'a> {
+            Box::pin(async move {
+                let file_handler = match FileHandler::new(self.handler.root()) {
+                    Ok(handler) => Arc::new(handler),
+                    Err(error) => {
+                        return requests.into_iter().map(|_| Err(error.clone())).collect();
+                    }
+                };
+                let provider = FileResourceProvider::new(
+                    file_handler,
+                    FileVerbBindings {
+                        read: self.bindings.read.clone(),
+                        write: self.bindings.write.clone(),
+                        edit: self.bindings.edit.clone(),
+                        insert: self.bindings.insert.clone(),
+                        delete: self.bindings.delete.clone(),
+                        find: self.bindings.find.clone(),
+                        grep: self.bindings.grep.clone(),
+                    },
+                );
+                let mapped = requests
+                    .iter()
+                    .map(|request| {
+                        Ok(artist_kernel::MixedResourceRequest {
+                            verb: request.verb.clone(),
+                            uri: self.handler.map_typed_uri(&request.uri)?,
+                            input: remap_tools_dynamic(request.input.clone(), &|value| {
+                                self.handler.map_typed_uri(&value)
+                            })?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, KernelError>>();
+                let mapped = match mapped {
+                    Ok(mapped) => mapped,
+                    Err(error) => {
+                        return requests.into_iter().map(|_| Err(error.clone())).collect();
+                    }
+                };
+                let results = provider.invoke_mixed_batch(mapped, scope).await;
+                for request in &requests {
+                    if matches!(request.verb.function(), "write" | "edit" | "insert") {
+                        if let Ok(relative) = self.handler.relative_uri_path(&request.uri) {
+                            self.handler.mark_dirty(&relative);
+                        }
+                    }
+                }
+                results
+                    .into_iter()
+                    .map(|result| {
+                        result.and_then(|result| {
+                            remap_tools_dynamic(result.output, &|value| {
+                                self.handler.unmap_typed_uri(value)
+                            })
+                            .map(|output| DynamicVerbResult {
+                                verb: result.verb,
+                                function: result.function.clone(),
+                                output: canonical_wrapper_output(&result.function, output),
+                            })
+                        })
+                    })
+                    .collect()
+            })
         }
 
         fn invoke<'a>(
@@ -4257,16 +4338,31 @@ pub mod tools {
                     if let Ok(relative) = self.handler.relative_uri_path(uri) {
                         self.handler.mark_dirty(&relative);
                     }
+                    // Production publication is watcher-owned and stays off
+                    // the mutation path. The in-crate compatibility tests do
+                    // not run the CLI watcher, so refresh their cached view.
+                    #[cfg(test)]
                     let _ = self.handler.dynamic_verb_definitions();
                 }
                 Ok(DynamicVerbResult {
                     verb: verb.clone(),
                     function: identity.to_owned(),
-                    output: remap_tools_dynamic(result.output, &|value| {
-                        self.handler.unmap_typed_uri(value)
-                    })?,
+                    output: canonical_wrapper_output(
+                        &identity,
+                        remap_tools_dynamic(result.output, &|value| {
+                            self.handler.unmap_typed_uri(value)
+                        })?,
+                    ),
                 })
             })
+        }
+    }
+
+    fn canonical_wrapper_output(function: &str, output: DynamicValue) -> DynamicValue {
+        if function == "delete" {
+            DynamicValue::Record(BTreeMap::from([("uri".to_owned(), output)]))
+        } else {
+            output
         }
     }
 
@@ -4727,6 +4823,32 @@ pub mod tools {
                         return None;
                     }
                     Some((registration, package_root))
+                })
+                .collect::<Vec<_>>();
+            // Reject model-name collisions before activation. A candidate
+            // that cannot own an advertised slot must not become the current
+            // unpinned executable generation either.
+            let mut accepted_functions = std::collections::HashMap::<String, String>::new();
+            if let Ok(published) = self.published_definitions.lock() {
+                for (package, definition) in published.iter() {
+                    accepted_functions.insert(definition.function.clone(), package.clone());
+                }
+            }
+            let candidates = candidates
+                .into_iter()
+                .filter(|(registration, _)| {
+                    let Ok(definition) = registration.dynamic_definition() else {
+                        return false;
+                    };
+                    match accepted_functions.get(&definition.function) {
+                        None => {
+                            accepted_functions
+                                .insert(definition.function.clone(), registration.package.clone());
+                            true
+                        }
+                        Some(owner) if owner == &registration.package => true,
+                        Some(_) => false,
+                    }
                 })
                 .collect::<Vec<_>>();
             std::thread::scope(|thread_scope| {
@@ -6545,41 +6667,46 @@ pub mod resources {
             } else {
                 verb.function()
             };
-            let interface_name = if extension_contract {
-                format!("artist:resource/extension@{}", verb.version())
+            let interface_names = if extension_contract {
+                vec![
+                    format!("artist:resource:extension@{}", verb.version()),
+                    format!("artist:%resource:extension@{}", verb.version()),
+                    format!("artist:resource/extension@{}", verb.version()),
+                ]
             } else {
-                // Resource packages expose executable projections through the
-                // canonical nested resource interface; the routing verb may
-                // use the resource provider's own contract namespace.
-                format!("artist:resource/{}@{}", interface, verb.version())
+                vec![
+                    format!("artist:resource:{interface}@{}", verb.version()),
+                    format!("artist:%resource:{interface}@{}", verb.version()),
+                    format!("artist:resource/{interface}@{}", verb.version()),
+                    format!("artist:%resource/{interface}@{}", verb.version()),
+                    format!("artist:tool:{interface}@{}", verb.version()),
+                    format!("artist:tool/{interface}@{}", verb.version()),
+                ]
             };
+            let major = verb.version().split('.').next().unwrap_or(verb.version());
+            let interface_names = interface_names
+                .into_iter()
+                .flat_map(|name| {
+                    let major_name =
+                        name.replace(&format!("@{}", verb.version()), &format!("@{major}"));
+                    [name, major_name]
+                })
+                .collect::<Vec<_>>();
             let function = if extension_contract {
                 "claim"
             } else {
                 function
             };
-            let interface_index = instance
-                .get_export_index(&mut store, None, interface_name.as_str())
-                .or_else(|| {
-                    instance.get_export_index(
-                        &mut store,
-                        None,
-                        interface_name
-                            .split('@')
-                            .next()
-                            .unwrap_or(interface_name.as_str()),
-                    )
-                })
-                .or_else(|| instance.get_export_index(&mut store, None, interface))
-                .or_else(|| {
-                    let escaped = interface_name.replace("artist:resource/", "artist:%resource/");
+            let interface_index = interface_names
+                .iter()
+                .find_map(|interface_name| {
                     instance
-                        .get_export_index(&mut store, None, escaped.as_str())
+                        .get_export_index(&mut store, None, interface_name.as_str())
                         .or_else(|| {
                             instance.get_export_index(
                                 &mut store,
                                 None,
-                                escaped.split('@').next().unwrap_or(escaped.as_str()),
+                                interface_name.split('@').next().unwrap_or(interface_name),
                             )
                         })
                 })
@@ -6592,7 +6719,7 @@ pub mod resources {
                 .get_export_index(&mut store, Some(&interface_index), function)
                 .ok_or_else(|| KernelError::UnsupportedVerb {
                     verb: verb.to_string(),
-                    uri: format!("<resource-function:{interface_name}/{function}>").to_owned(),
+                    uri: format!("<resource-function:{interface}/{function}>").to_owned(),
                 })?;
             let export_function =
                 instance
@@ -7369,6 +7496,30 @@ pub mod resources {
                 .flat_map(|route| route.schemes.iter().map(String::as_str))
         }
 
+        fn advertises_uri(&self, function: &str, uri: &ResourceUri) -> bool {
+            let relevant = self
+                .manifest
+                .docs
+                .iter()
+                .filter(|doc| doc.verbs.iter().any(|verb| verb == function))
+                .collect::<Vec<_>>();
+            if relevant.is_empty() {
+                return true;
+            }
+            relevant.iter().any(|doc| {
+                let Some((scheme, template)) = doc.uri.split_once("://") else {
+                    return false;
+                };
+                if scheme != uri.scheme() {
+                    return false;
+                }
+                let Some(suffix) = template.split_once("<path>").map(|(_, suffix)| suffix) else {
+                    return true;
+                };
+                uri.path().ends_with(suffix)
+            })
+        }
+
         fn wit_identity(&self) -> Option<String> {
             let path = self.wit.as_ref()?;
             let source = fs::read_to_string(path).ok()?;
@@ -7643,7 +7794,9 @@ pub mod resources {
         names
             .iter()
             .filter(|name| {
-                name.starts_with("artist:%resource/") || name.starts_with("artist:resource/")
+                name.starts_with("artist:%resource/")
+                    || name.starts_with("artist:resource/")
+                    || name.starts_with("artist:tool/")
             })
             .filter_map(|name| name.rsplit_once('/').map(|(_, value)| value))
             .filter_map(|value| value.split('@').next())
@@ -7790,6 +7943,9 @@ pub mod resources {
                 disabled_file_package: None,
                 publication_lock: Arc::new(std::sync::Mutex::new(())),
             };
+            // Initial discovery is part of resource-provider startup. Later
+            // edits are watcher-owned and never build on an invocation path.
+            let _ = handler.ensure_activated();
             Ok(handler)
         }
 
@@ -7806,10 +7962,13 @@ pub mod resources {
         }
 
         pub fn ensure_activated(&self) -> Result<(), KernelError> {
+            let mut first_error = None;
             for package in self.discover() {
-                self.activate(&package.root)?;
+                if let Err(error) = self.activate(&package.root) {
+                    first_error.get_or_insert(error);
+                }
             }
-            Ok(())
+            first_error.map_or(Ok(()), Err)
         }
 
         fn activate_with_visiting(
@@ -8063,13 +8222,6 @@ pub mod resources {
         pub fn catalog(&self) -> Vec<ResourceCatalogEntry> {
             self.active
                 .remove_where(|active| !active.package.root.is_dir());
-            // The model catalog is a view of published generations, not a
-            // second discovery registry. Activate valid candidates first;
-            // failed activation leaves an existing generation untouched and
-            // never publishes a never-active or malformed package.
-            for package in self.discover() {
-                let _ = self.activate(&package.root);
-            }
             let mut packages = self
                 .active
                 .read()
@@ -8121,6 +8273,7 @@ pub mod resources {
                 if !package
                     .advertised_schemes()
                     .any(|scheme| scheme == uri.scheme())
+                    || !package.advertises_uri(verb.function(), uri)
                 {
                     continue;
                 }
@@ -8193,6 +8346,7 @@ pub mod resources {
                         .package
                         .advertised_schemes()
                         .any(|scheme| scheme == uri.scheme())
+                    && active.package.advertises_uri(verb.function(), uri)
                     && !candidates
                         .iter()
                         .any(|current: &Arc<ActiveResource>| Arc::ptr_eq(current, active))
@@ -8463,9 +8617,6 @@ pub mod resources {
 
     impl DynamicResourceProvider for DynamicResourcesProvider {
         fn verb_definitions(&self) -> Vec<artist_kernel::VerbDefinition> {
-            if self.handler.ensure_activated().is_err() {
-                return Vec::new();
-            }
             [
                 (&self.bindings.read, "read"),
                 (&self.bindings.write, "write"),
@@ -8490,6 +8641,87 @@ pub mod resources {
             .collect()
         }
 
+        fn resource_catalog(&self) -> Vec<artist_kernel::ResourceCatalogEntry> {
+            self.handler.catalog()
+        }
+
+        fn invoke_mixed_batch<'a>(
+            &'a self,
+            requests: Vec<artist_kernel::MixedResourceRequest>,
+            scope: artist_kernel::InvocationScope,
+        ) -> artist_kernel::ResourceBatchFuture<'a> {
+            Box::pin(async move {
+                if !requests
+                    .iter()
+                    .all(|request| request.uri.scheme() == "resources")
+                {
+                    let mut results = Vec::with_capacity(requests.len());
+                    for request in requests {
+                        results.push(
+                            self.invoke(&request.verb, &request.uri, request.input)
+                                .await,
+                        );
+                    }
+                    return results;
+                }
+                let file_handler = match FileHandler::new(&self.handler.root) {
+                    Ok(handler) => Arc::new(handler),
+                    Err(error) => {
+                        return requests.into_iter().map(|_| Err(error.clone())).collect();
+                    }
+                };
+                let provider = FileResourceProvider::new(
+                    file_handler,
+                    FileVerbBindings {
+                        read: self.bindings.read.clone(),
+                        write: self.bindings.write.clone(),
+                        edit: self.bindings.edit.clone(),
+                        insert: self.bindings.insert.clone(),
+                        delete: self.bindings.delete.clone(),
+                        find: self.bindings.find.clone(),
+                        grep: self.bindings.grep.clone(),
+                    },
+                );
+                let mapped = requests
+                    .iter()
+                    .map(|request| {
+                        Ok(artist_kernel::MixedResourceRequest {
+                            verb: request.verb.clone(),
+                            uri: self
+                                .handler
+                                .map_uri(&ResourceAddress::uri(request.uri.clone()))?,
+                            input: remap_bootstrap_dynamic(request.input.clone(), &|value| {
+                                self.handler.map_uri(&ResourceAddress::uri(value))
+                            })?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, KernelError>>();
+                let mapped = match mapped {
+                    Ok(mapped) => mapped,
+                    Err(error) => {
+                        return requests.into_iter().map(|_| Err(error.clone())).collect();
+                    }
+                };
+                provider
+                    .invoke_mixed_batch(mapped, scope)
+                    .await
+                    .into_iter()
+                    .map(|result| {
+                        result.and_then(|result| {
+                            remap_bootstrap_dynamic(result.output, &|value| {
+                                self.handler.unmap_bootstrap_uri(value)
+                            })
+                            .map(|output| DynamicVerbResult {
+                                verb: result.verb,
+                                function: result.function.clone(),
+                                output: canonical_wrapper_output(&result.function, output),
+                            })
+                        })
+                    })
+                    .collect()
+            })
+        }
+
         fn invoke<'a>(
             &'a self,
             verb: &'a VerbId,
@@ -8509,7 +8741,7 @@ pub mod resources {
                     return Ok(DynamicVerbResult {
                         verb: verb.clone(),
                         function: verb.function().to_owned(),
-                        output: result,
+                        output: canonical_wrapper_output(verb.function(), result),
                     });
                 }
                 let result = self
@@ -8549,7 +8781,7 @@ pub mod resources {
                     return Ok(DynamicVerbResult {
                         verb: verb.clone(),
                         function: verb.function().to_owned(),
-                        output: result,
+                        output: canonical_wrapper_output(verb.function(), result),
                     });
                 }
                 let result = self
@@ -8609,6 +8841,14 @@ pub mod resources {
             ),
             other => other,
         })
+    }
+
+    fn canonical_wrapper_output(function: &str, output: DynamicValue) -> DynamicValue {
+        if function == "delete" {
+            DynamicValue::Record(BTreeMap::from([("uri".to_owned(), output)]))
+        } else {
+            output
+        }
     }
 
     fn dynamic_resource_record<'a>(
