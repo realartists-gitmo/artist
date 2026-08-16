@@ -934,4 +934,22 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn invocation_stdin_writes_reach_active_consumers() {
+        let store = InvocationStore::default();
+        let invocation = store.begin(DynamicValue::String("initial".into()));
+        let mut updates = store.subscribe_stdin(&invocation.uri).unwrap();
+
+        store
+            .set_stdin(&invocation.uri, DynamicValue::String("follow-up".into()))
+            .unwrap();
+
+        assert_eq!(
+            updates.recv().await,
+            Some(DynamicValue::String("follow-up".into()))
+        );
+        let saved = store.get(&invocation.uri).unwrap();
+        assert_eq!(saved.stdin_history.len(), 2);
+    }
 }

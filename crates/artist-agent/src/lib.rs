@@ -501,6 +501,10 @@ where
                         on_event(PromptEvent::ReasoningSummaryDelta(reasoning))
                             .map_err(|error| error.to_string())
                     }
+                    BatchedRunEvent::CompletionUsage(total_tokens) => {
+                        on_event(PromptEvent::CompletionUsage { total_tokens })
+                            .map_err(|error| error.to_string())
+                    }
                 },
             )
             .await;

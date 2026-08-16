@@ -11,7 +11,7 @@ use rig_agent::{
 use rig_core::{
     OneOrMany,
     completion::{CompletionModel, Message},
-    message::{ToolResult, ToolResultContent, UserContent},
+    message::{AssistantContent, ReasoningContent, ToolResult, ToolResultContent, UserContent},
     streaming::StreamedAssistantContent,
 };
 use serde_json::{Map, Value};
@@ -72,6 +72,7 @@ pub(crate) enum BatchedRunEvent {
     },
     Reasoning(String),
     Text(String),
+    CompletionUsage(u64),
 }
 
 /// Artist-owned sans-IO Rig driver. `AgentRun` exposes the complete
@@ -129,6 +130,7 @@ where
                     .stream(request.build())
                     .await
                     .map_err(|error| error.to_string())?;
+                let mut emitted_assistant_content = false;
                 while let Some(item) = tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => {
@@ -141,9 +143,11 @@ where
                 } {
                     match item.map_err(|error| error.to_string())? {
                         StreamedAssistantContent::Text(text) => {
+                            emitted_assistant_content = true;
                             on_event(BatchedRunEvent::Text(text.text))?;
                         }
                         StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+                            emitted_assistant_content = true;
                             on_event(BatchedRunEvent::Reasoning(reasoning))?;
                         }
                         _ => {}
@@ -152,6 +156,44 @@ where
                 let response: rig_core::completion::CompletionResponse<
                     Option<M::StreamingResponse>,
                 > = stream.into();
+                // Some providers expose the complete assistant choice only in
+                // the terminal response rather than as stream deltas. Replay
+                // that content exactly once so the custom driver has the same
+                // observable text/reasoning lifecycle as Rig's normal stream
+                // runner. Tool calls are replayed by AgentRun's CallTools
+                // boundary below and must not be emitted twice here.
+                if !emitted_assistant_content {
+                    for content in response.choice.iter() {
+                        match content {
+                            AssistantContent::Text(text) => {
+                                on_event(BatchedRunEvent::Text(text.text.clone()))?;
+                            }
+                            AssistantContent::Reasoning(reasoning) => {
+                                let text = reasoning
+                                    .content
+                                    .iter()
+                                    .map(|part| match part {
+                                        ReasoningContent::Text { text, .. }
+                                        | ReasoningContent::Summary(text) => text.clone(),
+                                        ReasoningContent::Encrypted(value)
+                                        | ReasoningContent::Redacted { data: value } => {
+                                            value.clone()
+                                        }
+                                        _ => String::new(),
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if !text.is_empty() {
+                                    on_event(BatchedRunEvent::Reasoning(text))?;
+                                }
+                            }
+                            AssistantContent::ToolCall(_) | AssistantContent::Image(_) => {}
+                        }
+                    }
+                }
+                on_event(BatchedRunEvent::CompletionUsage(
+                    response.usage.total_tokens,
+                ))?;
                 let outcome = run
                     .model_response(ModelTurn::new(
                         response.message_id,

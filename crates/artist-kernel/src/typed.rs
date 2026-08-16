@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 
 #[derive(Clone)]
 pub struct MutationTransaction {
@@ -241,6 +241,10 @@ pub struct InvocationScope {
     generation_handles: Arc<Mutex<HashMap<String, Arc<dyn Any + Send + Sync>>>>,
     pub(crate) claim_decisions: Arc<Mutex<HashMap<String, ClaimDecision>>>,
     pub(crate) mutation_transaction: Option<Arc<MutationTransaction>>,
+    /// Live stdin writes for the logical invocation owning this scope.
+    /// Child scopes share the receiver so providers do not need a second
+    /// public invocation identity for interactive input.
+    stdin_receiver: Option<Arc<AsyncMutex<mpsc::UnboundedReceiver<DynamicValue>>>>,
     /// Routing frames shared by nested calls in one invocation chain. The
     /// kernel uses these to reject recursive resource re-entry before it can
     /// consume an unbounded amount of work.
@@ -276,6 +280,7 @@ impl InvocationScope {
             generation_handles: Arc::new(Mutex::new(HashMap::new())),
             claim_decisions: Arc::new(Mutex::new(HashMap::new())),
             mutation_transaction: None,
+            stdin_receiver: None,
             routing_stack: Arc::new(Mutex::new(Vec::new())),
             deadline_started: Instant::now(),
         }
@@ -293,6 +298,7 @@ impl InvocationScope {
             generation_handles: Arc::new(Mutex::new(HashMap::new())),
             claim_decisions: Arc::new(Mutex::new(HashMap::new())),
             mutation_transaction: None,
+            stdin_receiver: None,
             routing_stack: Arc::new(Mutex::new(Vec::new())),
             deadline_started: Instant::now(),
         }
@@ -307,6 +313,7 @@ impl InvocationScope {
             generation_handles: Arc::clone(&self.generation_handles),
             claim_decisions: Arc::clone(&self.claim_decisions),
             mutation_transaction: self.mutation_transaction.clone(),
+            stdin_receiver: self.stdin_receiver.clone(),
             routing_stack: Arc::clone(&self.routing_stack),
             deadline_started: self.deadline_started,
         }
@@ -325,6 +332,22 @@ impl InvocationScope {
     pub fn with_mutation_transaction(mut self, transaction: Arc<MutationTransaction>) -> Self {
         self.mutation_transaction = Some(transaction);
         self
+    }
+
+    pub(crate) fn with_stdin_receiver(
+        mut self,
+        receiver: mpsc::UnboundedReceiver<DynamicValue>,
+    ) -> Self {
+        self.stdin_receiver = Some(Arc::new(AsyncMutex::new(receiver)));
+        self
+    }
+
+    /// Receive the next value written to this logical invocation's stdin.
+    /// Interactive providers can await this without inventing another public
+    /// invocation resource or losing the caller's correlation identity.
+    pub async fn next_stdin(&self) -> Option<DynamicValue> {
+        let receiver = self.stdin_receiver.as_ref()?.clone();
+        receiver.lock().await.recv().await
     }
 
     pub fn mutation_transaction(&self) -> Option<Arc<MutationTransaction>> {

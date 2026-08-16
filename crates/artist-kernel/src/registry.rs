@@ -482,6 +482,12 @@ impl Kernel {
     ) -> Result<crate::DynamicValue, KernelError> {
         let invocation = self.inner.invocations.begin(args.clone());
         let scope = scope.with_invocation_uri(invocation.uri.clone());
+        let scope = self
+            .inner
+            .invocations
+            .subscribe_stdin(&invocation.uri)
+            .map(|receiver| scope.clone().with_stdin_receiver(receiver))
+            .unwrap_or(scope);
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
@@ -530,6 +536,12 @@ impl Kernel {
     ) -> Result<crate::DynamicValue, KernelError> {
         let invocation = self.inner.invocations.begin(args.clone());
         let scope = scope.with_invocation_uri(invocation.uri.clone());
+        let scope = self
+            .inner
+            .invocations
+            .subscribe_stdin(&invocation.uri)
+            .map(|receiver| scope.clone().with_stdin_receiver(receiver))
+            .unwrap_or(scope);
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
