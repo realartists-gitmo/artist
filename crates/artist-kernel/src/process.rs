@@ -52,7 +52,7 @@ impl ProcessVerbBindings {
             ),
         ]));
         let empty = DynamicType::Record(BTreeMap::new());
-        let snapshot = DynamicType::Record(BTreeMap::from([
+        let _snapshot = DynamicType::Record(BTreeMap::from([
             ("uri".to_owned(), uri.clone()),
             ("running".to_owned(), DynamicType::Bool),
             (
@@ -98,7 +98,7 @@ impl ProcessVerbBindings {
         ]));
         let poll_output = DynamicType::Record(BTreeMap::from([
             ("uri".to_owned(), uri.clone()),
-            ("text".to_owned(), DynamicType::String),
+            ("text".to_owned(), read_output.clone()),
             (
                 "reason".to_owned(),
                 DynamicType::Enum(vec![
@@ -594,38 +594,7 @@ fn process_exit_code(status: std::process::ExitStatus) -> Option<i32> {
 }
 
 fn process_poll_result(uri: &ResourceUri, text: String, reason: &str) -> DynamicValue {
-    let revision = text.len() as u64;
-    let line_count = text.lines().count();
-    let lines = text
-        .lines()
-        .enumerate()
-        .map(|(index, line)| {
-            DynamicValue::Record(BTreeMap::from([
-                (
-                    "anchor".to_owned(),
-                    DynamicValue::String(if index + 1 == line_count {
-                        format!("#{revision}")
-                    } else {
-                        format!("#{}", index + 1)
-                    }),
-                ),
-                ("text".to_owned(), DynamicValue::String(line.to_owned())),
-                ("ending".to_owned(), DynamicValue::Enum("lf".to_owned())),
-            ]))
-        })
-        .collect::<Vec<_>>();
-    let lines = if lines.is_empty() {
-        vec![DynamicValue::Record(BTreeMap::from([
-            (
-                "anchor".to_owned(),
-                DynamicValue::String(format!("#{revision}")),
-            ),
-            ("text".to_owned(), DynamicValue::String(String::new())),
-            ("ending".to_owned(), DynamicValue::Enum("none".to_owned())),
-        ]))]
-    } else {
-        lines
-    };
+    let lines = process_lines(&text);
     DynamicValue::Record(BTreeMap::from([
         ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
         (
@@ -642,25 +611,33 @@ fn process_poll_result(uri: &ResourceUri, text: String, reason: &str) -> Dynamic
 fn process_text_value(uri: &ResourceUri, text: String) -> DynamicValue {
     DynamicValue::Record(BTreeMap::from([
         ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
-        (
-            "lines".to_owned(),
-            DynamicValue::List(
-                text.lines()
-                    .enumerate()
-                    .map(|(index, line)| {
-                        DynamicValue::Record(BTreeMap::from([
-                            (
-                                "anchor".to_owned(),
-                                DynamicValue::String(format!("#{}", index + 1)),
-                            ),
-                            ("text".to_owned(), DynamicValue::String(line.to_owned())),
-                            ("ending".to_owned(), DynamicValue::Enum("lf".to_owned())),
-                        ]))
-                    })
-                    .collect(),
-            ),
-        ),
+        ("lines".to_owned(), DynamicValue::List(process_lines(&text))),
     ]))
+}
+
+fn process_lines(text: &str) -> Vec<DynamicValue> {
+    let mut offset = 0u64;
+    let mut lines = Vec::new();
+    for chunk in text.split_inclusive('\n') {
+        offset += chunk.len() as u64;
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+        lines.push(DynamicValue::Record(BTreeMap::from([
+            (
+                "anchor".to_owned(),
+                DynamicValue::String(format!("#{offset}")),
+            ),
+            ("text".to_owned(), DynamicValue::String(line.to_owned())),
+            ("ending".to_owned(), DynamicValue::Enum("lf".to_owned())),
+        ])));
+    }
+    if lines.is_empty() {
+        lines.push(DynamicValue::Record(BTreeMap::from([
+            ("anchor".to_owned(), DynamicValue::String("#0".to_owned())),
+            ("text".to_owned(), DynamicValue::String(String::new())),
+            ("ending".to_owned(), DynamicValue::Enum("none".to_owned())),
+        ])));
+    }
+    lines
 }
 
 fn process_poll_options(

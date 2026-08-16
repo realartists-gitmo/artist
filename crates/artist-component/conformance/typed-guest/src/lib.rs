@@ -10,11 +10,9 @@ fn error(message: impl ToString, uri: Option<String>) -> types::Error {
     }
 }
 
-fn observe<T>(response: Result<T, types::Error>) -> String {
-    match response {
-        Ok(_) => "ok".to_owned(),
-        Err(error) => format!("{:?}: {}", error.code, error.message),
-    }
+fn observe<T: serde::Serialize>(response: Result<T, types::Error>) -> String {
+    serde_json::to_string(&response)
+        .unwrap_or_else(|error| format!("observer serialization error: {error}"))
 }
 
 fn invoke_json(verb: &str, uri: &str, input: serde_json::Value) -> Result<serde_json::Value, types::Error> {
@@ -95,11 +93,7 @@ impl exports::artist::tool::read::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::read::ReadResponse, types::Error>) -> String {
-        match response {
-            Ok(exports::artist::tool::read::ReadResponse::Text(text)) => format!("read: {} anchored lines", text.lines.len()),
-            Ok(exports::artist::tool::read::ReadResponse::Directory(directory)) => format!("read: {} entries", directory.entries.len()),
-            Err(error) => format!("read error: {:?}: {}", error.code, error.message),
-        }
+        super::observe(response)
     }
 }
 
@@ -323,10 +317,7 @@ impl exports::artist::tool::write::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::write::WriteResponse, types::Error>) -> String {
-        match response {
-            Ok(response) => format!("write: {}", if response.text.is_some() { "receipt with fresh anchors" } else { "receipt" }),
-            Err(error) => format!("write error: {:?}: {}", error.code, error.message),
-        }
+        super::observe(response)
     }
 }
 
@@ -366,10 +357,7 @@ impl exports::artist::tool::edit::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::edit::EditResponse, types::Error>) -> String {
-        match response {
-            Ok(response) => format!("edit: {} changed windows, {} diff hunks", response.changed.len(), response.diff.hunks.len()),
-            Err(error) => format!("edit error: {:?}: {}", error.code, error.message),
-        }
+        super::observe(response)
     }
 }
 
@@ -403,10 +391,7 @@ impl exports::artist::tool::insert::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::insert::InsertResponse, types::Error>) -> String {
-        match response {
-            Ok(response) => format!("insert: {} changed windows, {} diff hunks", response.changed.len(), response.diff.hunks.len()),
-            Err(error) => format!("insert error: {:?}: {}", error.code, error.message),
-        }
+        super::observe(response)
     }
 }
 
@@ -435,10 +420,7 @@ impl exports::artist::tool::find::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::find::FindResponse, types::Error>) -> String {
-        match response {
-            Ok(response) => format!("find: {} URIs", response.uris.len()),
-            Err(error) => format!("find error: {:?}: {}", error.code, error.message),
-        }
+        super::observe(response)
     }
 }
 
@@ -467,10 +449,7 @@ impl exports::artist::tool::grep::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::grep::GrepResponse, types::Error>) -> String {
-        match response {
-            Ok(response) => format!("grep: {} anchored matches", response.matches.len()),
-            Err(error) => format!("grep error: {:?}: {}", error.code, error.message),
-        }
+        super::observe(response)
     }
 }
 
@@ -491,10 +470,7 @@ impl exports::artist::tool::run::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::run::RunResponse, types::Error>) -> String {
-        match response {
-            Ok(response) => format!("run: {}", response.uri),
-            Err(error) => format!("run error: {:?}: {}", error.code, error.message),
-        }
+        super::observe(response)
     }
 }
 
@@ -530,10 +506,7 @@ impl exports::artist::tool::poll::Guest for TypedTool {
     }
 
     fn observe(response: Result<exports::artist::tool::poll::PollResponse, types::Error>) -> String {
-        match response {
-            Ok(response) => format!("poll: {:?}, {} anchored lines", response.reason, response.text.lines.len()),
-            Err(error) => format!("poll error: {:?}: {}", error.code, error.message),
-        }
+        super::observe(response)
     }
 }
 
@@ -556,10 +529,7 @@ macro_rules! uri_verb {
             }
 
             fn observe(response: Result<exports::artist::tool::$module::UriResponse, types::Error>) -> String {
-                match response {
-                    Ok(response) => format!(concat!(stringify!($module), ": {}"), response.uri),
-                    Err(error) => format!(concat!(stringify!($module), " error: {:?}: {}"), error.code, error.message),
-                }
+                super::observe(response)
             }
         }
     };

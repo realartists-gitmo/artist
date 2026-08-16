@@ -14,7 +14,7 @@ use artist_kernel::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -162,6 +162,7 @@ impl DynamicVerbCatalogWatcher {
         let verb_registry = kernel.verb_registry();
         let (stop, receiver) = mpsc::channel();
         let join = thread::spawn(move || {
+            let mut owned = BTreeSet::new();
             loop {
                 if receiver.recv_timeout(Duration::from_millis(250)).is_ok() {
                     break;
@@ -170,12 +171,13 @@ impl DynamicVerbCatalogWatcher {
                     continue;
                 };
                 for definition in &definitions {
+                    owned.insert(definition.identity.clone());
                     let _ = route_registry.register(
                         definition.identity.clone(),
                         Arc::new(artist_kernel::ResourceUriValueExtractor),
                     );
                 }
-                let _ = verb_registry.reconcile_packages(definitions);
+                let _ = verb_registry.reconcile_owned_packages(definitions, owned.clone());
             }
         });
         Self {

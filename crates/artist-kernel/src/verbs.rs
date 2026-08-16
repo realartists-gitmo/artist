@@ -735,6 +735,26 @@ impl VerbRegistry {
         &self,
         definitions: Vec<VerbDefinition>,
     ) -> Result<Vec<VerbId>, KernelError> {
+        let managed = self
+            .entries
+            .read()
+            .map_err(|_| KernelError::Handler {
+                message: "verb registry lock poisoned".to_owned(),
+            })?
+            .keys()
+            .cloned()
+            .collect();
+        self.reconcile_owned_packages(definitions, managed)
+    }
+
+    /// Reconcile only the identities owned by one catalog publisher. Other
+    /// providers (native resources, invocation channels, extensions) remain
+    /// active even when this publisher temporarily has no definitions.
+    pub fn reconcile_owned_packages(
+        &self,
+        definitions: Vec<VerbDefinition>,
+        owned: std::collections::BTreeSet<VerbId>,
+    ) -> Result<Vec<VerbId>, KernelError> {
         self.activate_packages(definitions.clone())?;
         let desired = definitions
             .into_iter()
@@ -747,7 +767,7 @@ impl VerbRegistry {
                 message: "verb registry lock poisoned".to_owned(),
             })?
             .keys()
-            .filter(|identity| !desired.contains(*identity))
+            .filter(|identity| owned.contains(*identity) && !desired.contains(*identity))
             .cloned()
             .collect::<Vec<_>>();
         for identity in &removed {

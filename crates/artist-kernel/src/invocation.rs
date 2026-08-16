@@ -85,7 +85,7 @@ impl InvocationStore {
         &self,
         uri: &ResourceUri,
         stdout: Result<DynamicValue, KernelError>,
-        _stdobs: impl Into<String>,
+        stdobs: impl Into<String>,
         stderr: impl Into<String>,
     ) -> Result<Invocation, KernelError> {
         let id = invocation_id(uri)?;
@@ -100,12 +100,20 @@ impl InvocationStore {
             })?;
         let stdin = current.stdin.clone();
         let stdin_history = current.stdin_history.clone();
-        let stdobs = match &stdout {
+        let fallback_stdobs = match &stdout {
             Ok(value) => value.to_lossless_string(),
             Err(error) => format!(
                 "{{\"type\":\"error\",\"value\":{}}}",
                 kernel_error_value(error).to_lossless_string()
             ),
+        };
+        let stdobs = {
+            let supplied = stdobs.into();
+            if supplied.is_empty() {
+                fallback_stdobs
+            } else {
+                supplied
+            }
         };
         let completed =
             Invocation::completed(current.uri.clone(), stdin, stdout, stdobs, stderr.into());
@@ -487,10 +495,13 @@ impl InvocationResourceProvider {
 }
 
 fn channel_text(invocation: &Invocation, channel: &str, text: String) -> DynamicValue {
+    let channel_uri = invocation
+        .channel_uri(channel)
+        .unwrap_or_else(|_| invocation.uri.clone());
     DynamicValue::Record(BTreeMap::from([
         (
             "uri".to_owned(),
-            DynamicValue::ResourceUri(invocation.uri.clone()),
+            DynamicValue::ResourceUri(channel_uri.clone()),
         ),
         (
             "lines".to_owned(),
@@ -526,6 +537,9 @@ fn poll_cursor(input: &DynamicValue) -> Option<u64> {
 }
 
 fn poll_output(invocation: &Invocation, channel: &str, reason: &str) -> DynamicValue {
+    let channel_uri = invocation
+        .channel_uri(channel)
+        .unwrap_or_else(|_| invocation.uri.clone());
     let value = match channel {
         "stdout" => invocation
             .stdout
@@ -547,15 +561,12 @@ fn poll_output(invocation: &Invocation, channel: &str, reason: &str) -> DynamicV
     DynamicValue::Record(BTreeMap::from([
         (
             "uri".to_owned(),
-            DynamicValue::ResourceUri(invocation.uri.clone()),
+            DynamicValue::ResourceUri(channel_uri.clone()),
         ),
         (
             "text".to_owned(),
             DynamicValue::Record(BTreeMap::from([
-                (
-                    "uri".to_owned(),
-                    DynamicValue::ResourceUri(invocation.uri.clone()),
-                ),
+                ("uri".to_owned(), DynamicValue::ResourceUri(channel_uri)),
                 (
                     "lines".to_owned(),
                     DynamicValue::List(vec![DynamicValue::Record(BTreeMap::from([
@@ -663,6 +674,8 @@ fn error_uri(error: &KernelError) -> Option<String> {
 impl DynamicClaimProvider for InvocationResourceProvider {
     fn claim(&self, verb: &VerbId, uri: &ResourceUri) -> ClaimDecision {
         if uri.scheme() == "invocations"
+            && verb.package() == "artist"
+            && verb.interface() == "invocations"
             && matches!(
                 verb.function(),
                 "read" | "find" | "write" | "poll" | "abort" | "delete"
@@ -919,10 +932,7 @@ mod tests {
             saved.stdout,
             Some(Ok(DynamicValue::String("response".into())))
         );
-        assert_eq!(
-            saved.stdobs,
-            DynamicValue::String("response".into()).to_lossless_string()
-        );
+        assert_eq!(saved.stdobs, "compact");
         assert_eq!(saved.status, InvocationStatus::Completed(0));
         for channel in ["stdin", "stdout", "stderr", "stdobs", "status"] {
             assert!(

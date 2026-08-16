@@ -1879,9 +1879,6 @@ async fn invoke_resource_host(
         serde_json::from_str(&input).map_err(|error| KernelError::InvalidRequest {
             message: format!("invalid resource host input: {error}"),
         })?;
-    if let serde_json::Value::Object(fields) = &mut input_value {
-        fields.insert("uri".to_owned(), serde_json::Value::String(uri.clone()));
-    }
     let resource_uri = match ResourceUri::parse(&uri) {
         Ok(uri) => uri,
         Err(error) => {
@@ -1900,6 +1897,14 @@ async fn invoke_resource_host(
             .to_string());
         }
     };
+    if input_type
+        .as_ref()
+        .is_none_or(|ty| matches!(ty, DynamicType::Record(fields) if fields.contains_key("uri")))
+    {
+        if let serde_json::Value::Object(fields) = &mut input_value {
+            fields.insert("uri".to_owned(), serde_json::Value::String(uri.clone()));
+        }
+    }
     let dynamic = match input_type {
         Some(input_type) => match tools::json_to_dynamic_typed(&input_value, &input_type) {
             Ok(value) => value,
@@ -1987,9 +1992,6 @@ async fn invoke_resource_host_batch(
                 continue;
             }
         };
-        if let serde_json::Value::Object(fields) = &mut value {
-            fields.insert("uri".to_owned(), serde_json::Value::String(uri.clone()));
-        }
         let input_type = match kernel.universal_input_type(verb.clone(), resource_uri.clone()) {
             Ok(input_type) => input_type,
             Err(error) => {
@@ -2000,6 +2002,13 @@ async fn invoke_resource_host_batch(
                 continue;
             }
         };
+        if input_type.as_ref().is_none_or(
+            |ty| matches!(ty, DynamicType::Record(fields) if fields.contains_key("uri")),
+        ) {
+            if let serde_json::Value::Object(fields) = &mut value {
+                fields.insert("uri".to_owned(), serde_json::Value::String(uri.clone()));
+            }
+        }
         let dynamic = match input_type {
             Some(input_type) => match tools::json_to_dynamic_typed(&value, &input_type) {
                 Ok(value) => value,
@@ -3935,18 +3944,16 @@ pub mod tool_adapter {
                         });
                     }
                 };
-            // stdobs is intentionally the exact authoritative stdout for now.
-            // Keep the package observer hook available for the later
-            // model-facing projection pass, but do not let it replace or
-            // summarize the lossless result on this execution path.
-            let _ = (kernel, scope);
-            Ok(values
-                .into_iter()
-                .map(|value| {
-                    let stdobs = serde_json::to_string(&value).unwrap_or_default();
-                    (value, stdobs)
-                })
-                .collect())
+            let mut observed = Vec::with_capacity(values.len());
+            for value in values {
+                let stdobs = self
+                    .component
+                    .observe_json_async_with_scope(&value, kernel.clone(), scope.child())
+                    .await
+                    .map_err(component_error)?;
+                observed.push((value, stdobs));
+            }
+            Ok(observed)
         }
     }
 
@@ -4673,7 +4680,13 @@ pub mod tools {
                         .map(|(_, registration)| registration.package.clone());
                     if let Some(package_name) = known {
                         if let Ok(active) = self.registry.current(&package_name) {
-                            return Ok(active);
+                            return Err(KernelError::Handler {
+                                message: format!(
+                                    "candidate package {} is invalid; generation {} remains active",
+                                    package_name,
+                                    active.generation()
+                                ),
+                            });
                         }
                     }
                     return Err(component_error(error));
@@ -4693,7 +4706,7 @@ pub mod tools {
             {
                 match self.custom_dependencies(&package) {
                     Ok(dependencies) => dependencies,
-                    Err(error) => return current.ok_or(error),
+                    Err(error) => return Err(error),
                 }
             } else {
                 Vec::new()
@@ -4704,7 +4717,7 @@ pub mod tools {
                 dependencies,
             ) {
                 Ok(active) => active,
-                Err(error) => return current.ok_or_else(|| component_error(error)),
+                Err(error) => return Err(component_error(error)),
             };
             self.dirty.lock().unwrap().remove(&key);
             Ok(active)
@@ -4962,18 +4975,24 @@ pub mod tools {
                 Ok(registrations) => registrations,
                 Err(_) => return Vec::new(),
             };
+            let _ = self.dynamic_verb_definitions();
+            let published = match self.published_definitions.lock() {
+                Ok(published) => published.clone(),
+                Err(_) => return Vec::new(),
+            };
             registrations
                 .into_iter()
                 .filter_map(|registration| {
-                    let input_type = registration
-                        .dynamic_definition()
-                        .ok()
-                        .and_then(|definition| definition.input_type);
+                    let definition = published.get(&registration.package)?;
+                    let input_type = definition.input_type.clone();
                     Some(ToolDefinition {
-                        name: registration.tool_name(),
-                        description: registration.description.clone(),
-                        parameters: json_to_dynamic(registration.parameters_from_wit())
-                            .unwrap_or_else(|_| DynamicValue::Record(Default::default())),
+                        name: definition.function.clone(),
+                        description: definition.description.clone(),
+                        parameters: input_type
+                            .as_ref()
+                            .map(dynamic_type_schema)
+                            .and_then(|schema| json_to_dynamic(schema).ok())
+                            .unwrap_or_else(|| DynamicValue::Record(Default::default())),
                         input_type,
                     })
                 })
@@ -5104,7 +5123,7 @@ pub mod tools {
                 let generation = active.generation();
                 let verb = registration.dynamic_definition()?.identity;
                 let tool = ComponentTool::new(active, registration.contract.interface.clone());
-                let (value, _stdobs) = tool
+                let (value, stdobs) = tool
                     .invoke_batch_with_observations_async_with_scope(
                         vec![dynamic_to_json(&args)],
                         host,
@@ -5118,7 +5137,7 @@ pub mod tools {
                     })?;
                 let stdout = typed_tool_output(&value, &registration)?;
                 Ok(artist_kernel::ToolModelResult {
-                    stdobs: stdout.to_lossless_string(),
+                    stdobs,
                     stdout: Ok(stdout),
                     verb,
                     generation,
@@ -5222,10 +5241,10 @@ pub mod tools {
                 };
                 values
                     .into_iter()
-                    .map(|(value, _stdobs)| {
+                    .map(|(value, stdobs)| {
                         let stdout = typed_tool_output(&value, &registration)?;
                         Ok(artist_kernel::ToolModelResult {
-                            stdobs: stdout.to_lossless_string(),
+                            stdobs,
                             stdout: Ok(stdout),
                             verb: verb.clone(),
                             generation,
@@ -7617,7 +7636,12 @@ pub mod resources {
                         .values()
                         .find(|active| active.package.root == package_root)
                     {
-                        return Ok(active.generation);
+                        return Err(KernelError::Handler {
+                            message: format!(
+                                "candidate resource package is invalid; generation {} remains active",
+                                active.generation
+                            ),
+                        });
                     }
                     return Err(error);
                 }
@@ -7644,9 +7668,6 @@ pub mod resources {
             let build = match package.build(&options) {
                 Ok(build) => build,
                 Err(error) => {
-                    if let Some(active) = self.active.read().unwrap().get(&package.manifest.name) {
-                        return Ok(active.generation);
-                    }
                     return Err(error);
                 }
             };
@@ -8210,7 +8231,24 @@ pub mod resources {
     impl DynamicClaimProvider for DynamicResourcesProvider {
         fn claim(&self, verb: &VerbId, uri: &ResourceUri) -> ClaimDecision {
             if uri.scheme() == "resources" {
-                return ClaimDecision::Handle;
+                let owns = [
+                    &self.bindings.read,
+                    &self.bindings.write,
+                    &self.bindings.edit,
+                    &self.bindings.insert,
+                    &self.bindings.poll,
+                    &self.bindings.run,
+                    &self.bindings.abort,
+                    &self.bindings.delete,
+                    &self.bindings.find,
+                    &self.bindings.grep,
+                ]
+                .contains(&verb);
+                return if owns {
+                    ClaimDecision::Handle
+                } else {
+                    ClaimDecision::Pass
+                };
             }
             let scope =
                 artist_kernel::InvocationScope::new(artist_kernel::InvocationContext::default());

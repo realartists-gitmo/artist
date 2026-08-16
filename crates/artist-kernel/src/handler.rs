@@ -96,6 +96,21 @@ pub trait ToolProvider: Send + Sync {
         })
     }
 
+    fn execute_tools_for_model_results_with_scopes<'a>(
+        &'a self,
+        name: &'a str,
+        args: Vec<crate::DynamicValue>,
+        host: KernelHandle,
+        scopes: Vec<InvocationScope>,
+    ) -> BoxFuture<'a, Vec<Result<ToolModelResult, KernelError>>> {
+        let scope = scopes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| InvocationScope::new(InvocationContext::default()))
+            .with_batch_scopes(scopes);
+        self.execute_tools_for_model_results(name, args, host, scope)
+    }
+
     fn execute_tools_for_model<'a>(
         &'a self,
         name: &'a str,

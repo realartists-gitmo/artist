@@ -130,7 +130,8 @@ where
                     .stream(request.build())
                     .await
                     .map_err(|error| error.to_string())?;
-                let mut emitted_assistant_content = false;
+                let mut emitted_text = false;
+                let mut emitted_reasoning = false;
                 while let Some(item) = tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => {
@@ -143,11 +144,11 @@ where
                 } {
                     match item.map_err(|error| error.to_string())? {
                         StreamedAssistantContent::Text(text) => {
-                            emitted_assistant_content = true;
+                            emitted_text = true;
                             on_event(BatchedRunEvent::Text(text.text))?;
                         }
                         StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                            emitted_assistant_content = true;
+                            emitted_reasoning = true;
                             on_event(BatchedRunEvent::Reasoning(reasoning))?;
                         }
                         _ => {}
@@ -162,33 +163,30 @@ where
                 // observable text/reasoning lifecycle as Rig's normal stream
                 // runner. Tool calls are replayed by AgentRun's CallTools
                 // boundary below and must not be emitted twice here.
-                if !emitted_assistant_content {
-                    for content in response.choice.iter() {
-                        match content {
-                            AssistantContent::Text(text) => {
-                                on_event(BatchedRunEvent::Text(text.text.clone()))?;
-                            }
-                            AssistantContent::Reasoning(reasoning) => {
-                                let text = reasoning
-                                    .content
-                                    .iter()
-                                    .map(|part| match part {
-                                        ReasoningContent::Text { text, .. }
-                                        | ReasoningContent::Summary(text) => text.clone(),
-                                        ReasoningContent::Encrypted(value)
-                                        | ReasoningContent::Redacted { data: value } => {
-                                            value.clone()
-                                        }
-                                        _ => String::new(),
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                if !text.is_empty() {
-                                    on_event(BatchedRunEvent::Reasoning(text))?;
-                                }
-                            }
-                            AssistantContent::ToolCall(_) | AssistantContent::Image(_) => {}
+                for content in response.choice.iter() {
+                    match content {
+                        AssistantContent::Text(text) if !emitted_text => {
+                            on_event(BatchedRunEvent::Text(text.text.clone()))?;
                         }
+                        AssistantContent::Reasoning(reasoning) if !emitted_reasoning => {
+                            let text = reasoning
+                                .content
+                                .iter()
+                                .map(|part| match part {
+                                    ReasoningContent::Text { text, .. }
+                                    | ReasoningContent::Summary(text) => text.clone(),
+                                    ReasoningContent::Encrypted(value)
+                                    | ReasoningContent::Redacted { data: value } => value.clone(),
+                                    _ => String::new(),
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !text.is_empty() {
+                                on_event(BatchedRunEvent::Reasoning(text))?;
+                            }
+                        }
+                        AssistantContent::Text(_) | AssistantContent::Reasoning(_) => {}
+                        AssistantContent::ToolCall(_) | AssistantContent::Image(_) => {}
                     }
                 }
                 on_event(BatchedRunEvent::CompletionUsage(
@@ -463,12 +461,7 @@ pub async fn execute_sibling_calls(
 /// constructors and numeric widths; the ordinary JSON helper is intentionally
 /// only for typed WIT ingress/egress where the expected type is known.
 fn model_result_json(value: &artist_kernel::ToolModelResult) -> Value {
-    serde_json::from_str(&value.stdobs).unwrap_or_else(|_| {
-        value.stdout.as_ref().map_or_else(
-            |error| serde_json::json!({"error": error.to_string()}),
-            |value| value.to_lossless_json(),
-        )
-    })
+    serde_json::from_str(&value.stdobs).unwrap_or_else(|_| Value::String(value.stdobs.clone()))
 }
 
 fn value_uri(value: &DynamicValue) -> Option<String> {

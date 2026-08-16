@@ -245,6 +245,10 @@ pub struct InvocationScope {
     /// Child scopes share the receiver so providers do not need a second
     /// public invocation identity for interactive input.
     stdin_receiver: Option<Arc<AsyncMutex<mpsc::UnboundedReceiver<DynamicValue>>>>,
+    /// Per-slot logical scopes for one physical vectorized tool invocation.
+    /// The component/resource bridge may use these to correlate live channel
+    /// activity without splitting the physical batch.
+    batch_scopes: Option<Arc<Vec<InvocationScope>>>,
     /// Routing frames shared by nested calls in one invocation chain. The
     /// kernel uses these to reject recursive resource re-entry before it can
     /// consume an unbounded amount of work.
@@ -281,6 +285,7 @@ impl InvocationScope {
             claim_decisions: Arc::new(Mutex::new(HashMap::new())),
             mutation_transaction: None,
             stdin_receiver: None,
+            batch_scopes: None,
             routing_stack: Arc::new(Mutex::new(Vec::new())),
             deadline_started: Instant::now(),
         }
@@ -299,6 +304,7 @@ impl InvocationScope {
             claim_decisions: Arc::new(Mutex::new(HashMap::new())),
             mutation_transaction: None,
             stdin_receiver: None,
+            batch_scopes: None,
             routing_stack: Arc::new(Mutex::new(Vec::new())),
             deadline_started: Instant::now(),
         }
@@ -314,6 +320,7 @@ impl InvocationScope {
             claim_decisions: Arc::clone(&self.claim_decisions),
             mutation_transaction: self.mutation_transaction.clone(),
             stdin_receiver: self.stdin_receiver.clone(),
+            batch_scopes: self.batch_scopes.clone(),
             routing_stack: Arc::clone(&self.routing_stack),
             deadline_started: self.deadline_started,
         }
@@ -327,6 +334,18 @@ impl InvocationScope {
         let mut scope = self.clone();
         scope.context.correlation_id = Some(uri.to_string());
         scope
+    }
+
+    pub fn with_batch_scopes(mut self, scopes: Vec<InvocationScope>) -> Self {
+        self.batch_scopes = Some(Arc::new(scopes));
+        self
+    }
+
+    pub fn batch_scope(&self, index: usize) -> Self {
+        self.batch_scopes
+            .as_ref()
+            .and_then(|scopes| scopes.get(index).cloned())
+            .unwrap_or_else(|| self.child())
     }
 
     pub fn with_mutation_transaction(mut self, transaction: Arc<MutationTransaction>) -> Self {

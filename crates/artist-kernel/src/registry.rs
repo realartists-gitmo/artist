@@ -39,15 +39,9 @@ impl Kernel {
         let resources = ResourceRegistry::default();
         let claims = ClaimRegistry::default();
         let invocation_provider = Arc::new(InvocationResourceProvider::new(invocations.clone()));
-        resources
-            .register(invocation_provider.clone())
-            .expect("invocation provider registration");
-        claims
-            .register(invocation_provider)
-            .expect("invocation claim registration");
         let resource_catalog_providers: RwLock<Vec<Arc<dyn ResourceCatalogProvider>>> =
             RwLock::new(vec![Arc::new(invocations.clone())]);
-        Self {
+        let kernel = Self {
             inner: Arc::new(Inner {
                 tool_providers: RwLock::new(Vec::new()),
                 resource_catalog_providers,
@@ -59,7 +53,11 @@ impl Kernel {
                 invocations,
                 background: Mutex::new(Vec::new()),
             }),
-        }
+        };
+        kernel
+            .register_dynamic_resource_provider(invocation_provider)
+            .expect("invocation provider publication");
+        kernel
     }
 
     pub fn verb_registry(&self) -> VerbRegistry {
@@ -93,6 +91,9 @@ impl Kernel {
         let mut definitions = provider.verb_definitions();
         let existing = self.active_verbs()?;
         for definition in &mut definitions {
+            if definition.input_type.is_none() {
+                definition.input_type = canonical_universal_input_type(&definition.function);
+            }
             if let Some(active) = existing
                 .iter()
                 .find(|active| active.definition.identity == definition.identity)
@@ -129,6 +130,16 @@ impl Kernel {
         definitions: Vec<VerbDefinition>,
     ) -> Result<Vec<crate::VerbId>, KernelError> {
         self.inner.verbs.reconcile_packages(definitions)
+    }
+
+    pub fn reconcile_owned_verbs(
+        &self,
+        definitions: Vec<VerbDefinition>,
+        owned: std::collections::BTreeSet<crate::VerbId>,
+    ) -> Result<Vec<crate::VerbId>, KernelError> {
+        self.inner
+            .verbs
+            .reconcile_owned_packages(definitions, owned)
     }
 
     pub fn active_verbs(&self) -> Result<Vec<Arc<crate::ActiveVerb>>, KernelError> {
@@ -677,6 +688,17 @@ impl Kernel {
             .collect::<Vec<_>>();
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
+        let scopes = invocations
+            .iter()
+            .map(|invocation| {
+                let scoped = scope.clone().with_invocation_uri(invocation.uri.clone());
+                self.inner
+                    .invocations
+                    .subscribe_stdin(&invocation.uri)
+                    .map(|receiver| scoped.clone().with_stdin_receiver(receiver))
+                    .unwrap_or(scoped)
+            })
+            .collect::<Vec<_>>();
         for provider in providers.iter() {
             if provider
                 .tool_definitions()
@@ -684,7 +706,7 @@ impl Kernel {
                 .any(|definition| definition.name == name)
             {
                 let values = provider
-                    .execute_tools_for_model_results(name, args, host, scope)
+                    .execute_tools_for_model_results_with_scopes(name, args, host, scopes)
                     .await;
                 for (invocation, value) in invocations.iter().zip(values.iter()) {
                     match value {
@@ -835,13 +857,7 @@ impl Kernel {
             Ok(active
                 .iter()
                 .find(|active| active.definition.identity == verb)
-                .and_then(|active| active.definition.input_type.clone())
-                .or_else(|| {
-                    active
-                        .iter()
-                        .filter(|active| active.definition.function == function)
-                        .find_map(|active| active.definition.input_type.clone())
-                }))
+                .and_then(|active| active.definition.input_type.clone()))
         }))
         .with_universal_batch_dispatch(Arc::new(move |function, requests, scope| {
             let kernel = universal_batch_kernel.clone();
@@ -924,4 +940,57 @@ impl Kernel {
             })
         }))
     }
+}
+
+fn canonical_universal_input_type(function: &str) -> Option<crate::DynamicType> {
+    use crate::DynamicType;
+    let uri = DynamicType::ResourceUri;
+    let anchor = DynamicType::String;
+    let position = DynamicType::Variant(BTreeMap::from([
+        ("top".to_owned(), None),
+        ("bottom".to_owned(), None),
+        ("at".to_owned(), Some(anchor.clone())),
+    ]));
+    let optional = |ty| DynamicType::Option(Box::new(ty));
+    let record =
+        |fields: Vec<(String, DynamicType)>| DynamicType::Record(fields.into_iter().collect());
+    Some(match function {
+        "read" => record(vec![
+            ("uri".to_owned(), uri.clone()),
+            ("at".to_owned(), optional(position.clone())),
+            ("before".to_owned(), optional(DynamicType::U32)),
+            ("after".to_owned(), optional(DynamicType::U32)),
+        ]),
+        "write" => record(vec![
+            ("uri".to_owned(), uri.clone()),
+            ("content".to_owned(), DynamicType::String),
+        ]),
+        "edit" => record(vec![
+            ("uri".to_owned(), uri.clone()),
+            ("start".to_owned(), anchor.clone()),
+            ("end".to_owned(), optional(anchor.clone())),
+            ("content".to_owned(), DynamicType::String),
+        ]),
+        "insert" => record(vec![
+            ("uri".to_owned(), uri.clone()),
+            ("at".to_owned(), position),
+            ("content".to_owned(), DynamicType::String),
+        ]),
+        "find" => record(vec![
+            ("root".to_owned(), uri),
+            ("query".to_owned(), DynamicType::String),
+        ]),
+        "grep" => record(vec![
+            ("uri".to_owned(), uri),
+            ("pattern".to_owned(), DynamicType::String),
+        ]),
+        "poll" => record(vec![
+            ("uri".to_owned(), uri),
+            ("from".to_owned(), optional(position)),
+            ("match".to_owned(), optional(DynamicType::String)),
+            ("timeout-ms".to_owned(), optional(DynamicType::U64)),
+        ]),
+        "run" | "abort" | "delete" => record(vec![("uri".to_owned(), uri)]),
+        _ => return None,
+    })
 }
