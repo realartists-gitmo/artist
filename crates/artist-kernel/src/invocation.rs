@@ -100,21 +100,7 @@ impl InvocationStore {
             })?;
         let stdin = current.stdin.clone();
         let stdin_history = current.stdin_history.clone();
-        let fallback_stdobs = match &stdout {
-            Ok(value) => value.to_lossless_string(),
-            Err(error) => format!(
-                "{{\"type\":\"error\",\"value\":{}}}",
-                kernel_error_value(error).to_lossless_string()
-            ),
-        };
-        let stdobs = {
-            let supplied = stdobs.into();
-            if supplied.is_empty() {
-                fallback_stdobs
-            } else {
-                supplied
-            }
-        };
+        let stdobs = stdobs.into();
         let completed =
             Invocation::completed(current.uri.clone(), stdin, stdout, stdobs, stderr.into());
         let completed = Invocation {
@@ -172,18 +158,6 @@ impl InvocationStore {
         if let Some(stdout) = stdout {
             updated.stdout = Some(stdout);
             updated.stdout_revision = updated.revision;
-            updated.stdobs = updated
-                .stdout
-                .as_ref()
-                .map(|result| match result {
-                    Ok(value) => value.to_lossless_string(),
-                    Err(error) => format!(
-                        "{{\"type\":\"error\",\"value\":{}}}",
-                        kernel_error_value(error).to_lossless_string()
-                    ),
-                })
-                .unwrap_or_default();
-            updated.stdobs_revision = updated.revision;
         }
         if let Some(stderr) = stderr {
             updated.stderr = stderr;

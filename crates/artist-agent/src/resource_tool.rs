@@ -243,8 +243,16 @@ where
                     .into_iter()
                     .map(|(id, result)| -> Result<UserContent, String> {
                         let (content, outcome) = match result {
-                            Ok(value) => {
-                                (ToolResultContent::json(value), ToolOutcomeRecord::Success)
+                            Ok((value, semantic_error)) => {
+                                let outcome = if semantic_error {
+                                    ToolOutcomeRecord::Error {
+                                        kind: None,
+                                        message: "tool returned a semantic error".to_owned(),
+                                    }
+                                } else {
+                                    ToolOutcomeRecord::Success
+                                };
+                                (ToolResultContent::json(value), outcome)
                             }
                             Err(error) => (
                                 ToolResultContent::json(
@@ -311,7 +319,7 @@ pub async fn execute_sibling_calls(
     calls: Vec<SiblingToolCall>,
     context: artist_kernel::InvocationContext,
     cancellation: tokio_util::sync::CancellationToken,
-) -> Vec<(String, Result<Value, String>)> {
+) -> Vec<(String, Result<(Value, bool), String>)> {
     let definitions = kernel
         .tool_definitions()
         .await
@@ -410,7 +418,7 @@ pub async fn execute_sibling_calls(
             handled.insert(index);
             results[index].1 = Some(
                 output
-                    .map(|value| model_result_json(&value))
+                    .map(|value| (model_result_json(&value), value.stdout.is_err()))
                     .map_err(|error| error.to_string()),
             );
         }
@@ -440,7 +448,7 @@ pub async fn execute_sibling_calls(
         for ((index, _), value) in items.into_iter().zip(values) {
             results[index].1 = Some(
                 value
-                    .map(|value| model_result_json(&value))
+                    .map(|value| (model_result_json(&value), value.stdout.is_err()))
                     .map_err(|error| error.to_string()),
             );
         }

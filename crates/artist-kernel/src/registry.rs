@@ -94,6 +94,9 @@ impl Kernel {
             if definition.input_type.is_none() {
                 definition.input_type = canonical_universal_input_type(&definition.function);
             }
+            if definition.output_type.is_none() {
+                definition.output_type = canonical_universal_output_type(&definition.function);
+            }
             if let Some(active) = existing
                 .iter()
                 .find(|active| active.definition.identity == definition.identity)
@@ -219,12 +222,10 @@ impl Kernel {
     ) -> Result<Vec<crate::DynamicResourceResult>, KernelError> {
         let verb = self.resolve_resource_verb(&function, &uri)?;
         if let Some(transaction) = scope.mutation_transaction() {
-            let publish_scope = scope.clone();
             let result = self
                 .execute_transaction_request(transaction, verb, uri, input, scope)
                 .await
                 .map(|result| vec![result]);
-            self.publish_scoped_invocation(&publish_scope, &result);
             return result;
         }
         let result = self
@@ -233,33 +234,7 @@ impl Kernel {
             .invoke_with_host(&verb, &uri, input, self.handle(), scope.clone())
             .await?;
         let values = vec![crate::DynamicResourceResult { uri, result }];
-        self.publish_scoped_invocation(&scope, &Ok(values.clone()));
         Ok(values)
-    }
-
-    fn publish_scoped_invocation(
-        &self,
-        scope: &InvocationScope,
-        result: &Result<Vec<crate::DynamicResourceResult>, KernelError>,
-    ) {
-        let Some(correlation_id) = scope.context.correlation_id.as_deref() else {
-            return;
-        };
-        let Ok(uri) = crate::ResourceUri::parse(correlation_id) else {
-            return;
-        };
-        let stdout = match result {
-            Ok(values) => values
-                .last()
-                .map(|value| Ok(value.result.output.clone()))
-                .unwrap_or_else(|| {
-                    Err(KernelError::Handler {
-                        message: "resource dispatch returned no result".to_owned(),
-                    })
-                }),
-            Err(error) => Err(error.clone()),
-        };
-        let _ = self.inner.invocations.publish_stdout(&uri, stdout);
     }
 
     pub fn active_verb_tools(&self) -> Result<Vec<crate::VerbToolDescriptor>, KernelError> {
@@ -635,11 +610,16 @@ impl Kernel {
                             let observation = value.stdobs.clone();
                             let stdout = value.stdout;
                             let result = stdout.clone();
-                            let stderr = stdout
-                                .as_ref()
-                                .err()
-                                .map(ToString::to_string)
-                                .unwrap_or_default();
+                            let stderr = value.stderr.clone();
+                            let stderr = if stderr.is_empty() {
+                                stdout
+                                    .as_ref()
+                                    .err()
+                                    .map(ToString::to_string)
+                                    .unwrap_or_default()
+                            } else {
+                                stderr
+                            };
                             let _ = self.inner.invocations.complete(
                                 &invocation.uri,
                                 stdout,
@@ -712,16 +692,11 @@ impl Kernel {
                     match value {
                         Ok(value) => {
                             let stdout = value.stdout.clone();
-                            let stderr = stdout
-                                .as_ref()
-                                .err()
-                                .map(ToString::to_string)
-                                .unwrap_or_default();
                             let _ = self.inner.invocations.complete(
                                 &invocation.uri,
                                 stdout,
                                 value.stdobs.clone(),
-                                stderr,
+                                value.stderr.clone(),
                             );
                         }
                         Err(error) => {
@@ -892,9 +867,10 @@ impl Kernel {
                         async move {
                             let requests = items
                                 .iter()
-                                .map(|(_, uri, input)| crate::ResourceRequest {
+                                .map(|(index, uri, input)| crate::ResourceRequest {
                                     uri: uri.clone(),
                                     input: input.clone(),
+                                    scope: Some(scope.batch_scope(*index)),
                                 })
                                 .collect::<Vec<_>>();
                             let values = kernel
@@ -990,7 +966,82 @@ fn canonical_universal_input_type(function: &str) -> Option<crate::DynamicType> 
             ("match".to_owned(), optional(DynamicType::String)),
             ("timeout-ms".to_owned(), optional(DynamicType::U64)),
         ]),
-        "run" | "abort" | "delete" => record(vec![("uri".to_owned(), uri)]),
+        "run" => record(vec![
+            ("uri".to_owned(), uri),
+            (
+                "args".to_owned(),
+                DynamicType::List(Box::new(DynamicType::String)),
+            ),
+        ]),
+        "abort" | "delete" => record(vec![("uri".to_owned(), uri)]),
+        _ => return None,
+    })
+}
+
+fn canonical_universal_output_type(function: &str) -> Option<crate::DynamicType> {
+    use crate::DynamicType;
+    let uri = DynamicType::ResourceUri;
+    let line = DynamicType::Record(BTreeMap::from([
+        ("anchor".to_owned(), DynamicType::String),
+        ("text".to_owned(), DynamicType::String),
+        (
+            "ending".to_owned(),
+            DynamicType::Enum(vec!["lf".into(), "crlf".into(), "cr".into(), "none".into()]),
+        ),
+    ]));
+    let text = DynamicType::Record(BTreeMap::from([
+        ("uri".to_owned(), uri.clone()),
+        (
+            "lines".to_owned(),
+            DynamicType::List(Box::new(line.clone())),
+        ),
+    ]));
+    let diff = DynamicType::Record(BTreeMap::from([
+        ("uri".to_owned(), uri.clone()),
+        (
+            "before".to_owned(),
+            DynamicType::List(Box::new(line.clone())),
+        ),
+        ("after".to_owned(), DynamicType::List(Box::new(line))),
+    ]));
+    let record =
+        |fields: Vec<(String, DynamicType)>| DynamicType::Record(fields.into_iter().collect());
+    Some(match function {
+        "read" => DynamicType::Variant(BTreeMap::from([
+            ("text".into(), Some(text)),
+            (
+                "directory".into(),
+                Some(record(vec![
+                    ("uri".into(), uri.clone()),
+                    ("entries".into(), DynamicType::List(Box::new(uri.clone()))),
+                ])),
+            ),
+        ])),
+        "write" => record(vec![
+            ("uri".into(), uri),
+            ("text".into(), DynamicType::Option(Box::new(text))),
+        ]),
+        "edit" | "insert" => record(vec![
+            ("uri".into(), uri),
+            ("changed".into(), DynamicType::List(Box::new(text))),
+            ("diff".into(), diff),
+        ]),
+        "find" => record(vec![("uris".into(), DynamicType::List(Box::new(uri)))]),
+        "grep" => record(vec![("matches".into(), DynamicType::List(Box::new(text)))]),
+        "poll" => record(vec![
+            ("uri".into(), uri),
+            ("text".into(), text),
+            (
+                "reason".into(),
+                DynamicType::Enum(vec![
+                    "changed".into(),
+                    "matched".into(),
+                    "terminated".into(),
+                    "timeout".into(),
+                ]),
+            ),
+        ]),
+        "run" | "abort" | "delete" => uri,
         _ => return None,
     })
 }

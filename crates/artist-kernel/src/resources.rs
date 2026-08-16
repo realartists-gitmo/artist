@@ -11,10 +11,11 @@ pub type ResourceFuture<'a> =
 pub type ResourceBatchFuture<'a> =
     Pin<Box<dyn Future<Output = Vec<Result<DynamicVerbResult, KernelError>>> + Send + 'a>>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ResourceRequest {
     pub uri: ResourceUri,
     pub input: DynamicValue,
+    pub scope: Option<crate::InvocationScope>,
 }
 
 #[derive(Clone, Debug)]
@@ -501,7 +502,15 @@ impl ResourceRegistry {
         let mut grouped = join_all(groups.into_iter().map(|(index, requests)| {
             let provider = providers[index].clone();
             let host = host.clone();
-            let scope = scope.child();
+            let aligned = requests
+                .iter()
+                .filter_map(|request| request.scope.clone())
+                .collect::<Vec<_>>();
+            let scope = requests
+                .first()
+                .and_then(|request| request.scope.clone())
+                .unwrap_or_else(|| scope.child())
+                .with_batch_scopes(aligned);
             async move {
                 (
                     index,

@@ -74,6 +74,7 @@ pub trait ToolProvider: Send + Sync {
             Ok(ToolModelResult {
                 stdout: Ok(value.clone()),
                 stdobs: value.to_lossless_string(),
+                stderr: String::new(),
                 verb: crate::VerbId::new(format!("artist:tool/{name}@1.0.0"))
                     .map_err(|message| KernelError::InvalidRequest { message })?,
                 generation: 0,
@@ -165,6 +166,7 @@ pub trait ToolProvider: Send + Sync {
 pub struct ToolModelResult {
     pub stdout: Result<crate::DynamicValue, KernelError>,
     pub stdobs: String,
+    pub stderr: String,
     pub verb: crate::VerbId,
     pub generation: u64,
 }

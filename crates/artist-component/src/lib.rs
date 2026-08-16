@@ -3900,7 +3900,7 @@ pub mod tool_adapter {
                 .invoke_batch_with_observations_from_output(&output, kernel, scope)
                 .await?
                 .into_iter()
-                .map(|(value, _)| value)
+                .map(|(value, _, _)| value)
                 .collect())
         }
 
@@ -3909,7 +3909,7 @@ pub mod tool_adapter {
             args: Vec<Value>,
             kernel: KernelHandle,
             scope: artist_kernel::InvocationScope,
-        ) -> Result<Vec<(Value, String)>, KernelError> {
+        ) -> Result<Vec<(Value, String, String)>, KernelError> {
             let input = serde_json::json!({ "requests": args });
             let output = self
                 .component
@@ -3932,7 +3932,7 @@ pub mod tool_adapter {
             output: &str,
             kernel: KernelHandle,
             scope: artist_kernel::InvocationScope,
-        ) -> Result<Vec<(Value, String)>, KernelError> {
+        ) -> Result<Vec<(Value, String, String)>, KernelError> {
             let values: Vec<Value> =
                 match serde_json::from_str(output).map_err(|error| KernelError::Handler {
                     message: format!("component returned invalid batch JSON: {error}"),
@@ -3946,12 +3946,15 @@ pub mod tool_adapter {
                 };
             let mut observed = Vec::with_capacity(values.len());
             for value in values {
-                let stdobs = self
+                let (stdobs, stderr) = match self
                     .component
                     .observe_json_async_with_scope(&value, kernel.clone(), scope.child())
                     .await
-                    .map_err(component_error)?;
-                observed.push((value, stdobs));
+                {
+                    Ok(stdobs) => (stdobs, String::new()),
+                    Err(error) => (String::new(), format!("observer failed: {error}")),
+                };
+                observed.push((value, stdobs, stderr));
             }
             Ok(observed)
         }
@@ -4037,6 +4040,7 @@ pub mod tools {
         dirty: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
         known_packages: Arc<Mutex<HashMap<String, (PathBuf, ToolRegistration)>>>,
         published_definitions: Arc<Mutex<HashMap<String, artist_kernel::VerbDefinition>>>,
+        published_generations: Arc<Mutex<HashMap<(String, u64), ToolRegistration>>>,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4219,6 +4223,7 @@ pub mod tools {
                 dirty: Arc::clone(&self.dirty),
                 known_packages: Arc::clone(&self.known_packages),
                 published_definitions: Arc::clone(&self.published_definitions),
+                published_generations: Arc::clone(&self.published_generations),
             }
         }
     }
@@ -4420,6 +4425,7 @@ pub mod tools {
                 ),
                 known_packages: Arc::new(Mutex::new(HashMap::new())),
                 published_definitions: Arc::new(Mutex::new(HashMap::new())),
+                published_generations: Arc::new(Mutex::new(HashMap::new())),
             };
             let registrations = handler.registrations()?;
             handler.ensure_activated(&registrations);
@@ -4569,6 +4575,14 @@ pub mod tools {
                     };
                     if result.is_ok() {
                         if let Ok(definition) = registration.dynamic_definition() {
+                            if let Ok(active) = self.registry.current(&registration.package) {
+                                if let Ok(mut generations) = self.published_generations.lock() {
+                                    generations.insert(
+                                        (registration.package.clone(), active.generation()),
+                                        registration.clone(),
+                                    );
+                                }
+                            }
                             if let Ok(mut published) = self.published_definitions.lock() {
                                 published.insert(registration.package.clone(), definition);
                             }
@@ -4746,6 +4760,23 @@ pub mod tools {
             }
             scope.pin_generation_handle(key, Arc::new(active.clone()));
             Ok(active)
+        }
+
+        fn registration_for_active(
+            &self,
+            package: &str,
+            generation: u64,
+        ) -> Result<ToolRegistration, KernelError> {
+            self.published_generations
+                .lock()
+                .map_err(|_| KernelError::Handler {
+                    message: "published generation lock poisoned".into(),
+                })?
+                .get(&(package.to_owned(), generation))
+                .cloned()
+                .ok_or_else(|| KernelError::Conflict {
+                    uri: format!("tool generation metadata changed: {package}@{generation}"),
+                })
         }
 
         fn custom_dependencies(
@@ -4963,6 +4994,8 @@ pub mod tools {
                     message: format!("no named tool registered: {name}"),
                 })?;
             let active = self.active_for_scope(&registration.package, &scope)?;
+            let registration =
+                self.registration_for_active(&registration.package, active.generation())?;
             ComponentTool::new(active, registration.contract.interface)
                 .invoke_async_with_scope(args, host, scope)
                 .await
@@ -5006,6 +5039,9 @@ pub mod tools {
             host: KernelHandle,
         ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
+                let scope = artist_kernel::InvocationScope::new(
+                    artist_kernel::InvocationContext::default(),
+                );
                 let registration = self
                     .registrations()?
                     .into_iter()
@@ -5013,13 +5049,11 @@ pub mod tools {
                     .ok_or_else(|| KernelError::Handler {
                         message: format!("no named tool registered: {name}"),
                     })?;
+                let active = self.active_for_scope(&registration.package, &scope)?;
+                let registration =
+                    self.registration_for_active(&registration.package, active.generation())?;
                 let output = self
-                    .execute_named_inner_async(
-                        name,
-                        dynamic_to_json(&args),
-                        host,
-                        artist_kernel::InvocationContext::default(),
-                    )
+                    .execute_named_inner_async_scope(name, dynamic_to_json(&args), host, scope)
                     .await?;
                 typed_tool_output(&output, &registration)
             })
@@ -5033,6 +5067,7 @@ pub mod tools {
             context: artist_kernel::InvocationContext,
         ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
+                let scope = artist_kernel::InvocationScope::new(context.clone());
                 let registration = self
                     .registrations()?
                     .into_iter()
@@ -5040,8 +5075,11 @@ pub mod tools {
                     .ok_or_else(|| KernelError::Handler {
                         message: format!("no named tool registered: {name}"),
                     })?;
+                let active = self.active_for_scope(&registration.package, &scope)?;
+                let registration =
+                    self.registration_for_active(&registration.package, active.generation())?;
                 let output = self
-                    .execute_named_inner_async(name, dynamic_to_json(&args), host, context)
+                    .execute_named_inner_async_scope(name, dynamic_to_json(&args), host, scope)
                     .await?;
                 typed_tool_output(&output, &registration)
             })
@@ -5062,6 +5100,9 @@ pub mod tools {
                     .ok_or_else(|| KernelError::Handler {
                         message: format!("no named tool registered: {name}"),
                     })?;
+                let active = self.active_for_scope(&registration.package, &scope)?;
+                let registration =
+                    self.registration_for_active(&registration.package, active.generation())?;
                 let output = self
                     .execute_named_inner_async_scope(name, dynamic_to_json(&args), host, scope)
                     .await?;
@@ -5085,6 +5126,8 @@ pub mod tools {
                         message: format!("no named tool registered: {name}"),
                     })?;
                 let active = self.active_for_scope(&registration.package, &scope)?;
+                let registration =
+                    self.registration_for_active(&registration.package, active.generation())?;
                 let tool = ComponentTool::new(active, registration.contract.interface.clone());
                 let values = tool
                     .invoke_batch_with_observations_async_with_scope(
@@ -5093,7 +5136,7 @@ pub mod tools {
                         scope,
                     )
                     .await?;
-                let (value, _stdobs) =
+                let (value, _stdobs, _stderr) =
                     values
                         .into_iter()
                         .next()
@@ -5120,10 +5163,12 @@ pub mod tools {
                         message: format!("no named tool registered: {name}"),
                     })?;
                 let active = self.active_for_scope(&registration.package, &scope)?;
+                let registration =
+                    self.registration_for_active(&registration.package, active.generation())?;
                 let generation = active.generation();
                 let verb = registration.dynamic_definition()?.identity;
                 let tool = ComponentTool::new(active, registration.contract.interface.clone());
-                let (value, stdobs) = tool
+                let (value, stdobs, stderr) = tool
                     .invoke_batch_with_observations_async_with_scope(
                         vec![dynamic_to_json(&args)],
                         host,
@@ -5138,6 +5183,7 @@ pub mod tools {
                 let stdout = typed_tool_output(&value, &registration)?;
                 Ok(artist_kernel::ToolModelResult {
                     stdobs,
+                    stderr,
                     stdout: Ok(stdout),
                     verb,
                     generation,
@@ -5174,6 +5220,12 @@ pub mod tools {
                     Ok(active) => active,
                     Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
                 };
+                let registration = match self
+                    .registration_for_active(&registration.package, active.generation())
+                {
+                    Ok(registration) => registration,
+                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
+                };
                 let tool = ComponentTool::new(active, registration.contract.interface.clone());
                 let values = match tool
                     .invoke_batch_with_observations_async_with_scope(
@@ -5188,7 +5240,7 @@ pub mod tools {
                 };
                 values
                     .into_iter()
-                    .map(|(value, _stdobs)| json_to_dynamic(value).map_err(|error| error))
+                    .map(|(value, _stdobs, _stderr)| json_to_dynamic(value).map_err(|error| error))
                     .collect()
             })
         }
@@ -5223,6 +5275,12 @@ pub mod tools {
                     Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
                 };
                 let generation = active.generation();
+                let registration = match self
+                    .registration_for_active(&registration.package, generation)
+                {
+                    Ok(registration) => registration,
+                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
+                };
                 let verb = match registration.dynamic_definition() {
                     Ok(definition) => definition.identity,
                     Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
@@ -5241,10 +5299,11 @@ pub mod tools {
                 };
                 values
                     .into_iter()
-                    .map(|(value, stdobs)| {
+                    .map(|(value, stdobs, stderr)| {
                         let stdout = typed_tool_output(&value, &registration)?;
                         Ok(artist_kernel::ToolModelResult {
                             stdobs,
+                            stderr,
                             stdout: Ok(stdout),
                             verb: verb.clone(),
                             generation,
@@ -5281,6 +5340,22 @@ pub mod tools {
                 };
                 let active = match self.active_for_scope(&registration.package, &scope) {
                     Ok(active) => active,
+                    Err(error) => {
+                        let message = error.to_string();
+                        return args
+                            .into_iter()
+                            .map(|_| {
+                                Err(KernelError::Handler {
+                                    message: message.clone(),
+                                })
+                            })
+                            .collect();
+                    }
+                };
+                let registration = match self
+                    .registration_for_active(&registration.package, active.generation())
+                {
+                    Ok(registration) => registration,
                     Err(error) => {
                         let message = error.to_string();
                         return args
@@ -6688,6 +6763,7 @@ pub mod resources {
                 artist_kernel::ResourceRequest {
                     uri: parsed,
                     input: request,
+                    scope: None,
                 },
             ));
         }
@@ -6820,6 +6896,7 @@ pub mod resources {
                 artist_kernel::ResourceRequest {
                     uri: parsed,
                     input: request,
+                    scope: None,
                 },
             ));
         }
@@ -6889,6 +6966,7 @@ pub mod resources {
                 artist_kernel::ResourceRequest {
                     uri: parsed,
                     input: request,
+                    scope: None,
                 },
             ));
         }

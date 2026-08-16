@@ -51,7 +51,25 @@ impl ProcessVerbBindings {
                 DynamicType::List(Box::new(DynamicType::String)),
             ),
         ]));
-        let empty = DynamicType::Record(BTreeMap::new());
+        let read_input = DynamicType::Record(BTreeMap::from([
+            ("uri".to_owned(), uri.clone()),
+            (
+                "at".to_owned(),
+                DynamicType::Option(Box::new(DynamicType::Variant(BTreeMap::from([
+                    ("top".to_owned(), None),
+                    ("bottom".to_owned(), None),
+                    ("at".to_owned(), Some(DynamicType::String)),
+                ])))),
+            ),
+            (
+                "before".to_owned(),
+                DynamicType::Option(Box::new(DynamicType::U32)),
+            ),
+            (
+                "after".to_owned(),
+                DynamicType::Option(Box::new(DynamicType::U32)),
+            ),
+        ]));
         let _snapshot = DynamicType::Record(BTreeMap::from([
             ("uri".to_owned(), uri.clone()),
             ("running".to_owned(), DynamicType::Bool),
@@ -79,6 +97,7 @@ impl ProcessVerbBindings {
             ("lines".to_owned(), DynamicType::List(Box::new(line))),
         ]));
         let poll_input = DynamicType::Record(BTreeMap::from([
+            ("uri".to_owned(), uri.clone()),
             (
                 "from".to_owned(),
                 DynamicType::Option(Box::new(DynamicType::Variant(BTreeMap::from([
@@ -128,20 +147,20 @@ impl ProcessVerbBindings {
                 "read",
                 "Read process state or output",
             )
-            .with_contract(empty.clone(), read_output.clone())
+            .with_contract(read_input, read_output.clone())
             .with_extractor("resource-uri"),
             VerbDefinition::new(self.poll.clone(), "poll", "poll", "Poll process state")
                 .with_contract(poll_input, poll_output)
                 .with_extractor("resource-uri"),
             VerbDefinition::new(self.abort.clone(), "abort", "abort", "Abort a process")
                 .with_contract(
-                    empty.clone(),
+                    DynamicType::Record(BTreeMap::from([("uri".to_owned(), uri.clone())])),
                     DynamicType::Record(BTreeMap::from([("uri".to_owned(), uri.clone())])),
                 )
                 .with_extractor("resource-uri"),
             VerbDefinition::new(self.delete.clone(), "delete", "delete", "Delete a process")
                 .with_contract(
-                    empty,
+                    DynamicType::Record(BTreeMap::from([("uri".to_owned(), uri.clone())])),
                     DynamicType::Record(BTreeMap::from([("uri".to_owned(), uri)])),
                 )
                 .with_extractor("resource-uri"),
