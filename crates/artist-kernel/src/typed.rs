@@ -467,7 +467,8 @@ impl InvocationScope {
         self.generation_handles
             .lock()
             .unwrap()
-            .insert(key.into(), handle);
+            .entry(key.into())
+            .or_insert(handle);
     }
 
     pub fn pin_erased_generation_handle(
@@ -478,7 +479,8 @@ impl InvocationScope {
         self.generation_handles
             .lock()
             .unwrap()
-            .insert(key.into(), handle);
+            .entry(key.into())
+            .or_insert(handle);
     }
 
     /// Recover a previously pinned handler-owned generation.

@@ -35,6 +35,7 @@ pub struct Invocation {
     pub stdout_revision: u64,
     pub stderr_revision: u64,
     pub stdobs_revision: u64,
+    pub channel_history: BTreeMap<String, Vec<(u64, String)>>,
 }
 
 #[derive(Clone)]
@@ -63,7 +64,8 @@ impl InvocationStore {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let uri =
             ResourceUri::parse(&format!("invocations://{id}")).expect("canonical invocation URI");
-        let invocation = Invocation::running(uri, stdin);
+        let mut invocation = Invocation::running(uri, stdin);
+        seed_channel_history(&mut invocation);
         let (sender, _receiver) = mpsc::unbounded_channel();
         self.values
             .lock()
@@ -109,8 +111,11 @@ impl InvocationStore {
             stdout_revision: current.revision + 1,
             stderr_revision: current.revision + 1,
             stdobs_revision: current.revision + 1,
+            channel_history: current.channel_history.clone(),
             ..completed
         };
+        let mut completed = completed;
+        record_channel_history(&mut completed);
         values.insert(id, completed.clone());
         self.notify_invocation(uri);
         self.changed.notify_waiters();
@@ -167,6 +172,7 @@ impl InvocationStore {
             updated.stdobs = stdobs;
             updated.stdobs_revision = updated.revision;
         }
+        record_channel_history(&mut updated);
         values.insert(id, updated.clone());
         self.notify_invocation(uri);
         Ok(updated)
@@ -193,9 +199,12 @@ impl InvocationStore {
             stdout_revision: current.revision + 1,
             stderr_revision: current.revision + 1,
             stdobs_revision: current.revision + 1,
+            channel_history: current.channel_history.clone(),
             stdin_history,
             ..Invocation::aborted(current.uri.clone(), current.stdin, stderr)
         };
+        let mut aborted = aborted;
+        record_channel_history(&mut aborted);
         values.insert(id, aborted.clone());
         self.notify_invocation(uri);
         self.changed.notify_waiters();
@@ -253,6 +262,8 @@ impl InvocationStore {
             stdin_revision: current.stdin_revision + 1,
             ..current
         };
+        let mut updated = updated;
+        record_channel_history(&mut updated);
         if let Ok(senders) = self.stdin_updates.lock() {
             if let Some(sender) = senders.get(&id) {
                 let _ = sender.send(stdin_update);
@@ -526,28 +537,15 @@ fn poll_cursor(input: &DynamicValue) -> Option<u64> {
     anchor.trim_start_matches('#').parse().ok()
 }
 
-fn poll_output(invocation: &Invocation, channel: &str, reason: &str) -> DynamicValue {
+fn poll_output_material(
+    invocation: &Invocation,
+    channel: &str,
+    reason: &str,
+    value: String,
+) -> DynamicValue {
     let channel_uri = invocation
         .channel_uri(channel)
         .unwrap_or_else(|_| invocation.uri.clone());
-    let value = match channel {
-        "stdout" => invocation
-            .stdout
-            .as_ref()
-            .map(|result| match result {
-                Ok(value) => value.to_lossless_string(),
-                Err(error) => format!(
-                    "{{\"type\":\"error\",\"value\":{}}}",
-                    kernel_error_value(error).to_lossless_string()
-                ),
-            })
-            .unwrap_or_else(|| "{\"type\":\"pending\"}".to_owned()),
-        "stderr" => invocation.stderr.clone(),
-        "stdobs" => invocation.stdobs.clone(),
-        "status" => status_text(&invocation.status),
-        "stdin" => invocation.stdin.to_lossless_string(),
-        _ => String::new(),
-    };
     DynamicValue::Record(BTreeMap::from([
         (
             "uri".to_owned(),
@@ -614,6 +612,54 @@ fn channel_content(invocation: &Invocation, channel: &str) -> String {
         "stdobs" => invocation.stdobs.clone(),
         "status" => format!("{:?}", invocation.status),
         _ => String::new(),
+    }
+}
+
+fn seed_channel_history(invocation: &mut Invocation) {
+    for channel in ["stdin", "stdout", "stderr", "stdobs", "status"] {
+        let content = channel_content(invocation, channel);
+        invocation
+            .channel_history
+            .entry(channel.to_owned())
+            .or_default()
+            .push((0, content));
+    }
+}
+
+fn record_channel_history(invocation: &mut Invocation) {
+    for channel in ["stdin", "stdout", "stderr", "stdobs", "status"] {
+        let revision = channel_revision(invocation, channel);
+        let content = channel_content(invocation, channel);
+        let history = invocation
+            .channel_history
+            .entry(channel.to_owned())
+            .or_default();
+        if history
+            .last()
+            .is_none_or(|(last, value)| *last != revision || value != &content)
+        {
+            history.push((revision, content));
+        }
+    }
+}
+
+fn channel_material_after(invocation: &Invocation, channel: &str, from: Option<u64>) -> String {
+    let current = channel_content(invocation, channel);
+    let Some(from) = from else {
+        return current;
+    };
+    let Some((_, previous)) = invocation
+        .channel_history
+        .get(channel)
+        .into_iter()
+        .flat_map(|history| history.iter().rev())
+        .find(|(revision, _)| *revision <= from)
+    else {
+        return current;
+    };
+    match current.strip_prefix(previous) {
+        Some(delta) => delta.to_owned(),
+        None => current,
     }
 }
 
@@ -803,7 +849,7 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         let revision = channel_revision(&invocation, channel);
                         let changed = from.is_some_and(|from| revision > from);
                         let eligible = from.is_none() || changed;
-                        let content = channel_content(&invocation, channel);
+                        let content = channel_material_after(&invocation, channel, from);
                         let matched = eligible
                             && matcher
                                 .as_ref()
@@ -815,7 +861,7 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         } else {
                             "terminated"
                         };
-                        let snapshot = poll_output(&invocation, channel, reason);
+                        let snapshot = poll_output_material(&invocation, channel, reason, content);
                         if changed && (pattern.is_none() || matched) {
                             break snapshot;
                         }
@@ -827,7 +873,8 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         if timeout.is_some_and(|timeout| timeout.is_zero())
                             || !self.store.wait_for_invocation_change(uri, timeout).await
                         {
-                            break poll_output(&invocation, channel, "timeout");
+                            let content = channel_material_after(&invocation, channel, from);
+                            break poll_output_material(&invocation, channel, "timeout", content);
                         }
                         // A channel update is itself a meaningful stream
                         // event, even while the logical invocation remains
@@ -850,7 +897,10 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         value => value.clone(),
                     };
                     self.store.set_stdin(uri, content.clone())?;
-                    content
+                    DynamicValue::Record(BTreeMap::from([
+                        ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+                        ("text".to_owned(), DynamicValue::Option(None)),
+                    ]))
                 }
                 "abort" => {
                     self.store.abort(uri, "invocation aborted")?;
@@ -912,6 +962,7 @@ impl Invocation {
             stdout_revision: 0,
             stderr_revision: 0,
             stdobs_revision: 0,
+            channel_history: BTreeMap::new(),
         }
     }
 
@@ -940,6 +991,7 @@ impl Invocation {
             stdout_revision: 0,
             stderr_revision: 0,
             stdobs_revision: 0,
+            channel_history: BTreeMap::new(),
         }
     }
 
@@ -959,6 +1011,7 @@ impl Invocation {
             stdout_revision: 0,
             stderr_revision: 0,
             stdobs_revision: 0,
+            channel_history: BTreeMap::new(),
         }
     }
 }

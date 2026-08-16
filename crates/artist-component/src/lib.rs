@@ -1988,9 +1988,7 @@ async fn invoke_resource_host(
         Ok(mut values) => match values.pop() {
             Some(value) => {
                 let stdout = value.result.output.clone();
-                {
-                    serde_json::json!({"ok": tools::dynamic_to_json_host(host_success_value(stdout))})
-                }
+                serde_json::json!({"ok": tools::dynamic_to_json_host(stdout)})
             }
             None => {
                 let error = KernelError::Handler {
@@ -2008,14 +2006,6 @@ async fn invoke_resource_host(
     })
 }
 
-fn host_success_value(value: DynamicValue) -> DynamicValue {
-    match value {
-        DynamicValue::Result(Ok(inner)) => host_success_value(*inner),
-        DynamicValue::Variant(_, Some(inner)) => host_success_value(*inner),
-        other => other,
-    }
-}
-
 async fn invoke_resource_host_batch(
     kernel: KernelHandle,
     scope: artist_kernel::InvocationScope,
@@ -2024,9 +2014,17 @@ async fn invoke_resource_host_batch(
     inputs: Vec<String>,
 ) -> Result<Vec<String>, KernelError> {
     if scope.mutation_transaction().is_some() {
-        return futures::future::try_join_all(uris.into_iter().zip(inputs).map(|(uri, input)| {
-            invoke_resource_host(kernel.clone(), scope.child(), verb.clone(), uri, input)
-        }))
+        return futures::future::try_join_all(uris.into_iter().zip(inputs).enumerate().map(
+            |(index, (uri, input))| {
+                invoke_resource_host(
+                    kernel.clone(),
+                    scope.batch_scope(index),
+                    verb.clone(),
+                    uri,
+                    input,
+                )
+            },
+        ))
         .await;
     }
     let mut parsed = Vec::with_capacity(uris.len());
@@ -2104,7 +2102,7 @@ async fn invoke_resource_host_batch(
             verb,
             parsed
                 .iter()
-                .map(|(_, uri, value)| (uri.clone(), value.clone()))
+                .map(|(index, uri, value)| (*index, uri.clone(), value.clone()))
                 .collect(),
             scope,
         )
@@ -2113,7 +2111,7 @@ async fn invoke_resource_host_batch(
         let uri = &uris[index];
         let output = match result {
             Ok(value) => {
-                serde_json::json!({"ok": tools::dynamic_to_json_host(host_success_value(value.result.output))})
+                serde_json::json!({"ok": tools::dynamic_to_json_host(value.result.output)})
             }
             Err(error) => {
                 serde_json::json!({"err": tools::kernel_error_to_json_host(error, &uri)})
@@ -5263,17 +5261,6 @@ pub mod tools {
             name: &str,
             scope: &artist_kernel::InvocationScope,
         ) -> bool {
-            if let Ok(catalog) = self.published_catalog.read() {
-                if let Some(definition) = catalog.iter().find(|definition| definition.name == name)
-                {
-                    if let Some(lease) = &definition.lease {
-                        scope.pin_erased_generation_handle(
-                            format!("advertised-tool:{name}"),
-                            lease.clone(),
-                        );
-                    }
-                }
-            }
             self.published_for_name(name, scope).is_ok()
         }
 
@@ -5896,49 +5883,35 @@ pub mod tools {
     }
 
     pub(crate) fn dynamic_to_json_host(value: DynamicValue) -> Value {
-        fn lower(value: DynamicValue, field: Option<&str>) -> Value {
-            if field == Some("anchor") {
-                if let DynamicValue::List(tokens) = value {
-                    let tokens = tokens
-                        .into_iter()
-                        .filter_map(|token| match token {
-                            DynamicValue::String(token) => Some(token),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>();
-                    return Value::String(format!("#{}", tokens.join(".")));
-                }
-            }
+        fn lower(value: DynamicValue) -> Value {
             match value {
                 DynamicValue::Record(fields) => Value::Object(
                     fields
                         .into_iter()
-                        .map(|(name, value)| (name.clone(), lower(value, Some(&name))))
+                        .map(|(name, value)| (name, lower(value)))
                         .collect(),
                 ),
                 DynamicValue::List(values) | DynamicValue::Tuple(values) => {
-                    Value::Array(values.into_iter().map(|value| lower(value, None)).collect())
+                    Value::Array(values.into_iter().map(lower).collect())
                 }
                 DynamicValue::Option(None) => Value::Null,
-                DynamicValue::Option(Some(value)) => lower(*value, field),
-                DynamicValue::Result(Ok(value)) => serde_json::json!({"ok": lower(*value, field)}),
+                DynamicValue::Option(Some(value)) => lower(*value),
+                DynamicValue::Result(Ok(value)) => serde_json::json!({"ok": lower(*value)}),
                 DynamicValue::Result(Err(value)) => {
-                    serde_json::json!({"err": lower(*value, field)})
+                    serde_json::json!({"err": lower(*value)})
                 }
                 DynamicValue::Variant(name, value) => {
                     let mut object = serde_json::Map::new();
                     object.insert(
                         name,
-                        value
-                            .map(|value| lower(*value, None))
-                            .unwrap_or(Value::Null),
+                        value.map(|value| lower(*value)).unwrap_or(Value::Null),
                     );
                     Value::Object(object)
                 }
                 value => dynamic_to_json(&value),
             }
         }
-        lower(value, None)
+        lower(value)
     }
 
     pub(crate) fn kernel_error_to_json_host(error: KernelError, uri: &str) -> Value {

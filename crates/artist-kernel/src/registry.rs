@@ -194,13 +194,15 @@ impl Kernel {
         uri: crate::ResourceUri,
         input: crate::DynamicValue,
         scope: InvocationScope,
+        lease: &crate::VerbLease,
     ) -> Result<crate::DynamicResourceResult, KernelError> {
         let participant = scope
             .context
             .correlation_id
             .clone()
             .unwrap_or_else(|| uri.to_string());
-        let (slot, execute) = transaction.register((verb, uri.clone(), input), participant)?;
+        let (slot, execute) =
+            transaction.register((verb.clone(), uri.clone(), input.clone()), participant)?;
         if let Some(requests) = execute {
             let mixed = requests
                 .into_iter()
@@ -215,6 +217,14 @@ impl Kernel {
             result = transaction.result(slot) => result?,
             _ = scope.cancellation.cancelled() => return Err(KernelError::Aborted { message: "mutation transaction cancelled".to_owned() }),
         };
+        let call = crate::DynamicVerbCall {
+            verb: verb.clone(),
+            function: verb.function().to_owned(),
+            input,
+        };
+        self.inner
+            .verbs
+            .validate_result_for_lease(&call, &result, lease)?;
         Ok(crate::DynamicResourceResult { uri, result })
     }
 
@@ -237,7 +247,7 @@ impl Kernel {
             && matches!(function.as_str(), "write" | "edit" | "insert")
         {
             let values = self
-                .execute_transaction_request(transaction, verb, uri, input, scope)
+                .execute_transaction_request(transaction, verb, uri, input, scope, &lease)
                 .await
                 .map(|result| vec![result])?;
             return Ok(values);
@@ -345,25 +355,18 @@ impl Kernel {
             )
             .await;
         for ((index, request), result) in valid.into_iter().zip(invoked) {
-            results[index] = Some(
-                result
-                    .map(|mut result| {
-                        result.output = Self::canonicalize_resource_output(&verb, result.output);
-                        result
-                    })
-                    .and_then(|result| {
-                        self.inner.verbs.validate_result_for_lease(
-                            &crate::DynamicVerbCall {
-                                verb: verb.clone(),
-                                function: verb.function().to_owned(),
-                                input: request.input,
-                            },
-                            &result,
-                            &lease,
-                        )?;
-                        Ok(result)
-                    }),
-            );
+            results[index] = Some(result.and_then(|result| {
+                self.inner.verbs.validate_result_for_lease(
+                    &crate::DynamicVerbCall {
+                        verb: verb.clone(),
+                        function: verb.function().to_owned(),
+                        input: request.input,
+                    },
+                    &result,
+                    &lease,
+                )?;
+                Ok(result)
+            }));
         }
         results
             .into_iter()
@@ -375,76 +378,6 @@ impl Kernel {
                 })
             })
             .collect()
-    }
-
-    fn canonicalize_resource_output(
-        verb: &crate::VerbId,
-        value: crate::DynamicValue,
-    ) -> crate::DynamicValue {
-        if verb.function() != "read" {
-            return value;
-        }
-        match value {
-            crate::DynamicValue::Variant(name, Some(inner)) if name == "lines" => {
-                crate::DynamicValue::Variant(
-                    name,
-                    Some(Box::new(match *inner {
-                        crate::DynamicValue::Record(fields) => {
-                            Self::canonicalize_text_record(fields)
-                        }
-                        other => other,
-                    })),
-                )
-            }
-            crate::DynamicValue::Record(fields) if fields.contains_key("lines") => {
-                crate::DynamicValue::Variant(
-                    "lines".to_owned(),
-                    Some(Box::new(Self::canonicalize_text_record(fields))),
-                )
-            }
-            crate::DynamicValue::Record(fields) if fields.contains_key("entries") => {
-                crate::DynamicValue::Variant(
-                    "entries".to_owned(),
-                    Some(Box::new(crate::DynamicValue::Record(fields))),
-                )
-            }
-            other => other,
-        }
-    }
-
-    fn canonicalize_text_record(
-        mut fields: std::collections::BTreeMap<String, crate::DynamicValue>,
-    ) -> crate::DynamicValue {
-        if let Some(crate::DynamicValue::List(lines)) = fields.remove("lines") {
-            let lines = lines
-                .into_iter()
-                .map(|line| match line {
-                    crate::DynamicValue::Record(mut line) => {
-                        if let Some(crate::DynamicValue::List(tokens)) = line.remove("anchor") {
-                            let anchor = tokens
-                                .into_iter()
-                                .filter_map(|token| match token {
-                                    crate::DynamicValue::String(value) => Some(value),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join(".");
-                            line.insert(
-                                "anchor".to_owned(),
-                                crate::DynamicValue::String(format!("#{anchor}")),
-                            );
-                        }
-                        if let Some(crate::DynamicValue::String(ending)) = line.remove("ending") {
-                            line.insert("ending".to_owned(), crate::DynamicValue::Enum(ending));
-                        }
-                        crate::DynamicValue::Record(line)
-                    }
-                    other => other,
-                })
-                .collect();
-            fields.insert("lines".to_owned(), crate::DynamicValue::List(lines));
-        }
-        crate::DynamicValue::Record(fields)
     }
 
     pub async fn execute_dynamic_resources(
@@ -1044,25 +977,26 @@ impl Kernel {
             Box::pin(async move {
                 let mut groups = BTreeMap::<
                     crate::VerbId,
-                    Vec<(usize, crate::ResourceUri, crate::DynamicValue)>,
+                    Vec<(usize, usize, crate::ResourceUri, crate::DynamicValue)>,
                 >::new();
                 let mut results = requests
                     .iter()
-                    .map(|(uri, _)| {
+                    .map(|(_, uri, _)| {
                         Err(crate::KernelError::UnsupportedVerb {
                             verb: function.clone(),
                             uri: uri.to_string(),
                         })
                     })
                     .collect::<Vec<_>>();
-                for (index, (uri, input)) in requests.iter().enumerate() {
+                for (local, (slot, uri, input)) in requests.iter().enumerate() {
                     match kernel.resolve_resource_verb(&function, uri) {
                         Ok(verb) => groups.entry(verb).or_default().push((
-                            index,
+                            local,
+                            *slot,
                             uri.clone(),
                             input.clone(),
                         )),
-                        Err(error) => results[index] = Err(error),
+                        Err(error) => results[local] = Err(error),
                     }
                 }
                 let group_results =
@@ -1072,10 +1006,10 @@ impl Kernel {
                         async move {
                             let requests = items
                                 .iter()
-                                .map(|(index, uri, input)| crate::ResourceRequest {
+                                .map(|(_, slot, uri, input)| crate::ResourceRequest {
                                     uri: uri.clone(),
                                     input: input.clone(),
-                                    scope: Some(scope.batch_scope(*index)),
+                                    scope: Some(scope.batch_scope(*slot)),
                                 })
                                 .collect::<Vec<_>>();
                             let values = kernel
@@ -1086,8 +1020,8 @@ impl Kernel {
                     }))
                     .await;
                 for (items, values) in group_results {
-                    for ((index, uri, _), value) in items.into_iter().zip(values) {
-                        results[index] =
+                    for ((local, _, uri, _), value) in items.into_iter().zip(values) {
+                        results[local] =
                             value.map(|result| crate::DynamicResourceResult { uri, result });
                     }
                 }

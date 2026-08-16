@@ -546,7 +546,7 @@ impl DynamicResourceProvider for ProcessResourceProvider {
                         )?,
                         &input,
                         0,
-                    )
+                    )?
                 } else {
                     let snapshot = manager.snapshot(uri.to_string().as_str())?;
                     process_status_value(
@@ -839,10 +839,21 @@ fn process_read_bytes(
     bytes: &[u8],
     input: &DynamicValue,
     base: u64,
-) -> DynamicValue {
+) -> Result<DynamicValue, KernelError> {
     let lines = process_lines_at_bytes(bytes, base);
     let (at, before, after) = process_read_options(input);
-    let index = match at.as_deref() { Some("bottom") => lines.len(), Some("top") | None => 0, Some(anchor) => lines.iter().position(|line| matches!(line, DynamicValue::Record(fields) if fields.get("anchor") == Some(&DynamicValue::String(anchor.to_owned())))).unwrap_or(0) };
+    let index = match at.as_deref() {
+        Some("bottom") => lines.len(),
+        Some("top") | None => 0,
+        Some(anchor) => lines
+            .iter()
+            .position(|line| {
+                matches!(line, DynamicValue::Record(fields) if fields.get("anchor") == Some(&DynamicValue::String(anchor.to_owned())))
+            })
+            .ok_or_else(|| KernelError::StaleAnchor {
+                message: format!("process read anchor does not resolve: {anchor}"),
+            })?,
+    };
     let (start, end) = if at.as_deref() == Some("bottom") {
         (index.saturating_sub(before.unwrap_or(200) as usize), index)
     } else {
@@ -851,7 +862,7 @@ fn process_read_bytes(
             (index + after.unwrap_or(200) as usize + 1).min(lines.len()),
         )
     };
-    DynamicValue::Variant(
+    Ok(DynamicValue::Variant(
         "lines".to_owned(),
         Some(Box::new(DynamicValue::Record(BTreeMap::from([
             ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
@@ -860,7 +871,7 @@ fn process_read_bytes(
                 DynamicValue::List(lines[start..end].to_vec()),
             ),
         ])))),
-    )
+    ))
 }
 
 fn process_read_options(input: &DynamicValue) -> (Option<String>, Option<u32>, Option<u32>) {

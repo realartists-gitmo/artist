@@ -293,10 +293,10 @@ impl SessionHandler {
     ) -> Result<DynamicValue, KernelError> {
         if !uri.path().ends_with("/inbox") {
             self.create(&ResourceAddress::uri(uri.clone())).await?;
-            return Ok(session_text(AnchoredText {
-                uri,
-                lines: Vec::new(),
-            }));
+            return Ok(DynamicValue::Record(BTreeMap::from([
+                ("uri".to_owned(), DynamicValue::ResourceUri(uri)),
+                ("text".to_owned(), DynamicValue::Option(None)),
+            ])));
         }
         let target = ResourceUri::parse(uri.to_string().trim_end_matches("/inbox"))?;
         let session = self.lookup(&ResourceAddress::uri(target)).await?;
@@ -313,12 +313,19 @@ impl SessionHandler {
             kind: "input",
             data: content,
         });
+        let text = session_text_record(AnchoredText {
+            uri: uri.clone(),
+            lines: session_lines(&snapshot(&state, 0)),
+        });
         drop(state);
         session.changed.notify_waiters();
-        Ok(DynamicValue::Record(BTreeMap::from([(
-            "uri".to_owned(),
-            DynamicValue::ResourceUri(uri),
-        )])))
+        Ok(DynamicValue::Record(BTreeMap::from([
+            ("uri".to_owned(), DynamicValue::ResourceUri(uri)),
+            (
+                "text".to_owned(),
+                DynamicValue::Option(Some(Box::new(text))),
+            ),
+        ])))
     }
 
     async fn dynamic_poll(
@@ -366,7 +373,7 @@ impl SessionHandler {
                 return Ok(DynamicValue::Record(BTreeMap::from([
                     ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
                     ("text".to_owned(), session_text_record(text)),
-                    ("reason".to_owned(), DynamicValue::String(reason.to_owned())),
+                    ("reason".to_owned(), DynamicValue::Enum(reason.to_owned())),
                 ])));
             }
             drop(state);
@@ -380,7 +387,7 @@ impl SessionHandler {
                         ("text".to_owned(), session_text_record(text)),
                         (
                             "reason".to_owned(),
-                            DynamicValue::String("timeout".to_owned()),
+                            DynamicValue::Enum("timeout".to_owned()),
                         ),
                     ])));
                 }
@@ -423,15 +430,16 @@ impl SessionHandler {
             .lookup(&ResourceAddress::uri(session_root(&uri)?))
             .await?;
         let state = session.state.lock().await;
-        let text = session_text_record(AnchoredText {
+        let text = AnchoredText {
             uri: uri.clone(),
             lines: session_lines(&snapshot(&state, 0)),
-        });
+        };
         let regex = regex::Regex::new(&pattern).map_err(|error| KernelError::InvalidPattern {
             message: error.to_string(),
         })?;
-        let matches = if regex.is_match(&text.to_lossless_string()) {
-            vec![text]
+        let semantic = crate::accumulated_lines_text(&text.lines);
+        let matches = if regex.is_match(&semantic) {
+            vec![session_text_record(text)]
         } else {
             Vec::new()
         };

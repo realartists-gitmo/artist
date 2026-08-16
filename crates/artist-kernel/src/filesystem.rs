@@ -1393,19 +1393,12 @@ fn dynamic_line(line: AnchoredLine) -> DynamicValue {
     DynamicValue::Record(BTreeMap::from([
         (
             "anchor".to_owned(),
-            DynamicValue::List(
-                line.anchor
-                    .tokens()
-                    .iter()
-                    .cloned()
-                    .map(DynamicValue::String)
-                    .collect(),
-            ),
+            DynamicValue::String(line.anchor.to_string()),
         ),
         ("text".to_owned(), DynamicValue::String(line.text)),
         (
             "ending".to_owned(),
-            DynamicValue::String(format!("{:?}", line.ending).to_lowercase()),
+            DynamicValue::Enum(format!("{:?}", line.ending).to_lowercase()),
         ),
     ]))
 }

@@ -298,7 +298,7 @@ pub struct KernelHandle {
         Arc<
             dyn Fn(
                     String,
-                    Vec<(crate::ResourceUri, crate::DynamicValue)>,
+                    Vec<(usize, crate::ResourceUri, crate::DynamicValue)>,
                     InvocationScope,
                 )
                     -> BoxFuture<'static, Vec<Result<crate::DynamicResourceResult, KernelError>>>
@@ -410,7 +410,7 @@ impl KernelHandle {
         dispatch: Arc<
             dyn Fn(
                     String,
-                    Vec<(crate::ResourceUri, crate::DynamicValue)>,
+                    Vec<(usize, crate::ResourceUri, crate::DynamicValue)>,
                     InvocationScope,
                 )
                     -> BoxFuture<'static, Vec<Result<crate::DynamicResourceResult, KernelError>>>
@@ -484,7 +484,7 @@ impl KernelHandle {
     pub fn execute_universal_batch_with_scope(
         &self,
         function: String,
-        requests: Vec<(crate::ResourceUri, crate::DynamicValue)>,
+        requests: Vec<(usize, crate::ResourceUri, crate::DynamicValue)>,
         scope: InvocationScope,
     ) -> BoxFuture<'static, Vec<Result<crate::DynamicResourceResult, KernelError>>> {
         match &self.universal_batch_dispatch {
