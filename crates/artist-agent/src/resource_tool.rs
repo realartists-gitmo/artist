@@ -18,6 +18,27 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
+#[derive(Debug)]
+pub struct BatchedRunError {
+    pub message: String,
+    pub messages: Vec<Message>,
+}
+
+impl std::fmt::Display for BatchedRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(formatter)
+    }
+}
+
+impl From<String> for BatchedRunError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            messages: Vec::new(),
+        }
+    }
+}
+
 /// Optional invocation metadata injected by an embedding runtime into
 /// `rig_agent::tool::ToolContext`. The model-facing adapter remains portable,
 /// while hosts that have cancellation/deadline/correlation data can carry it
@@ -69,7 +90,7 @@ pub async fn run_batched_agent<M>(
     additional_params: Option<Value>,
     mut take_steering: impl FnMut() -> Vec<String>,
     mut on_event: impl FnMut(BatchedRunEvent) -> Result<(), String>,
-) -> Result<(String, Vec<Message>), String>
+) -> Result<(String, Vec<Message>), BatchedRunError>
 where
     M: CompletionModel + 'static,
 {
@@ -87,7 +108,10 @@ where
     let mut tool_starts = BTreeMap::<String, Instant>::new();
     loop {
         if cancellation.is_cancelled() {
-            return Err("agent run aborted".to_owned());
+            return Err(BatchedRunError {
+                message: "agent run aborted".to_owned(),
+                messages: run.messages().to_vec(),
+            });
         }
         match run.next_step().map_err(|error| error.to_string())? {
             AgentRunStep::CallModel {
@@ -107,7 +131,12 @@ where
                     .map_err(|error| error.to_string())?;
                 while let Some(item) = tokio::select! {
                     biased;
-                    _ = cancellation.cancelled() => return Err("agent run aborted".to_owned()),
+                    _ = cancellation.cancelled() => {
+                        return Err(BatchedRunError {
+                            message: "agent run aborted".to_owned(),
+                            messages: run.messages().to_vec(),
+                        });
+                    },
                     item = stream.next() => item,
                 } {
                     match item.map_err(|error| error.to_string())? {
@@ -298,7 +327,7 @@ pub async fn execute_sibling_calls(
         .into_iter()
         .filter(|(_, items)| items.len() > 1)
     {
-        let uri = match artist_kernel::ResourceUri::parse(&uri_text) {
+        let _uri = match artist_kernel::ResourceUri::parse(&uri_text) {
             Ok(uri) => uri,
             Err(error) => {
                 for (index, _, _) in items {
@@ -307,37 +336,42 @@ pub async fn execute_sibling_calls(
                 continue;
             }
         };
-        let requests = items
-            .iter()
-            .map(|(_, name, value)| {
-                let verb = kernel
-                    .resolve_resource_verb(name, &uri)
-                    .map_err(|error| error.to_string());
-                verb.map(|verb| artist_kernel::MixedResourceRequest {
-                    verb,
-                    uri: uri.clone(),
-                    input: value.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>();
-        let Ok(requests) = requests else {
-            for (index, _, _) in items {
-                results[index].1 = Some(Err("invalid mutation verb".into()));
+        let transaction = kernel.new_mutation_transaction(items.len());
+        let outputs = join_all(items.iter().map(|(_, name, value)| {
+            let kernel = kernel.clone();
+            let transaction = transaction.clone();
+            let scope = scope.child().with_mutation_transaction(transaction.clone());
+            let name = name.clone();
+            let value = value.clone();
+            async move {
+                let result = kernel
+                    .execute_tool_models_for_model(name.as_str(), vec![value], scope)
+                    .await
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| {
+                        Err(artist_kernel::KernelError::Handler {
+                            message: "transactional tool returned no result".to_owned(),
+                        })
+                    });
+                if let Err(error) = &result {
+                    transaction.fail(error.clone());
+                }
+                if let Ok(value) = &result {
+                    if let Err(error) = &value.stdout {
+                        transaction.fail(error.clone());
+                    }
+                }
+                result
             }
-            continue;
-        };
-        let outputs = kernel
-            .invoke_mixed_dynamic_resources(requests, scope.child())
-            .await;
+        }))
+        .await;
         for ((index, _, _), output) in items.into_iter().zip(outputs) {
             handled.insert(index);
             results[index].1 = Some(
                 output
-                    .map(|value| {
-                        dynamic_to_json(artist_kernel::DynamicValue::Result(Ok(Box::new(
-                            value.output,
-                        ))))
-                    })
+                    .and_then(|value| value.stdout)
+                    .map(|value| dynamic_to_json(value))
                     .map_err(|error| error.to_string()),
             );
         }

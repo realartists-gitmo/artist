@@ -314,7 +314,7 @@ impl SessionHandler {
         let session = self
             .lookup(&ResourceAddress::uri(session_root(&uri)?))
             .await?;
-        let (pattern, timeout_ms) = poll_options(&input)?;
+        let (pattern, timeout_ms, from) = poll_options(&input)?;
         let matcher = pattern
             .as_deref()
             .map(regex::Regex::new)
@@ -326,17 +326,19 @@ impl SessionHandler {
         loop {
             let notified = session.changed.notified();
             let state = session.state.lock().await;
+            let since = from.unwrap_or(0);
             let accumulated = state
                 .events
                 .iter()
+                .filter(|event| event.seq >= since)
                 .map(|event| event.data.as_str())
                 .collect::<String>();
             let matched = matcher
                 .as_ref()
                 .is_some_and(|matcher| matcher.is_match(&accumulated));
-            if state.status.terminal() || matched || (matcher.is_none() && !state.events.is_empty())
-            {
-                let value = snapshot(&state, 0);
+            let changed = state.next_seq > since;
+            if state.status.terminal() || matched || (matcher.is_none() && changed) {
+                let value = snapshot(&state, since);
                 let text = anchored_session_window(&uri, &value, None, None)?;
                 let reason = if matched {
                     "matched"
@@ -355,7 +357,7 @@ impl SessionHandler {
             if let Some(timeout) = timeout {
                 if tokio::time::timeout(timeout, notified).await.is_err() {
                     let state = session.state.lock().await;
-                    let text = anchored_session_window(&uri, &snapshot(&state, 0), None, None)?;
+                    let text = anchored_session_window(&uri, &snapshot(&state, since), None, None)?;
                     return Ok(DynamicValue::Record(BTreeMap::from([
                         ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
                         ("text".to_owned(), session_text(text)),
@@ -419,9 +421,11 @@ fn session_content(input: &DynamicValue) -> Result<String, KernelError> {
     }
 }
 
-fn poll_options(input: &DynamicValue) -> Result<(Option<String>, Option<u64>), KernelError> {
+fn poll_options(
+    input: &DynamicValue,
+) -> Result<(Option<String>, Option<u64>, Option<u64>), KernelError> {
     let DynamicValue::Record(fields) = input else {
-        return Ok((None, None));
+        return Ok((None, None, None));
     };
     let pattern = match fields.get("match") {
         None | Some(DynamicValue::Option(None)) => None,
@@ -459,7 +463,18 @@ fn poll_options(input: &DynamicValue) -> Result<(Option<String>, Option<u64>), K
             });
         }
     };
-    Ok((pattern, timeout_ms))
+    let from = match fields.get("from") {
+        None | Some(DynamicValue::Option(None)) => None,
+        Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+            DynamicValue::Variant(name, Some(value)) if name == "at" => match value.as_ref() {
+                DynamicValue::String(anchor) => anchor.trim_start_matches('#').parse().ok(),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    Ok((pattern, timeout_ms, from))
 }
 
 fn session_line(line: AnchoredLine) -> DynamicValue {

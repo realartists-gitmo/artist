@@ -1,6 +1,6 @@
 use crate::{
     Anchor, AnchorError, AnchorSet, AnchoredLine, AnchoredText, ClaimDecision,
-    DynamicClaimProvider, DynamicResourceProvider, DynamicValue, DynamicVerbResult,
+    DynamicClaimProvider, DynamicResourceProvider, DynamicType, DynamicValue, DynamicVerbResult,
     InsertionPosition, KernelError, MixedResourceRequest, Pattern, Position, ResourceBatchFuture,
     ResourceFuture, ResourceRequest, ResourceUri, SearchService, StructuralAnalyzer,
     StructuralLine, VerbId,
@@ -834,12 +834,20 @@ impl DynamicResourceProvider for FileResourceProvider {
         ]
         .into_iter()
         .map(|(identity, function)| {
-            crate::VerbDefinition::new(
+            let definition = crate::VerbDefinition::new(
                 identity.clone(),
                 function,
                 function,
                 format!("Native filesystem {function} provider"),
-            )
+            );
+            if function == "delete" {
+                definition.with_contract(
+                    DynamicType::Record(BTreeMap::from([("uri".into(), DynamicType::ResourceUri)])),
+                    DynamicType::ResourceUri,
+                )
+            } else {
+                definition
+            }
         })
         .collect()
     }

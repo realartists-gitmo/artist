@@ -5,6 +5,7 @@ use crate::{
     ToolProvider, VerbDefinition, VerbRegistry,
 };
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
@@ -89,12 +90,26 @@ impl Kernel {
         &self,
         provider: Arc<dyn crate::DynamicResourceProvider>,
     ) -> Result<(), KernelError> {
-        let definitions = provider.verb_definitions();
-        self.inner.resources.register(provider.clone())?;
-        self.inner.claims.register(provider)?;
+        let mut definitions = provider.verb_definitions();
+        let existing = self.active_verbs()?;
+        for definition in &mut definitions {
+            if let Some(active) = existing
+                .iter()
+                .find(|active| active.definition.identity == definition.identity)
+            {
+                if definition.input_type.is_none() {
+                    definition.input_type = active.definition.input_type.clone();
+                }
+                if definition.output_type.is_none() {
+                    definition.output_type = active.definition.output_type.clone();
+                }
+            }
+        }
         if !definitions.is_empty() {
             self.inner.verbs.activate_packages(definitions)?;
         }
+        self.inner.resources.register(provider.clone())?;
+        self.inner.claims.register(provider)?;
         Ok(())
     }
 
@@ -154,6 +169,36 @@ impl Kernel {
         }
     }
 
+    pub fn new_mutation_transaction(&self, expected: usize) -> Arc<crate::MutationTransaction> {
+        crate::MutationTransaction::new(expected)
+    }
+
+    async fn execute_transaction_request(
+        &self,
+        transaction: Arc<crate::MutationTransaction>,
+        verb: crate::VerbId,
+        uri: crate::ResourceUri,
+        input: crate::DynamicValue,
+        scope: InvocationScope,
+    ) -> Result<crate::DynamicResourceResult, KernelError> {
+        let (slot, execute) = transaction.register((verb, uri.clone(), input))?;
+        if let Some(requests) = execute {
+            let mixed = requests
+                .into_iter()
+                .map(|(verb, uri, input)| crate::MixedResourceRequest { verb, uri, input })
+                .collect();
+            transaction.finish(
+                self.invoke_mixed_dynamic_resources(mixed, scope.without_mutation_transaction())
+                    .await,
+            );
+        }
+        let result = tokio::select! {
+            result = transaction.result(slot) => result?,
+            _ = scope.cancellation.cancelled() => return Err(KernelError::Aborted { message: "mutation transaction cancelled".to_owned() }),
+        };
+        Ok(crate::DynamicResourceResult { uri, result })
+    }
+
     pub async fn execute_universal_function_with_scope(
         &self,
         function: String,
@@ -162,6 +207,12 @@ impl Kernel {
         scope: crate::InvocationScope,
     ) -> Result<Vec<crate::DynamicResourceResult>, KernelError> {
         let verb = self.resolve_resource_verb(&function, &uri)?;
+        if let Some(transaction) = scope.mutation_transaction() {
+            return self
+                .execute_transaction_request(transaction, verb, uri, input, scope)
+                .await
+                .map(|result| vec![result]);
+        }
         let invocation = self.inner.invocations.begin(input.clone());
         let result = match self
             .inner
@@ -643,6 +694,30 @@ impl Kernel {
         result
     }
 
+    pub async fn execute_tool_models_for_model(
+        &self,
+        name: &str,
+        args: Vec<crate::DynamicValue>,
+        scope: InvocationScope,
+    ) -> Vec<Result<crate::ToolModelResult, KernelError>> {
+        let providers = self.inner.tool_providers.read().await;
+        let host = self.handle();
+        for provider in providers.iter() {
+            if provider
+                .tool_definitions()
+                .iter()
+                .any(|definition| definition.name == name)
+            {
+                return provider
+                    .execute_tools_for_model_results(name, args, host, scope)
+                    .await;
+            }
+        }
+        vec![Err(KernelError::Handler {
+            message: format!("no named tool registered: {name}"),
+        })]
+    }
+
     pub async fn execute_tool_batch_with_scope(
         &self,
         name: &str,
@@ -699,6 +774,8 @@ impl Kernel {
         let direct_dynamic_kernel = self.clone();
         let direct_dynamic_batch_kernel = direct_dynamic_kernel.clone();
         let universal_kernel = self.clone();
+        let type_kernel = self.clone();
+        let universal_batch_kernel = self.clone();
         KernelHandle::with_dispatch(
             Arc::new(move |call, scope| {
                 let kernel = dynamic_kernel.clone();
@@ -738,6 +815,74 @@ impl Kernel {
                 })
             }),
         )
+        .with_input_type_dispatch(Arc::new(move |function, uri| {
+            let verb = type_kernel.resolve_resource_verb(&function, &uri)?;
+            let active = type_kernel.active_verbs()?;
+            Ok(active
+                .iter()
+                .find(|active| active.definition.identity == verb)
+                .and_then(|active| active.definition.input_type.clone())
+                .or_else(|| {
+                    active
+                        .iter()
+                        .filter(|active| active.definition.function == function)
+                        .find_map(|active| active.definition.input_type.clone())
+                }))
+        }))
+        .with_universal_batch_dispatch(Arc::new(move |function, requests, scope| {
+            let kernel = universal_batch_kernel.clone();
+            Box::pin(async move {
+                let mut groups = BTreeMap::<
+                    crate::VerbId,
+                    Vec<(usize, crate::ResourceUri, crate::DynamicValue)>,
+                >::new();
+                let mut results = requests
+                    .iter()
+                    .map(|(uri, _)| {
+                        Err(crate::KernelError::UnsupportedVerb {
+                            verb: function.clone(),
+                            uri: uri.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for (index, (uri, input)) in requests.iter().enumerate() {
+                    match kernel.resolve_resource_verb(&function, uri) {
+                        Ok(verb) => groups.entry(verb).or_default().push((
+                            index,
+                            uri.clone(),
+                            input.clone(),
+                        )),
+                        Err(error) => results[index] = Err(error),
+                    }
+                }
+                let group_results =
+                    futures::future::join_all(groups.into_iter().map(|(verb, items)| {
+                        let kernel = kernel.clone();
+                        let scope = scope.child();
+                        async move {
+                            let requests = items
+                                .iter()
+                                .map(|(_, uri, input)| crate::ResourceRequest {
+                                    uri: uri.clone(),
+                                    input: input.clone(),
+                                })
+                                .collect::<Vec<_>>();
+                            let values = kernel
+                                .invoke_dynamic_resource_batch(verb, requests, scope)
+                                .await;
+                            (items, values)
+                        }
+                    }))
+                    .await;
+                for (items, values) in group_results {
+                    for ((index, uri, _), value) in items.into_iter().zip(values) {
+                        results[index] =
+                            value.map(|result| crate::DynamicResourceResult { uri, result });
+                    }
+                }
+                results
+            })
+        }))
         .with_universal_dispatch(Arc::new(move |function, input, scope| {
             let kernel = universal_kernel.clone();
             Box::pin(async move {

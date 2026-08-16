@@ -909,21 +909,21 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
             root.path().join("contract.wit"),
-            "package example:text@1.0.0; interface text { type error = string; transform: func(input: list<list<string>>) -> list<result<option<string>, error>>; observe: func(response: result<option<string>, error>) -> string; }",
+            "package example:text@1.0.0; interface text { type error = string; transform: func(input: list<string>) -> list<result<option<string>, error>>; observe: func(response: result<option<string>, error>) -> string; }",
         )
         .unwrap();
         let manifest = VerbPackageManifest::from_toml(
-            "identity = 'example:text/transform@1.0.0'\nfunction = 'transform'\nmodel_name = 'transform'\ndescription = 'Transform'\nwit = 'contract.wit'\ninput_type = 'list<string>'\noutput_type = 'option<string>'\n",
+            "identity = 'example:text/transform@1.0.0'\nfunction = 'transform'\nmodel_name = 'transform'\ndescription = 'Transform'\nwit = 'contract.wit'\n",
         )
         .unwrap();
         let definition = manifest.definition(root.path()).unwrap();
-        assert_eq!(
-            definition.input_type,
-            Some(DynamicType::List(Box::new(DynamicType::String)))
-        );
+        assert_eq!(definition.input_type, Some(DynamicType::String));
         assert_eq!(
             definition.output_type,
-            Some(DynamicType::Option(Box::new(DynamicType::String)))
+            Some(DynamicType::Result {
+                ok: Some(Box::new(DynamicType::Option(Box::new(DynamicType::String)))),
+                err: Some(Box::new(DynamicType::String)),
+            })
         );
     }
 
@@ -946,16 +946,7 @@ mod tests {
         };
         let output = match dynamic_type_from_wit(&resolve, function.result.unwrap()).unwrap() {
             DynamicType::List(inner) => match *inner {
-                DynamicType::Result { ok, err } => {
-                    assert_eq!(
-                        err,
-                        Some(Box::new(DynamicType::Enum(vec![
-                            "fast".into(),
-                            "slow".into(),
-                        ])))
-                    );
-                    *ok.expect("result ok type")
-                }
+                item @ DynamicType::Result { .. } => item,
                 other => panic!("expected result item, got {other:?}"),
             },
             other => panic!("expected batch output list, got {other:?}"),
@@ -971,7 +962,16 @@ mod tests {
                 ),
             ]))
         );
-        assert_eq!(output, DynamicType::List(Box::new(DynamicType::String)));
+        assert_eq!(
+            output,
+            DynamicType::Result {
+                ok: Some(Box::new(DynamicType::List(Box::new(DynamicType::String)))),
+                err: Some(Box::new(DynamicType::Enum(vec![
+                    "fast".into(),
+                    "slow".into()
+                ]))),
+            }
+        );
 
         let manifest = VerbPackageManifest::from_toml(
             "identity = 'example:text/transform@1.0.0'\nfunction = 'transform'\nmodel_name = 'transform'\ndescription = 'Transform'\nwit = 'contract.wit'\n",

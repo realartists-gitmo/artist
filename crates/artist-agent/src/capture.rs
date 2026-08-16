@@ -22,6 +22,16 @@ pub(crate) struct ToolMeta {
 }
 
 impl ToolMeta {
+    pub fn record(
+        &self,
+        internal_call_id: impl Into<String>,
+        outcome: ToolOutcomeRecord,
+        duration_ms: u64,
+    ) {
+        self.lock()
+            .insert(internal_call_id.into(), (outcome, duration_ms));
+    }
+
     pub fn take(&self, internal_call_id: &str) -> Option<(ToolOutcomeRecord, u64)> {
         self.lock().remove(internal_call_id)
     }

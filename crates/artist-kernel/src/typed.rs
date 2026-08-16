@@ -3,7 +3,7 @@
 //! JSON is an adapter concern. The kernel dispatches these values directly;
 //! provider-facing JSON schemas are derived by the component layer.
 
-use crate::{Anchor, ClaimDecision, ResourceUri};
+use crate::{Anchor, ClaimDecision, DynamicValue, ResourceUri};
 use serde::{Deserialize, Serialize};
 use std::{
     any::Any,
@@ -11,6 +11,105 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tokio::sync::Notify;
+
+#[derive(Clone)]
+pub struct MutationTransaction {
+    expected: usize,
+    state: Arc<Mutex<MutationTransactionState>>,
+    changed: Arc<Notify>,
+}
+
+#[derive(Clone)]
+struct MutationTransactionState {
+    requests: Vec<(crate::VerbId, ResourceUri, DynamicValue)>,
+    results: Option<Vec<Result<crate::DynamicVerbResult, crate::KernelError>>>,
+    failure: Option<crate::KernelError>,
+    executing: bool,
+}
+
+impl MutationTransaction {
+    pub(crate) fn new(expected: usize) -> Arc<Self> {
+        Arc::new(Self {
+            expected,
+            state: Arc::new(Mutex::new(MutationTransactionState {
+                requests: Vec::with_capacity(expected),
+                results: None,
+                failure: None,
+                executing: false,
+            })),
+            changed: Arc::new(Notify::new()),
+        })
+    }
+
+    pub(crate) fn register(
+        &self,
+        request: (crate::VerbId, ResourceUri, DynamicValue),
+    ) -> Result<
+        (
+            usize,
+            Option<Vec<(crate::VerbId, ResourceUri, DynamicValue)>>,
+        ),
+        crate::KernelError,
+    > {
+        let mut state = self.state.lock().map_err(|_| crate::KernelError::Handler {
+            message: "mutation transaction lock poisoned".to_owned(),
+        })?;
+        if state.results.is_some()
+            || state.failure.is_some()
+            || state.requests.len() >= self.expected
+        {
+            return Err(crate::KernelError::Conflict {
+                uri: request.1.to_string(),
+            });
+        }
+        let slot = state.requests.len();
+        state.requests.push(request);
+        let execute = (state.requests.len() == self.expected && !state.executing).then(|| {
+            state.executing = true;
+            state.requests.clone()
+        });
+        Ok((slot, execute))
+    }
+
+    pub(crate) fn finish(
+        &self,
+        results: Vec<Result<crate::DynamicVerbResult, crate::KernelError>>,
+    ) {
+        if let Ok(mut state) = self.state.lock() {
+            state.results = Some(results);
+        }
+        self.changed.notify_waiters();
+    }
+
+    pub fn fail(&self, error: crate::KernelError) {
+        if let Ok(mut state) = self.state.lock() {
+            state.failure = Some(error);
+        }
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) async fn result(
+        &self,
+        slot: usize,
+    ) -> Result<crate::DynamicVerbResult, crate::KernelError> {
+        loop {
+            if let Ok(state) = self.state.lock() {
+                if let Some(results) = &state.results {
+                    return results.get(slot).cloned().unwrap_or_else(|| {
+                        Err(crate::KernelError::Handler {
+                            message: "mutation transaction result missing".to_owned(),
+                        })
+                    });
+                }
+                if let Some(error) = &state.failure {
+                    return Err(error.clone());
+                }
+            }
+            self.changed.notified().await;
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum LineEnding {
@@ -141,6 +240,7 @@ pub struct InvocationScope {
     /// type during nested routing even after its active registry swaps.
     generation_handles: Arc<Mutex<HashMap<String, Arc<dyn Any + Send + Sync>>>>,
     pub(crate) claim_decisions: Arc<Mutex<HashMap<String, ClaimDecision>>>,
+    pub(crate) mutation_transaction: Option<Arc<MutationTransaction>>,
     /// Routing frames shared by nested calls in one invocation chain. The
     /// kernel uses these to reject recursive resource re-entry before it can
     /// consume an unbounded amount of work.
@@ -175,6 +275,7 @@ impl InvocationScope {
             generation_snapshot: Arc::new(Mutex::new(HashMap::new())),
             generation_handles: Arc::new(Mutex::new(HashMap::new())),
             claim_decisions: Arc::new(Mutex::new(HashMap::new())),
+            mutation_transaction: None,
             routing_stack: Arc::new(Mutex::new(Vec::new())),
             deadline_started: Instant::now(),
         }
@@ -191,6 +292,7 @@ impl InvocationScope {
             generation_snapshot: Arc::new(Mutex::new(HashMap::new())),
             generation_handles: Arc::new(Mutex::new(HashMap::new())),
             claim_decisions: Arc::new(Mutex::new(HashMap::new())),
+            mutation_transaction: None,
             routing_stack: Arc::new(Mutex::new(Vec::new())),
             deadline_started: Instant::now(),
         }
@@ -204,9 +306,25 @@ impl InvocationScope {
             generation_snapshot: Arc::clone(&self.generation_snapshot),
             generation_handles: Arc::clone(&self.generation_handles),
             claim_decisions: Arc::clone(&self.claim_decisions),
+            mutation_transaction: self.mutation_transaction.clone(),
             routing_stack: Arc::clone(&self.routing_stack),
             deadline_started: self.deadline_started,
         }
+    }
+
+    pub fn with_mutation_transaction(mut self, transaction: Arc<MutationTransaction>) -> Self {
+        self.mutation_transaction = Some(transaction);
+        self
+    }
+
+    pub fn mutation_transaction(&self) -> Option<Arc<MutationTransaction>> {
+        self.mutation_transaction.clone()
+    }
+
+    pub(crate) fn without_mutation_transaction(&self) -> Self {
+        let mut scope = self.clone();
+        scope.mutation_transaction = None;
+        scope
     }
 
     /// Enter a resource routing frame, rejecting a repeated frame in the

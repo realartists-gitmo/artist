@@ -16,5 +16,5 @@ interface types {
 }
 world resource-types { export types; }
 
-interface host { invoke: func(verb: string, uri: string, input: string) -> string; }
+interface host { invoke: func(verb: string, uri: string, input: string) -> string; invoke-batch: func(verb: string, uris: list<string>, inputs: list<string>) -> list<string>; }
 world resource-host { export host; }

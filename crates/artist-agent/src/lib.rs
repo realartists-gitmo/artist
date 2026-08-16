@@ -479,6 +479,7 @@ where
                         duration_ms,
                     } => {
                         attempt_observed_for_events.store(true, Ordering::Relaxed);
+                        tool_meta.record(id.clone(), outcome.clone(), duration_ms);
                         handles
                             .lifecycle
                             .emit(LifecycleEvent::ToolFinished(format!("main:{id}")));
@@ -507,7 +508,7 @@ where
                 Ok(value) => value,
                 Err(error)
                     if !handles.cancel.is_cancelled()
-                        && !error.contains("agent run aborted")
+                        && !error.message.contains("agent run aborted")
                         && !attempt_observed.load(Ordering::Relaxed)
                         && provider_retry::is_overload(provider.provider, &error)
                         && let Some(delay) = overload_retry.schedule() =>
@@ -515,11 +516,18 @@ where
                     tokio::time::sleep(delay).await;
                     continue 'retry;
                 }
-                Err(error) if handles.cancel.is_cancelled() || error == "agent run aborted" => {
+                Err(error)
+                    if handles.cancel.is_cancelled() || error.message == "agent run aborted" =>
+                {
+                    let retained = if error.messages.is_empty() {
+                        vec![seed_prompt.clone()]
+                    } else {
+                        error.messages
+                    };
                     conversation::retain_cancelled_turn(
                         handles.memory.as_ref(),
                         &handles.conversation_id,
-                        vec![seed_prompt.clone()],
+                        retained,
                         String::new(),
                     )
                     .await
@@ -527,7 +535,7 @@ where
                     run_recorder.record(RunFinished::Cancelled);
                     return Ok(RunOutcome::Cancelled);
                 }
-                Err(error) => return Err(anyhow!(error)),
+                Err(error) => return Err(anyhow!(error.message)),
             };
             handles
                 .memory

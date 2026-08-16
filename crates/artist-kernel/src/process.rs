@@ -532,7 +532,7 @@ impl ProcessResourceProvider {
         uri: &ResourceUri,
         input: &DynamicValue,
     ) -> Result<DynamicValue, KernelError> {
-        let (pattern, timeout_ms) = process_poll_options(input)?;
+        let (pattern, timeout_ms, from) = process_poll_options(input)?;
         let matcher = pattern
             .as_deref()
             .map(regex::Regex::new)
@@ -549,40 +549,24 @@ impl ProcessResourceProvider {
             } else {
                 manager.output(uri.to_string().as_str(), false)?
             };
+            let line_count = text.lines().count() as u64;
+            let changed = from.is_none_or(|from| line_count > from);
             if matcher
                 .as_ref()
                 .is_some_and(|matcher| matcher.is_match(&text))
             {
-                return Ok(DynamicValue::Record(BTreeMap::from([
-                    ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
-                    ("text".to_owned(), DynamicValue::String(text)),
-                    (
-                        "reason".to_owned(),
-                        DynamicValue::Enum("matched".to_owned()),
-                    ),
-                ])));
+                return Ok(process_poll_result(uri, text, "matched"));
+            }
+            if changed {
+                return Ok(process_poll_result(uri, text, "changed"));
             }
             if !snapshot.running {
-                return Ok(DynamicValue::Record(BTreeMap::from([
-                    ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
-                    ("text".to_owned(), DynamicValue::String(text)),
-                    (
-                        "reason".to_owned(),
-                        DynamicValue::Enum("terminated".to_owned()),
-                    ),
-                ])));
+                return Ok(process_poll_result(uri, text, "terminated"));
             }
             if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
-                return Ok(DynamicValue::Record(BTreeMap::from([
-                    ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
-                    ("text".to_owned(), DynamicValue::String(text)),
-                    (
-                        "reason".to_owned(),
-                        DynamicValue::Enum("timeout".to_owned()),
-                    ),
-                ])));
+                return Ok(process_poll_result(uri, text, "timeout"));
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     }
 }
@@ -600,11 +584,39 @@ fn process_exit_code(status: std::process::ExitStatus) -> Option<i32> {
     })
 }
 
+fn process_poll_result(uri: &ResourceUri, text: String, reason: &str) -> DynamicValue {
+    let lines = text
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            DynamicValue::Record(BTreeMap::from([
+                (
+                    "anchor".to_owned(),
+                    DynamicValue::String(format!("#{}", index + 1)),
+                ),
+                ("text".to_owned(), DynamicValue::String(line.to_owned())),
+                ("ending".to_owned(), DynamicValue::Enum("lf".to_owned())),
+            ]))
+        })
+        .collect();
+    DynamicValue::Record(BTreeMap::from([
+        ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+        (
+            "text".to_owned(),
+            DynamicValue::Record(BTreeMap::from([
+                ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+                ("lines".to_owned(), DynamicValue::List(lines)),
+            ])),
+        ),
+        ("reason".to_owned(), DynamicValue::Enum(reason.to_owned())),
+    ]))
+}
+
 fn process_poll_options(
     input: &DynamicValue,
-) -> Result<(Option<String>, Option<u64>), KernelError> {
+) -> Result<(Option<String>, Option<u64>, Option<u64>), KernelError> {
     let DynamicValue::Record(fields) = input else {
-        return Ok((None, None));
+        return Ok((None, None, None));
     };
     let pattern = match fields.get("match") {
         None | Some(DynamicValue::Option(None)) => None,
@@ -642,5 +654,16 @@ fn process_poll_options(
             });
         }
     };
-    Ok((pattern, timeout))
+    let from = match fields.get("from") {
+        None | Some(DynamicValue::Option(None)) => None,
+        Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+            DynamicValue::Variant(name, Some(value)) if name == "at" => match value.as_ref() {
+                DynamicValue::String(anchor) => anchor.trim_start_matches('#').parse().ok(),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    Ok((pattern, timeout, from))
 }

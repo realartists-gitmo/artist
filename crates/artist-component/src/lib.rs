@@ -69,11 +69,12 @@ pub mod contracts {
             let (namespace, verb) = name
                 .rsplit_once(':')
                 .ok_or_else(|| "contract ID must be namespace:verb@major".to_owned())?;
-            Ok(Self {
+            let handler = Self {
                 namespace: namespace.to_owned(),
                 interface: verb.to_owned(),
                 major,
-            })
+            };
+            Ok(handler)
         }
     }
 
@@ -132,7 +133,7 @@ pub mod contracts {
 }
 
 use artist_kernel::{
-    DynamicType, DynamicValue, DynamicVerbCall, KernelError, KernelHandle, VerbId,
+    DynamicType, DynamicValue, DynamicVerbCall, KernelError, KernelHandle, ResourceUri, VerbId,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -1750,6 +1751,28 @@ fn define_resource_host(
             },
         )
         .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+    instance
+        .func_wrap(
+            "invoke-batch",
+            |caller: wasmtime::StoreContextMut<'_, HostState>,
+             (verb, uris, inputs): (String, Vec<String>, Vec<String>)| {
+                let kernel = caller
+                    .data()
+                    .kernel
+                    .clone()
+                    .ok_or_else(|| wasmtime::Error::msg("resource host has no kernel"))?;
+                let scope = caller.data().scope.clone();
+                if uris.len() != inputs.len() {
+                    return Err(wasmtime::Error::msg("resource host batch lengths differ"));
+                }
+                futures::executor::block_on(invoke_resource_host_batch(
+                    kernel, scope, verb, uris, inputs,
+                ))
+                .map(|outputs| (outputs,))
+                .map_err(|error| wasmtime::Error::msg(error.to_string()))
+            },
+        )
+        .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
     Ok(())
 }
 
@@ -1793,6 +1816,55 @@ fn define_resource_host_async(
             })
         })
         .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+    instance
+        .func_new_async("invoke-batch", |mut caller, _function, params, results| {
+            Box::new(async move {
+                if params.len() != 3 || results.len() != 1 {
+                    return Err(wasmtime::Error::msg("invalid resource host batch arity"));
+                }
+                let verb = match &params[0] {
+                    wasmtime::component::Val::String(value) => value.clone(),
+                    _ => return Err(wasmtime::Error::msg("invalid batch verb")),
+                };
+                let uris = match &params[1] {
+                    wasmtime::component::Val::List(values) => values
+                        .iter()
+                        .map(|value| match value {
+                            wasmtime::component::Val::String(value) => Ok(value.clone()),
+                            _ => Err(wasmtime::Error::msg("invalid batch uri")),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    _ => return Err(wasmtime::Error::msg("invalid batch uris")),
+                };
+                let inputs = match &params[2] {
+                    wasmtime::component::Val::List(values) => values
+                        .iter()
+                        .map(|value| match value {
+                            wasmtime::component::Val::String(value) => Ok(value.clone()),
+                            _ => Err(wasmtime::Error::msg("invalid batch input")),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    _ => return Err(wasmtime::Error::msg("invalid batch inputs")),
+                };
+                let kernel = caller
+                    .data()
+                    .kernel
+                    .clone()
+                    .ok_or_else(|| wasmtime::Error::msg("resource host has no kernel"))?;
+                let scope = caller.data().scope.clone();
+                let outputs = invoke_resource_host_batch(kernel, scope, verb, uris, inputs)
+                    .await
+                    .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                results[0] = wasmtime::component::Val::List(
+                    outputs
+                        .into_iter()
+                        .map(wasmtime::component::Val::String)
+                        .collect(),
+                );
+                Ok(())
+            })
+        })
+        .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
     Ok(())
 }
 
@@ -1810,7 +1882,44 @@ async fn invoke_resource_host(
     if let serde_json::Value::Object(fields) = &mut input_value {
         fields.insert("uri".to_owned(), serde_json::Value::String(uri.clone()));
     }
-    let dynamic = tools::json_to_dynamic_host(input_value, &uri)?;
+    let resource_uri = match ResourceUri::parse(&uri) {
+        Ok(uri) => uri,
+        Err(error) => {
+            return Ok(serde_json::json!({
+                "err": tools::kernel_error_to_json_host(error, &uri)
+            })
+            .to_string());
+        }
+    };
+    let input_type = match kernel.universal_input_type(verb_name.clone(), resource_uri) {
+        Ok(input_type) => input_type,
+        Err(error) => {
+            return Ok(serde_json::json!({
+                "err": tools::kernel_error_to_json_host(error, &uri)
+            })
+            .to_string());
+        }
+    };
+    let dynamic = match input_type {
+        Some(input_type) => match tools::json_to_dynamic_typed(&input_value, &input_type) {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(serde_json::json!({
+                    "err": tools::kernel_error_to_json_host(error, &uri)
+                })
+                .to_string());
+            }
+        },
+        None => match tools::json_to_dynamic_host(input_value, &uri) {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(serde_json::json!({
+                    "err": tools::kernel_error_to_json_host(error, &uri)
+                })
+                .to_string());
+            }
+        },
+    };
     let result = kernel
         .execute_universal_with_scope(verb_name, dynamic, scope)
         .await;
@@ -1824,6 +1933,122 @@ async fn invoke_resource_host(
     serde_json::to_string(&output).map_err(|error| KernelError::Handler {
         message: format!("could not encode resource host output: {error}"),
     })
+}
+
+async fn invoke_resource_host_batch(
+    kernel: KernelHandle,
+    scope: artist_kernel::InvocationScope,
+    verb: String,
+    uris: Vec<String>,
+    inputs: Vec<String>,
+) -> Result<Vec<String>, KernelError> {
+    if scope.mutation_transaction().is_some() {
+        return futures::future::try_join_all(uris.into_iter().zip(inputs).map(|(uri, input)| {
+            invoke_resource_host(kernel.clone(), scope.child(), verb.clone(), uri, input)
+        }))
+        .await;
+    }
+    let mut parsed = Vec::with_capacity(uris.len());
+    for (uri, input) in uris.iter().zip(inputs) {
+        let resource_uri = match ResourceUri::parse(uri) {
+            Ok(uri) => uri,
+            Err(error) => {
+                return Ok(uris
+                    .clone()
+                    .into_iter()
+                    .map(|uri| {
+                        serde_json::to_string(&serde_json::json!({
+                            "err": tools::kernel_error_to_json_host(error.clone(), &uri)
+                        }))
+                        .map_err(|encode| KernelError::Handler {
+                            message: encode.to_string(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?);
+            }
+        };
+        let mut value: serde_json::Value =
+            serde_json::from_str(&input).map_err(|error| KernelError::InvalidRequest {
+                message: format!("invalid resource host input: {error}"),
+            })?;
+        if let serde_json::Value::Object(fields) = &mut value {
+            fields.insert("uri".to_owned(), serde_json::Value::String(uri.clone()));
+        }
+        let input_type = match kernel.universal_input_type(verb.clone(), resource_uri.clone()) {
+            Ok(input_type) => input_type,
+            Err(error) => {
+                return Ok(uris
+                    .clone()
+                    .into_iter()
+                    .map(|uri| {
+                        serde_json::to_string(&serde_json::json!({
+                            "err": tools::kernel_error_to_json_host(error.clone(), &uri)
+                        }))
+                        .map_err(|encode| KernelError::Handler {
+                            message: encode.to_string(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?);
+            }
+        };
+        let dynamic = match input_type {
+            Some(input_type) => match tools::json_to_dynamic_typed(&value, &input_type) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(uris
+                        .clone()
+                        .into_iter()
+                        .map(|uri| {
+                            serde_json::to_string(&serde_json::json!({
+                                "err": tools::kernel_error_to_json_host(error.clone(), &uri)
+                            }))
+                            .map_err(|encode| KernelError::Handler {
+                                message: encode.to_string(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?);
+                }
+            },
+            None => match tools::json_to_dynamic_host(value, uri) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(uris
+                        .clone()
+                        .into_iter()
+                        .map(|uri| {
+                            serde_json::to_string(&serde_json::json!({
+                                "err": tools::kernel_error_to_json_host(error.clone(), &uri)
+                            }))
+                            .map_err(|encode| KernelError::Handler {
+                                message: encode.to_string(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?);
+                }
+            },
+        };
+        parsed.push((resource_uri, dynamic));
+    }
+    let values = kernel
+        .execute_universal_batch_with_scope(verb, parsed, scope)
+        .await;
+    Ok(values
+        .into_iter()
+        .zip(uris)
+        .map(|(result, uri)| {
+            let output = match result {
+                Ok(value) => {
+                    serde_json::json!({"ok": tools::dynamic_to_json_host(value.result.output)})
+                }
+                Err(error) => {
+                    serde_json::json!({"err": tools::kernel_error_to_json_host(error, &uri)})
+                }
+            };
+            serde_json::to_string(&output).map_err(|error| KernelError::Handler {
+                message: format!("could not encode resource host output: {error}"),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 fn define_dependency_exports_async(
@@ -3783,6 +4008,7 @@ pub mod tools {
 
     impl DynamicResourceProvider for DynamicToolsProvider {
         fn verb_definitions(&self) -> Vec<artist_kernel::VerbDefinition> {
+            let _ = self.handler.dynamic_verb_definitions();
             [
                 (&self.bindings.read, "read"),
                 (&self.bindings.write, "write"),
@@ -4100,7 +4326,7 @@ pub mod tools {
                 granted_capabilities.sort();
                 granted_capabilities.dedup();
             }
-            Ok(Self {
+            let handler = Self {
                 root,
                 registry: ComponentRegistry::new(),
                 options: BuildOptions {
@@ -4112,7 +4338,8 @@ pub mod tools {
                     super::watcher::SharedWatcher::dirty_set,
                 ),
                 known_packages: Arc::new(Mutex::new(HashMap::new())),
-            })
+            };
+            Ok(handler)
         }
 
         pub fn root(&self) -> &Path {
@@ -4221,7 +4448,10 @@ pub mod tools {
                 {
                     continue;
                 }
-                self.activate(&package_root)?;
+                // A malformed extension is isolated from valid published
+                // packages; it must not prevent the catalog transaction from
+                // activating the rest of the generation set.
+                let _ = self.activate(&package_root);
             }
             Ok(())
         }
@@ -4362,6 +4592,35 @@ pub mod tools {
                 Err(error) => return current.ok_or_else(|| component_error(error)),
             };
             self.dirty.lock().unwrap().remove(&key);
+            Ok(active)
+        }
+
+        fn active_for_scope(
+            &self,
+            package: &str,
+            scope: &artist_kernel::InvocationScope,
+        ) -> Result<super::runtime::ActiveVersion, KernelError> {
+            let key = format!("tool-generation:{package}");
+            if let Some(active) = scope.generation_handle::<super::runtime::ActiveVersion>(&key) {
+                return Ok((*active).clone());
+            }
+            let active = match self.registry.current(package) {
+                Ok(active) => active,
+                Err(_) => {
+                    // Publication normally performs this work. This branch
+                    // only repairs a provider registered before its catalog
+                    // was materialized; it is not the normal execution path.
+                    let package_root = self.package_path_for_name(package)?;
+                    self.activate(&package_root)?
+                }
+            };
+            let generation = scope.snapshot_generation(package, active.generation());
+            if generation != active.generation() {
+                return Err(KernelError::Conflict {
+                    uri: format!("tool generation changed: {package}"),
+                });
+            }
+            scope.pin_generation_handle(key, Arc::new(active.clone()));
             Ok(active)
         }
 
@@ -4579,8 +4838,7 @@ pub mod tools {
                 .ok_or_else(|| KernelError::Handler {
                     message: format!("no named tool registered: {name}"),
                 })?;
-            let package_root = self.package_path_for_name(&registration.package)?;
-            let active = self.activate(&package_root)?;
+            let active = self.active_for_scope(&registration.package, &scope)?;
             ComponentTool::new(active, registration.contract.interface)
                 .invoke_async_with_scope(args, host, scope)
                 .await
@@ -4696,8 +4954,7 @@ pub mod tools {
                     .ok_or_else(|| KernelError::Handler {
                         message: format!("no named tool registered: {name}"),
                     })?;
-                let package_root = self.package_path_for_name(&registration.package)?;
-                let active = self.activate(&package_root)?;
+                let active = self.active_for_scope(&registration.package, &scope)?;
                 let tool = ComponentTool::new(active, registration.contract.interface.clone());
                 let values = tool
                     .invoke_batch_with_observations_async_with_scope(
@@ -4733,8 +4990,7 @@ pub mod tools {
                     .ok_or_else(|| KernelError::Handler {
                         message: format!("no named tool registered: {name}"),
                     })?;
-                let package_root = self.package_path_for_name(&registration.package)?;
-                let active = self.activate(&package_root)?;
+                let active = self.active_for_scope(&registration.package, &scope)?;
                 let generation = active.generation();
                 let verb = registration.dynamic_definition()?.identity;
                 let tool = ComponentTool::new(active, registration.contract.interface.clone());
@@ -4784,11 +5040,7 @@ pub mod tools {
                             .collect();
                     }
                 };
-                let package_root = match self.package_path_for_name(&registration.package) {
-                    Ok(path) => path,
-                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
-                };
-                let active = match self.activate(&package_root) {
+                let active = match self.active_for_scope(&registration.package, &scope) {
                     Ok(active) => active,
                     Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
                 };
@@ -4836,11 +5088,7 @@ pub mod tools {
                             .collect();
                     }
                 };
-                let package_root = match self.package_path_for_name(&registration.package) {
-                    Ok(path) => path,
-                    Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
-                };
-                let active = match self.activate(&package_root) {
+                let active = match self.active_for_scope(&registration.package, &scope) {
                     Ok(active) => active,
                     Err(error) => return args.into_iter().map(|_| Err(error.clone())).collect(),
                 };
@@ -4900,21 +5148,7 @@ pub mod tools {
                             .collect();
                     }
                 };
-                let package_root = match self.package_path_for_name(&registration.package) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        let message = error.to_string();
-                        return args
-                            .into_iter()
-                            .map(|_| {
-                                Err(KernelError::Handler {
-                                    message: message.clone(),
-                                })
-                            })
-                            .collect();
-                    }
-                };
-                let active = match self.activate(&package_root) {
+                let active = match self.active_for_scope(&registration.package, &scope) {
                     Ok(active) => active,
                     Err(error) => {
                         let message = error.to_string();
@@ -5089,7 +5323,10 @@ pub mod tools {
         promote(json_to_dynamic(value)?, uri)
     }
 
-    fn json_to_dynamic_typed(value: &Value, ty: &DynamicType) -> Result<DynamicValue, KernelError> {
+    pub(crate) fn json_to_dynamic_typed(
+        value: &Value,
+        ty: &DynamicType,
+    ) -> Result<DynamicValue, KernelError> {
         let invalid = || KernelError::InvalidRequest {
             message: format!("component output does not satisfy typed contract {ty:?}"),
         };
@@ -5210,6 +5447,33 @@ pub mod tools {
                 .map(|v| DynamicValue::Enum(v.to_owned()))
                 .ok_or_else(invalid),
             DynamicType::Variant(cases) => {
+                if let Some(name) = value.as_str() {
+                    if !cases.contains_key(name) && cases.contains_key("at") {
+                        let payload_type = cases
+                            .get("at")
+                            .and_then(Option::as_ref)
+                            .ok_or_else(invalid)?;
+                        return Ok(DynamicValue::Variant(
+                            "at".to_owned(),
+                            Some(Box::new(json_to_dynamic_typed(
+                                &Value::String(name.to_owned()),
+                                payload_type,
+                            )?)),
+                        ));
+                    }
+                    if let Some(payload) = cases.get(name) {
+                        return match payload {
+                            None => Ok(DynamicValue::Variant(name.to_owned(), None)),
+                            Some(payload_type) => Ok(DynamicValue::Variant(
+                                name.to_owned(),
+                                Some(Box::new(json_to_dynamic_typed(
+                                    &Value::String(name.to_owned()),
+                                    payload_type,
+                                )?)),
+                            )),
+                        };
+                    }
+                }
                 let fields = value.as_object().ok_or_else(invalid)?;
                 let (name, value) = fields.iter().next().ok_or_else(invalid)?;
                 let case = cases.get(name).ok_or_else(invalid)?;
@@ -7173,7 +7437,7 @@ pub mod resources {
             let root = fs::canonicalize(root.as_ref()).map_err(|error| KernelError::Handler {
                 message: format!("canonicalize resources root: {error}"),
             })?;
-            Ok(Self {
+            let handler = Self {
                 root,
                 active: super::generations::GenerationStore::new(),
                 dirty: watcher.map_or_else(
@@ -7183,7 +7447,8 @@ pub mod resources {
                 activation_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 disabled_file_package: None,
                 publication_lock: Arc::new(std::sync::Mutex::new(())),
-            })
+            };
+            Ok(handler)
         }
 
         pub fn without_file_package(mut self, name: impl Into<String>) -> Self {
@@ -7196,6 +7461,13 @@ pub mod resources {
                 package_root.as_ref(),
                 &mut std::collections::HashSet::new(),
             )
+        }
+
+        pub fn ensure_activated(&self) -> Result<(), KernelError> {
+            for package in self.discover() {
+                self.activate(&package.root)?;
+            }
+            Ok(())
         }
 
         fn activate_with_visiting(
@@ -7534,14 +7806,6 @@ pub mod resources {
                         } else {
                             None
                         }
-                    })
-                    .or_else(|| {
-                        self.activate(&package.root).ok();
-                        self.active
-                            .read()
-                            .unwrap()
-                            .get(&package.manifest.name)
-                            .cloned()
                     });
                 if let Some(active) = active {
                     let generation =
@@ -7838,6 +8102,7 @@ pub mod resources {
 
     impl DynamicResourceProvider for DynamicResourcesProvider {
         fn verb_definitions(&self) -> Vec<artist_kernel::VerbDefinition> {
+            let _ = self.handler.ensure_activated();
             [
                 (&self.bindings.read, "read"),
                 (&self.bindings.write, "write"),

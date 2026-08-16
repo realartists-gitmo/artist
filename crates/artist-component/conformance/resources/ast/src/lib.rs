@@ -43,15 +43,11 @@ impl exports::artist::resource::extension::Guest for AstResource {
     fn claim(request: types::ClaimRequest) -> types::ClaimDecision {
         // This component is a proof only. The application disables its file
         // route, leaving native artist_ast as the production owner.
-        if source_uri(&request.uri).is_none() {
-            return types::ClaimDecision::Pass;
-        }
-        match request.verb.as_str() {
-            "read" | "artist:tool/read@1.0.0" => {
-                types::ClaimDecision::Handle
-            }
-            _ => types::ClaimDecision::Reserve,
-        }
+        // The production AST provider owns file projections. Keep this
+        // optional package available for experimentation without stealing
+        // the native route during startup.
+        let _ = request;
+        types::ClaimDecision::Pass
     }
 }
 

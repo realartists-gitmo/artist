@@ -25,10 +25,16 @@ pub enum InvocationStatus {
 pub struct Invocation {
     pub uri: ResourceUri,
     pub stdin: DynamicValue,
+    pub stdin_history: Vec<DynamicValue>,
     pub stdout: Option<Result<DynamicValue, KernelError>>,
     pub stderr: String,
     pub stdobs: String,
     pub status: InvocationStatus,
+    pub revision: u64,
+    pub stdin_revision: u64,
+    pub stdout_revision: u64,
+    pub stderr_revision: u64,
+    pub stdobs_revision: u64,
 }
 
 #[derive(Clone)]
@@ -85,13 +91,23 @@ impl InvocationStore {
             .ok_or_else(|| KernelError::NotFound {
                 uri: uri.to_string(),
             })?;
+        let stdin = current.stdin.clone();
+        let stdin_history = current.stdin_history.clone();
         let completed = Invocation::completed(
             current.uri.clone(),
-            current.stdin,
+            stdin,
             stdout,
             stdobs.into(),
             stderr.into(),
         );
+        let completed = Invocation {
+            stdin_history,
+            revision: current.revision + 1,
+            stdout_revision: current.revision + 1,
+            stderr_revision: current.revision + 1,
+            stdobs_revision: current.revision + 1,
+            ..completed
+        };
         values.insert(id, completed.clone());
         self.notify_invocation(uri);
         self.changed.notify_waiters();
@@ -113,7 +129,15 @@ impl InvocationStore {
             .ok_or_else(|| KernelError::NotFound {
                 uri: uri.to_string(),
             })?;
-        let aborted = Invocation::aborted(current.uri.clone(), current.stdin, stderr);
+        let stdin_history = current.stdin_history.clone();
+        let aborted = Invocation {
+            revision: current.revision + 1,
+            stdout_revision: current.revision + 1,
+            stderr_revision: current.revision + 1,
+            stdobs_revision: current.revision + 1,
+            stdin_history,
+            ..Invocation::aborted(current.uri.clone(), current.stdin, stderr)
+        };
         values.insert(id, aborted.clone());
         self.notify_invocation(uri);
         self.changed.notify_waiters();
@@ -161,7 +185,15 @@ impl InvocationStore {
             .ok_or_else(|| KernelError::NotFound {
                 uri: uri.to_string(),
             })?;
-        let updated = Invocation { stdin, ..current };
+        let mut stdin_history = current.stdin_history;
+        stdin_history.push(stdin.clone());
+        let updated = Invocation {
+            stdin,
+            stdin_history,
+            revision: current.revision + 1,
+            stdin_revision: current.stdin_revision + 1,
+            ..current
+        };
         values.insert(id, updated.clone());
         self.notify_invocation(uri);
         self.changed.notify_waiters();
@@ -357,6 +389,91 @@ impl InvocationResourceProvider {
     }
 }
 
+fn poll_cursor(input: &DynamicValue) -> Option<u64> {
+    let DynamicValue::Record(fields) = input else {
+        return None;
+    };
+    let DynamicValue::Option(Some(value)) = fields.get("from")? else {
+        return None;
+    };
+    let DynamicValue::Variant(name, Some(value)) = value.as_ref() else {
+        return None;
+    };
+    if name != "at" {
+        return None;
+    }
+    let DynamicValue::String(anchor) = value.as_ref() else {
+        return None;
+    };
+    anchor.trim_start_matches('#').parse().ok()
+}
+
+fn poll_output(invocation: &Invocation, channel: &str) -> DynamicValue {
+    let value = match channel {
+        "stdout" => invocation
+            .stdout
+            .as_ref()
+            .map(|result| format!("{result:?}"))
+            .unwrap_or_default(),
+        "stderr" => invocation.stderr.clone(),
+        "stdobs" => invocation.stdobs.clone(),
+        "status" => format!("{:?}", invocation.status),
+        "stdin" => format!("{:?}", invocation.stdin),
+        _ => String::new(),
+    };
+    DynamicValue::Record(BTreeMap::from([
+        (
+            "uri".to_owned(),
+            DynamicValue::ResourceUri(invocation.uri.clone()),
+        ),
+        (
+            "text".to_owned(),
+            DynamicValue::Record(BTreeMap::from([
+                (
+                    "uri".to_owned(),
+                    DynamicValue::ResourceUri(invocation.uri.clone()),
+                ),
+                (
+                    "lines".to_owned(),
+                    DynamicValue::List(vec![DynamicValue::Record(BTreeMap::from([
+                        (
+                            "anchor".to_owned(),
+                            DynamicValue::String(format!(
+                                "#{}",
+                                channel_revision(invocation, channel)
+                            )),
+                        ),
+                        ("text".to_owned(), DynamicValue::String(value)),
+                        ("ending".to_owned(), DynamicValue::Enum("none".to_owned())),
+                    ]))]),
+                ),
+            ])),
+        ),
+        (
+            "reason".to_owned(),
+            DynamicValue::Enum(
+                if matches!(invocation.status, InvocationStatus::Running) {
+                    "changed"
+                } else {
+                    "terminated"
+                }
+                .to_owned(),
+            ),
+        ),
+    ]))
+}
+
+fn channel_revision(invocation: &Invocation, channel: &str) -> u64 {
+    match channel {
+        "stdin" => invocation.stdin_revision,
+        "stdout" => invocation.stdout_revision,
+        "stderr" => invocation.stderr_revision,
+        "stdobs" => invocation.stdobs_revision,
+        "status" => invocation.revision,
+        _ => invocation.revision,
+    }
+}
+
 fn kernel_error_value(error: &KernelError) -> DynamicValue {
     DynamicValue::Record(BTreeMap::from([
         (
@@ -442,16 +559,29 @@ impl DynamicResourceProvider for InvocationResourceProvider {
         Box::pin(async move {
             let channel = Self::channel(uri)?;
             let output = match verb.function() {
-                "find" if channel == "root" => DynamicValue::Record(BTreeMap::from([(
-                    "entries".to_owned(),
-                    DynamicValue::List(
+                "find" if channel == "root" => {
+                    let entries = if uri.as_ref().host_str().is_some() {
+                        let invocation = self.store.get(uri)?;
+                        ["stdin", "stdout", "stderr", "stdobs", "status"]
+                            .into_iter()
+                            .map(|channel| {
+                                invocation
+                                    .channel_uri(channel)
+                                    .map(DynamicValue::ResourceUri)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
                         self.store
                             .all()?
                             .into_iter()
                             .map(|invocation| DynamicValue::ResourceUri(invocation.uri))
-                            .collect(),
-                    ),
-                )])),
+                            .collect()
+                    };
+                    DynamicValue::Record(BTreeMap::from([(
+                        "entries".to_owned(),
+                        DynamicValue::List(entries),
+                    )]))
+                }
                 "read" if channel == "root" => DynamicValue::Record(BTreeMap::from([(
                     "entries".to_owned(),
                     DynamicValue::List(
@@ -476,12 +606,20 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         },
                         _ => None,
                     };
+                    let from = poll_cursor(&input);
                     loop {
                         let invocation = self.store.get(uri)?;
-                        let snapshot = Self::output(&invocation, channel);
+                        let snapshot = poll_output(&invocation, channel);
                         let matched = pattern
                             .as_ref()
                             .is_none_or(|pattern| format!("{snapshot:?}").contains(pattern));
+                        let changed = from
+                            .map_or(channel_revision(&invocation, channel) > 0, |from| {
+                                channel_revision(&invocation, channel) > from
+                            });
+                        if changed && matched {
+                            break snapshot;
+                        }
                         if !matches!(invocation.status, InvocationStatus::Running) && matched {
                             break snapshot;
                         }
@@ -496,7 +634,7 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         // event, even while the logical invocation remains
                         // running. Do not turn the channel poll into a
                         // status-only wait.
-                        if matched && channel != "status" {
+                        if changed && matched && channel != "status" {
                             break snapshot;
                         }
                     }
@@ -548,11 +686,17 @@ impl Invocation {
     pub fn running(uri: ResourceUri, stdin: DynamicValue) -> Self {
         Self {
             uri,
-            stdin,
+            stdin: stdin.clone(),
+            stdin_history: vec![stdin.clone()],
             stdout: None,
             stderr: String::new(),
             stdobs: String::new(),
             status: InvocationStatus::Running,
+            revision: 0,
+            stdin_revision: 0,
+            stdout_revision: 0,
+            stderr_revision: 0,
+            stdobs_revision: 0,
         }
     }
 
@@ -570,24 +714,36 @@ impl Invocation {
         };
         Self {
             uri,
-            stdin,
+            stdin: stdin.clone(),
+            stdin_history: vec![stdin.clone()],
             stdout: Some(stdout),
             stderr,
             stdobs,
             status,
+            revision: 0,
+            stdin_revision: 0,
+            stdout_revision: 0,
+            stderr_revision: 0,
+            stdobs_revision: 0,
         }
     }
 
     pub fn aborted(uri: ResourceUri, stdin: DynamicValue, stderr: impl Into<String>) -> Self {
         Self {
             uri,
-            stdin,
+            stdin: stdin.clone(),
+            stdin_history: vec![stdin.clone()],
             stdout: Some(Err(KernelError::Aborted {
                 message: "invocation aborted".to_owned(),
             })),
             stderr: stderr.into(),
             stdobs: String::new(),
             status: InvocationStatus::Aborted,
+            revision: 0,
+            stdin_revision: 0,
+            stdout_revision: 0,
+            stderr_revision: 0,
+            stdobs_revision: 0,
         }
     }
 }

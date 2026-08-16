@@ -227,6 +227,25 @@ pub struct KernelHandle {
                 + Sync,
         >,
     >,
+    universal_batch_dispatch: Option<
+        Arc<
+            dyn Fn(
+                    String,
+                    Vec<(crate::ResourceUri, crate::DynamicValue)>,
+                    InvocationScope,
+                )
+                    -> BoxFuture<'static, Vec<Result<crate::DynamicResourceResult, KernelError>>>
+                + Send
+                + Sync,
+        >,
+    >,
+    input_type_dispatch: Option<
+        Arc<
+            dyn Fn(String, crate::ResourceUri) -> Result<Option<crate::DynamicType>, KernelError>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl KernelHandle {
@@ -302,7 +321,49 @@ impl KernelHandle {
             direct_dynamic_dispatch,
             direct_dynamic_batch_dispatch,
             universal_dispatch: None,
+            universal_batch_dispatch: None,
+            input_type_dispatch: None,
         }
+    }
+
+    pub(crate) fn with_input_type_dispatch(
+        mut self,
+        dispatch: Arc<
+            dyn Fn(String, crate::ResourceUri) -> Result<Option<crate::DynamicType>, KernelError>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        self.input_type_dispatch = Some(dispatch);
+        self
+    }
+
+    pub(crate) fn with_universal_batch_dispatch(
+        mut self,
+        dispatch: Arc<
+            dyn Fn(
+                    String,
+                    Vec<(crate::ResourceUri, crate::DynamicValue)>,
+                    InvocationScope,
+                )
+                    -> BoxFuture<'static, Vec<Result<crate::DynamicResourceResult, KernelError>>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        self.universal_batch_dispatch = Some(dispatch);
+        self
+    }
+
+    pub fn universal_input_type(
+        &self,
+        function: String,
+        uri: crate::ResourceUri,
+    ) -> Result<Option<crate::DynamicType>, KernelError> {
+        self.input_type_dispatch
+            .as_ref()
+            .map(|dispatch| dispatch(function, uri))
+            .unwrap_or(Ok(None))
     }
 
     pub(crate) fn with_universal_dispatch(
@@ -349,6 +410,28 @@ impl KernelHandle {
                 Err(KernelError::Handler {
                     message: "kernel handle does not support universal dispatch".to_owned(),
                 })
+            }),
+        }
+    }
+
+    pub fn execute_universal_batch_with_scope(
+        &self,
+        function: String,
+        requests: Vec<(crate::ResourceUri, crate::DynamicValue)>,
+        scope: InvocationScope,
+    ) -> BoxFuture<'static, Vec<Result<crate::DynamicResourceResult, KernelError>>> {
+        match &self.universal_batch_dispatch {
+            Some(dispatch) => dispatch(function, requests, scope),
+            None => Box::pin(async move {
+                requests
+                    .into_iter()
+                    .map(|_| {
+                        Err(KernelError::Handler {
+                            message: "kernel handle does not support universal batch dispatch"
+                                .to_owned(),
+                        })
+                    })
+                    .collect()
             }),
         }
     }

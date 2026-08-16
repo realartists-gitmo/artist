@@ -38,6 +38,7 @@ interface extension {
 
 interface host {
     invoke: func(verb: string, uri: string, input: string) -> string;
+    invoke-batch: func(verb: string, uris: list<string>, inputs: list<string>) -> list<string>;
 }
 
 world host-world {
