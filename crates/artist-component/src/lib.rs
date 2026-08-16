@@ -4650,6 +4650,7 @@ pub mod tools {
         }
 
         fn refresh_published_catalog(&self) {
+            let _publication_guard = self.publication_lock.lock().ok();
             let definitions = self.build_tool_definitions();
             if let Ok(mut catalog) = self.published_catalog.write() {
                 *catalog = definitions;
