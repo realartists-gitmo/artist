@@ -1988,7 +1988,9 @@ async fn invoke_resource_host(
         Ok(mut values) => match values.pop() {
             Some(value) => {
                 let stdout = value.result.output.clone();
-                serde_json::json!({"ok": tools::dynamic_to_json_host(stdout)})
+                {
+                    serde_json::json!({"ok": tools::dynamic_to_json_host(host_success_value(stdout))})
+                }
             }
             None => {
                 let error = KernelError::Handler {
@@ -2004,6 +2006,14 @@ async fn invoke_resource_host(
     serde_json::to_string(&output).map_err(|error| KernelError::Handler {
         message: format!("could not encode resource host output: {error}"),
     })
+}
+
+fn host_success_value(value: DynamicValue) -> DynamicValue {
+    match value {
+        DynamicValue::Result(Ok(inner)) => host_success_value(*inner),
+        DynamicValue::Variant(_, Some(inner)) => host_success_value(*inner),
+        other => other,
+    }
 }
 
 async fn invoke_resource_host_batch(
@@ -2103,7 +2113,7 @@ async fn invoke_resource_host_batch(
         let uri = &uris[index];
         let output = match result {
             Ok(value) => {
-                serde_json::json!({"ok": tools::dynamic_to_json_host(value.result.output)})
+                serde_json::json!({"ok": tools::dynamic_to_json_host(host_success_value(value.result.output))})
             }
             Err(error) => {
                 serde_json::json!({"err": tools::kernel_error_to_json_host(error, &uri)})
@@ -3380,7 +3390,7 @@ pub mod runtime {
         collections::{BTreeMap, HashMap},
         fs,
         path::PathBuf,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, RwLock},
         thread,
         time::Duration,
     };
@@ -4111,7 +4121,7 @@ pub mod tools {
     use std::{
         collections::{BTreeMap, HashMap},
         path::{Path, PathBuf},
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, RwLock},
     };
 
     /// A virtual mount over tool package files and their activated components.
@@ -4129,6 +4139,7 @@ pub mod tools {
         known_packages: Arc<Mutex<HashMap<String, (PathBuf, ToolRegistration)>>>,
         published_definitions: Arc<Mutex<HashMap<String, artist_kernel::VerbDefinition>>>,
         published_generations: Arc<Mutex<HashMap<(String, u64), Arc<PublishedToolGeneration>>>>,
+        published_catalog: Arc<RwLock<Vec<ToolDefinition>>>,
         publication_lock: Arc<Mutex<()>>,
     }
 
@@ -4248,6 +4259,7 @@ pub mod tools {
                     if let Ok(relative) = self.handler.relative_uri_path(uri) {
                         self.handler.mark_dirty(&relative);
                     }
+                    let _ = self.handler.dynamic_verb_definitions();
                 }
                 Ok(DynamicVerbResult {
                     verb: verb.clone(),
@@ -4313,6 +4325,7 @@ pub mod tools {
                 known_packages: Arc::clone(&self.known_packages),
                 published_definitions: Arc::clone(&self.published_definitions),
                 published_generations: Arc::clone(&self.published_generations),
+                published_catalog: Arc::clone(&self.published_catalog),
                 publication_lock: Arc::clone(&self.publication_lock),
             }
         }
@@ -4527,10 +4540,12 @@ pub mod tools {
                 known_packages: Arc::new(Mutex::new(HashMap::new())),
                 published_definitions: Arc::new(Mutex::new(HashMap::new())),
                 published_generations: Arc::new(Mutex::new(HashMap::new())),
+                published_catalog: Arc::new(RwLock::new(Vec::new())),
                 publication_lock: Arc::new(Mutex::new(())),
             };
             let registrations = handler.registrations()?;
             handler.ensure_activated(&registrations);
+            handler.refresh_published_catalog();
             Ok(handler)
         }
 
@@ -4622,6 +4637,7 @@ pub mod tools {
         ) -> Result<Vec<artist_kernel::VerbDefinition>, KernelError> {
             let registrations = self.registrations()?;
             self.ensure_activated(&registrations);
+            self.refresh_published_catalog();
             Ok(self
                 .published_definitions
                 .lock()
@@ -4631,6 +4647,50 @@ pub mod tools {
                 .values()
                 .cloned()
                 .collect())
+        }
+
+        fn refresh_published_catalog(&self) {
+            let definitions = self.build_tool_definitions();
+            if let Ok(mut catalog) = self.published_catalog.write() {
+                *catalog = definitions;
+            }
+        }
+
+        fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
+            let published = match self.published_definitions.lock() {
+                Ok(published) => published.clone(),
+                Err(_) => return Vec::new(),
+            };
+            let generations = match self.published_generations.lock() {
+                Ok(generations) => generations.clone(),
+                Err(_) => return Vec::new(),
+            };
+            published
+                .into_iter()
+                .filter_map(|(package, definition)| {
+                    let published_generation = generations
+                        .iter()
+                        .filter(|((candidate_package, _), candidate)| {
+                            candidate_package == &package && candidate.definition == definition
+                        })
+                        .max_by_key(|((_, generation), _)| *generation)
+                        .map(|(_, generation)| generation.clone())?;
+                    let input_type = published_generation.input_type.clone();
+                    Some(ToolDefinition {
+                        name: published_generation.definition.function.clone(),
+                        description: published_generation.description.clone(),
+                        parameters: input_type
+                            .as_ref()
+                            .map(dynamic_type_schema)
+                            .and_then(|schema| json_to_dynamic(schema).ok())
+                            .unwrap_or_else(|| DynamicValue::Record(Default::default())),
+                        input_type,
+                        package: Some(package),
+                        generation: Some(published_generation.active.generation()),
+                        lease: Some(published_generation),
+                    })
+                })
+                .collect()
         }
 
         /// Activation is part of publication, not a lazy first-call side
@@ -4707,7 +4767,13 @@ pub mod tools {
                                 }
                             }
                             if let Ok(mut published) = self.published_definitions.lock() {
-                                published.insert(registration.package.clone(), definition);
+                                let collides = published.iter().any(|(package, current)| {
+                                    package != &registration.package
+                                        && current.function == definition.function
+                                });
+                                if !collides {
+                                    published.insert(registration.package.clone(), definition);
+                                }
                             }
                         }
                     }
@@ -4715,9 +4781,9 @@ pub mod tools {
             });
             if let Ok(mut generations) = self.published_generations.lock() {
                 generations.retain(|(package, generation), published| {
-                    live.contains(package)
-                        && (self.registry.current_generation(package) == Some(*generation)
-                            || Arc::strong_count(published) > 1)
+                    Arc::strong_count(published) > 1
+                        || (live.contains(package)
+                            && self.registry.current_generation(package) == Some(*generation))
                 });
             }
         }
@@ -4915,6 +4981,11 @@ pub mod tools {
             scope: &artist_kernel::InvocationScope,
         ) -> Result<(super::runtime::ActiveVersion, Arc<PublishedToolGeneration>), KernelError>
         {
+            if let Some(published) = scope
+                .generation_handle::<PublishedToolGeneration>(&format!("advertised-tool:{name}"))
+            {
+                return Ok((published.active.clone(), published));
+            }
             let candidates = self
                 .published_generations
                 .lock()
@@ -5191,45 +5262,25 @@ pub mod tools {
             name: &str,
             scope: &artist_kernel::InvocationScope,
         ) -> bool {
+            if let Ok(catalog) = self.published_catalog.read() {
+                if let Some(definition) = catalog.iter().find(|definition| definition.name == name)
+                {
+                    if let Some(lease) = &definition.lease {
+                        scope.pin_erased_generation_handle(
+                            format!("advertised-tool:{name}"),
+                            lease.clone(),
+                        );
+                    }
+                }
+            }
             self.published_for_name(name, scope).is_ok()
         }
 
         fn tool_definitions(&self) -> Vec<ToolDefinition> {
-            let _ = self.dynamic_verb_definitions();
-            let published = match self.published_definitions.lock() {
-                Ok(published) => published.clone(),
-                Err(_) => return Vec::new(),
-            };
-            let generations = match self.published_generations.lock() {
-                Ok(generations) => generations.clone(),
-                Err(_) => return Vec::new(),
-            };
-            published
-                .into_iter()
-                .filter_map(|(package, definition)| {
-                    let generation = generations
-                        .iter()
-                        .filter(|((candidate_package, _), candidate)| {
-                            candidate_package == &package && candidate.definition == definition
-                        })
-                        .max_by_key(|((_, generation), _)| *generation)
-                        .map(|((_, generation), _)| *generation)?;
-                    let published_generation = generations.get(&(package.clone(), generation))?;
-                    let input_type = published_generation.input_type.clone();
-                    Some(ToolDefinition {
-                        name: published_generation.definition.function.clone(),
-                        description: published_generation.description.clone(),
-                        parameters: input_type
-                            .as_ref()
-                            .map(dynamic_type_schema)
-                            .and_then(|schema| json_to_dynamic(schema).ok())
-                            .unwrap_or_else(|| DynamicValue::Record(Default::default())),
-                        input_type,
-                        package: Some(package),
-                        generation: Some(generation),
-                    })
-                })
-                .collect()
+            self.published_catalog
+                .read()
+                .map(|catalog| catalog.clone())
+                .unwrap_or_default()
         }
 
         fn execute_tool<'a>(
@@ -6803,7 +6854,7 @@ pub mod resources {
         let mut results = vec![None; requests.len()];
         let mut valid = Vec::new();
         for (index, request) in requests.into_iter().enumerate() {
-            let DynamicValue::Record(fields) = &request else {
+            let DynamicValue::Record(mut fields) = request else {
                 results[index] = Some(DynamicValue::Result(Err(Box::new(nested_resource_error(
                     "nested read request is not a record",
                     None,
@@ -6817,21 +6868,23 @@ pub mod resources {
                 )))));
                 continue;
             };
-            let parsed = match ResourceUri::parse(uri) {
+            let uri = uri.clone();
+            let parsed = match ResourceUri::parse(&uri) {
                 Ok(uri) => uri,
                 Err(_) => {
                     results[index] = Some(DynamicValue::Result(Err(Box::new(
-                        nested_resource_error("nested read request has an invalid uri", Some(uri)),
+                        nested_resource_error("nested read request has an invalid uri", Some(&uri)),
                     ))));
                     continue;
                 }
             };
+            fields.insert("uri".to_owned(), DynamicValue::ResourceUri(parsed.clone()));
             valid.push((
                 index,
-                uri.to_owned(),
+                uri.clone(),
                 artist_kernel::ResourceRequest {
                     uri: parsed,
-                    input: request,
+                    input: DynamicValue::Record(fields),
                     scope: None,
                 },
             ));
@@ -7709,7 +7762,28 @@ pub mod resources {
                 },
             );
             let result = provider.invoke(&identity, &mapped_uri, input).await?;
-            remap_bootstrap_dynamic(result.output, &|value| self.unmap_bootstrap_uri(value))
+            let output = canonicalize_bootstrap_output(verb.function(), result.output);
+            remap_bootstrap_dynamic(output, &|value| self.unmap_bootstrap_uri(value))
+        }
+    }
+
+    fn canonicalize_bootstrap_output(function: &str, value: DynamicValue) -> DynamicValue {
+        if function != "read" {
+            return value;
+        }
+        match value {
+            DynamicValue::Variant(_, _) => value,
+            DynamicValue::Record(fields) if fields.contains_key("entries") => {
+                DynamicValue::Variant(
+                    "entries".to_owned(),
+                    Some(Box::new(DynamicValue::Record(fields))),
+                )
+            }
+            DynamicValue::Record(fields) if fields.contains_key("lines") => DynamicValue::Variant(
+                "lines".to_owned(),
+                Some(Box::new(DynamicValue::Record(fields))),
+            ),
+            other => other,
         }
     }
 
@@ -8458,16 +8532,6 @@ pub mod resources {
                         .handler
                         .invoke_bootstrap_dynamic(verb, uri.clone(), input, &self.bindings)
                         .await?;
-                    let result = if verb.to_string().starts_with("artist:resource/")
-                        && verb.function() == "read"
-                    {
-                        match result {
-                            DynamicValue::Variant(_, Some(value)) => *value,
-                            other => other,
-                        }
-                    } else {
-                        result
-                    };
                     return Ok(DynamicVerbResult {
                         verb: verb.clone(),
                         function: verb.function().to_owned(),
@@ -8508,16 +8572,6 @@ pub mod resources {
                         .handler
                         .invoke_bootstrap_dynamic(verb, uri.clone(), input, &self.bindings)
                         .await?;
-                    let result = if verb.to_string().starts_with("artist:resource/")
-                        && verb.function() == "read"
-                    {
-                        match result {
-                            DynamicValue::Variant(_, Some(value)) => *value,
-                            other => other,
-                        }
-                    } else {
-                        result
-                    };
                     return Ok(DynamicVerbResult {
                         verb: verb.clone(),
                         function: verb.function().to_owned(),

@@ -84,6 +84,7 @@ pub struct SessionVerbBindings {
     pub poll: VerbId,
     pub abort: VerbId,
     pub delete: VerbId,
+    pub grep: VerbId,
 }
 
 pub struct SessionResourceProvider {
@@ -195,6 +196,7 @@ impl DynamicClaimProvider for SessionResourceProvider {
             &self.bindings.poll,
             &self.bindings.abort,
             &self.bindings.delete,
+            &self.bindings.grep,
         ]
         .iter()
         .any(|candidate| *candidate == verb);
@@ -214,6 +216,7 @@ impl DynamicResourceProvider for SessionResourceProvider {
             (&self.bindings.poll, "poll"),
             (&self.bindings.abort, "abort"),
             (&self.bindings.delete, "delete"),
+            (&self.bindings.grep, "grep"),
         ]
         .into_iter()
         .map(|(identity, function)| {
@@ -235,7 +238,7 @@ impl DynamicResourceProvider for SessionResourceProvider {
     ) -> ResourceFuture<'a> {
         Box::pin(async move {
             let output = if verb == &self.bindings.read {
-                self.handler.dynamic_read(uri.clone()).await?
+                self.handler.dynamic_read(uri.clone(), &input).await?
             } else if verb == &self.bindings.write {
                 let content = if uri.path().ends_with("/inbox") {
                     session_content(&input)?
@@ -249,6 +252,10 @@ impl DynamicResourceProvider for SessionResourceProvider {
                 self.handler.dynamic_abort(uri.clone()).await?
             } else if verb == &self.bindings.delete {
                 self.handler.dynamic_delete(uri.clone()).await?
+            } else if verb == &self.bindings.grep {
+                self.handler
+                    .dynamic_grep(uri.clone(), dynamic_string_field(&input, "pattern")?)
+                    .await?
             } else {
                 return Err(KernelError::UnsupportedVerb {
                     verb: verb.to_string(),
@@ -265,12 +272,17 @@ impl DynamicResourceProvider for SessionResourceProvider {
 }
 
 impl SessionHandler {
-    async fn dynamic_read(&self, uri: ResourceUri) -> Result<DynamicValue, KernelError> {
+    async fn dynamic_read(
+        &self,
+        uri: ResourceUri,
+        input: &DynamicValue,
+    ) -> Result<DynamicValue, KernelError> {
         let session = self
             .lookup(&ResourceAddress::uri(session_root(&uri)?))
             .await?;
         let state = session.state.lock().await;
-        let text = session_read_window(&uri, &snapshot(&state, 0), None, None, None)?;
+        let (at, before, after) = read_options(input)?;
+        let text = session_read_window(&uri, &snapshot(&state, 0), at.as_ref(), before, after)?;
         Ok(session_text(text))
     }
 
@@ -402,6 +414,32 @@ impl SessionHandler {
             DynamicValue::ResourceUri(uri),
         )])))
     }
+    async fn dynamic_grep(
+        &self,
+        uri: ResourceUri,
+        pattern: String,
+    ) -> Result<DynamicValue, KernelError> {
+        let session = self
+            .lookup(&ResourceAddress::uri(session_root(&uri)?))
+            .await?;
+        let state = session.state.lock().await;
+        let text = session_text_record(AnchoredText {
+            uri: uri.clone(),
+            lines: session_lines(&snapshot(&state, 0)),
+        });
+        let regex = regex::Regex::new(&pattern).map_err(|error| KernelError::InvalidPattern {
+            message: error.to_string(),
+        })?;
+        let matches = if regex.is_match(&text.to_lossless_string()) {
+            vec![text]
+        } else {
+            Vec::new()
+        };
+        Ok(DynamicValue::Record(BTreeMap::from([(
+            "matches".into(),
+            DynamicValue::List(matches),
+        )])))
+    }
 }
 
 fn session_root(uri: &ResourceUri) -> Result<ResourceUri, KernelError> {
@@ -428,6 +466,84 @@ fn session_content(input: &DynamicValue) -> Result<String, KernelError> {
         },
         _ => Err(KernelError::InvalidRequest {
             message: "session inbox requires a content string".to_owned(),
+        }),
+    }
+}
+
+fn dynamic_string_field(input: &DynamicValue, name: &str) -> Result<String, KernelError> {
+    let DynamicValue::Record(fields) = input else {
+        return Err(KernelError::InvalidRequest {
+            message: "session input must be a record".into(),
+        });
+    };
+    match fields.get(name) {
+        Some(DynamicValue::String(value)) => Ok(value.clone()),
+        _ => Err(KernelError::InvalidRequest {
+            message: format!("session field {name} must be a string"),
+        }),
+    }
+}
+
+fn read_options(
+    input: &DynamicValue,
+) -> Result<(Option<crate::Position>, Option<u32>, Option<u32>), KernelError> {
+    let DynamicValue::Record(fields) = input else {
+        return Ok((None, None, None));
+    };
+    let at = match fields.get("at") {
+        None | Some(DynamicValue::Option(None)) => Ok(None),
+        Some(DynamicValue::Option(Some(value))) => position_value(value),
+        Some(value) => position_value(value),
+    }?;
+    let number = |name: &str| -> Result<Option<u32>, KernelError> {
+        match fields.get(name) {
+            None | Some(DynamicValue::Option(None)) => Ok(None),
+            Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+                DynamicValue::U32(v) => Ok(Some(*v)),
+                DynamicValue::U64(v) if *v <= u32::MAX as u64 => Ok(Some(*v as u32)),
+                _ => Err(KernelError::InvalidRequest {
+                    message: format!("read {name} must be u32"),
+                }),
+            },
+            Some(DynamicValue::U32(v)) => Ok(Some(*v)),
+            Some(DynamicValue::U64(v)) if *v <= u32::MAX as u64 => Ok(Some(*v as u32)),
+            _ => Err(KernelError::InvalidRequest {
+                message: format!("read {name} must be u32"),
+            }),
+        }
+    };
+    Ok((at, number("before")?, number("after")?))
+}
+
+fn position_value(value: &DynamicValue) -> Result<Option<crate::Position>, KernelError> {
+    match value {
+        DynamicValue::Variant(name, payload) => match (name.as_str(), payload.as_deref()) {
+            ("top", None) => Ok(Some(crate::Position::Top)),
+            ("bottom", None) => Ok(Some(crate::Position::Bottom)),
+            ("at", Some(DynamicValue::String(anchor))) => {
+                Ok(Some(crate::Position::At(crate::Anchor::from_tokens(
+                    anchor
+                        .trim_start_matches('#')
+                        .split('.')
+                        .map(str::to_owned)
+                        .collect(),
+                ))))
+            }
+            _ => Err(KernelError::InvalidRequest {
+                message: "invalid read position".into(),
+            }),
+        },
+        DynamicValue::String(value) if value == "top" => Ok(Some(crate::Position::Top)),
+        DynamicValue::String(value) if value == "bottom" => Ok(Some(crate::Position::Bottom)),
+        DynamicValue::String(value) => Ok(Some(crate::Position::At(crate::Anchor::from_tokens(
+            value
+                .trim_start_matches('#')
+                .split('.')
+                .map(str::to_owned)
+                .collect(),
+        )))),
+        _ => Err(KernelError::InvalidRequest {
+            message: "invalid read position".into(),
         }),
     }
 }
@@ -492,19 +608,12 @@ fn session_line(line: AnchoredLine) -> DynamicValue {
     DynamicValue::Record(BTreeMap::from([
         (
             "anchor".to_owned(),
-            DynamicValue::List(
-                line.anchor
-                    .tokens()
-                    .iter()
-                    .cloned()
-                    .map(DynamicValue::String)
-                    .collect(),
-            ),
+            DynamicValue::String(line.anchor.to_string()),
         ),
         ("text".to_owned(), DynamicValue::String(line.text)),
         (
             "ending".to_owned(),
-            DynamicValue::String(format!("{:?}", line.ending).to_lowercase()),
+            DynamicValue::Enum(format!("{:?}", line.ending).to_lowercase()),
         ),
     ]))
 }

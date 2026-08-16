@@ -1559,3 +1559,21 @@ The latest audit is now incorporated into the implementation work. The repair co
 - Published component metadata is retained as immutable generation data and historical generations are garbage-collected once no live turn lease retains them.
 
 The remaining verification step is intentionally deferred until the complete repair is written: run formatting, diff checks, the workspace test/check suite, then commit and push the finished result.
+# Latest audit repair
+
+The current implementation now treats the advertised dynamic-tool catalog as
+an immutable lease: each published tool definition carries its published
+generation object, the AgentRun pins that object in its invocation scope, and
+generation collection retains it until the lease is gone. Resource batch
+dispatch preserves the host and per-request scopes, and the universal batch
+route validates each item against the exact resolved verb lease before and
+after provider execution.
+
+Provider publication and execution use canonical universal request/result
+shapes. Filesystem, repository, session, process, and invocation text outputs
+use canonical anchored lines and line endings; process execution converts
+claimed `file://` resources back to operating-system paths. Read windows are
+applied at the provider boundary, and readable live resources expose grep.
+Catalog publication is cached as one immutable snapshot for model reads, so a
+model turn keeps using the catalog it was given while a later generation is
+prepared and published.

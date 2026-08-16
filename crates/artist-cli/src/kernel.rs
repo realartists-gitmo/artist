@@ -45,6 +45,7 @@ pub async fn build(root: &Path) -> Result<Kernel> {
             poll: native_verb("session", "poll"),
             abort: native_verb("session", "abort"),
             delete: native_verb("session", "delete"),
+            grep: native_verb("session", "grep"),
         },
     )))?;
     kernel.register_dynamic_resource_provider(Arc::new(RepositoryResourceProvider::new(

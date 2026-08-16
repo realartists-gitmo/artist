@@ -790,16 +790,24 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         },
                         _ => None,
                     };
+                    let matcher = pattern
+                        .as_deref()
+                        .map(regex::Regex::new)
+                        .transpose()
+                        .map_err(|error| KernelError::InvalidPattern {
+                            message: error.to_string(),
+                        })?;
                     let from = poll_cursor(&input);
                     loop {
                         let invocation = self.store.get(uri)?;
                         let revision = channel_revision(&invocation, channel);
                         let changed = from.is_some_and(|from| revision > from);
                         let eligible = from.is_none() || changed;
+                        let content = channel_content(&invocation, channel);
                         let matched = eligible
-                            && pattern.as_ref().is_none_or(|pattern| {
-                                channel_content(&invocation, channel).contains(pattern)
-                            });
+                            && matcher
+                                .as_ref()
+                                .is_some_and(|matcher| matcher.is_match(&content));
                         let reason = if pattern.is_some() && matched {
                             "matched"
                         } else if matches!(invocation.status, InvocationStatus::Running) {
@@ -808,7 +816,7 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                             "terminated"
                         };
                         let snapshot = poll_output(&invocation, channel, reason);
-                        if (changed || pattern.is_some()) && matched {
+                        if changed && (pattern.is_none() || matched) {
                             break snapshot;
                         }
                         if !matches!(invocation.status, InvocationStatus::Running) {
@@ -825,7 +833,7 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         // event, even while the logical invocation remains
                         // running. Do not turn the channel poll into a
                         // status-only wait.
-                        if changed && matched && channel != "status" {
+                        if changed && (pattern.is_none() || matched) && channel != "status" {
                             break snapshot;
                         }
                     }

@@ -613,7 +613,7 @@ impl DynamicResourceProvider for RepositoryResourceProvider {
     ) -> ResourceFuture<'a> {
         Box::pin(async move {
             let output = if verb == &self.bindings.read {
-                self.handler.dynamic_read(uri.clone())?
+                self.handler.dynamic_read(uri.clone(), &input)?
             } else if verb == &self.bindings.find {
                 self.handler
                     .dynamic_find(uri.clone(), repository_string_field(&input, "query")?)?
@@ -636,7 +636,11 @@ impl DynamicResourceProvider for RepositoryResourceProvider {
 }
 
 impl RepositoryHandler {
-    fn dynamic_read(&self, uri: ResourceUri) -> Result<DynamicValue, KernelError> {
+    fn dynamic_read(
+        &self,
+        uri: ResourceUri,
+        input: &DynamicValue,
+    ) -> Result<DynamicValue, KernelError> {
         let target = ResourceAddress::uri(uri.clone());
         let (file, suffix) = self.file_and_suffix(&target).unwrap_or_else(|_| {
             (
@@ -655,10 +659,14 @@ impl RepositoryHandler {
             })?
         };
         let text = repository_anchored_text(uri, &file, &source, &self.structure)?;
+        let (at, before, after) = repository_read_options(input)?;
         Ok(DynamicValue::Variant(
             "lines".to_owned(),
             Some(Box::new(repository_text(select_repository_read_window(
-                text, None, None, None,
+                text,
+                at.as_ref(),
+                before,
+                after,
             )?))),
         ))
     }
@@ -728,19 +736,12 @@ fn repository_line(line: AnchoredLine) -> DynamicValue {
     DynamicValue::Record(BTreeMap::from([
         (
             "anchor".to_owned(),
-            DynamicValue::List(
-                line.anchor
-                    .tokens()
-                    .iter()
-                    .cloned()
-                    .map(DynamicValue::String)
-                    .collect(),
-            ),
+            DynamicValue::String(line.anchor.to_string()),
         ),
         ("text".to_owned(), DynamicValue::String(line.text)),
         (
             "ending".to_owned(),
-            DynamicValue::String(format!("{:?}", line.ending).to_lowercase()),
+            DynamicValue::Enum(format!("{:?}", line.ending).to_lowercase()),
         ),
     ]))
 }
@@ -802,6 +803,67 @@ fn select_repository_read_window(
     };
     text.lines = text.lines[start..end].to_vec();
     Ok(text)
+}
+
+fn repository_read_options(
+    input: &DynamicValue,
+) -> Result<(Option<crate::Position>, Option<u32>, Option<u32>), KernelError> {
+    let DynamicValue::Record(fields) = input else {
+        return Ok((None, None, None));
+    };
+    let at = match fields.get("at") {
+        None | Some(DynamicValue::Option(None)) => None,
+        Some(DynamicValue::Option(Some(value))) => Some(value.as_ref()),
+        Some(value) => Some(value),
+    };
+    let at = at
+        .map(|value| match value {
+            DynamicValue::Variant(name, payload) => match (name.as_str(), payload.as_deref()) {
+                ("top", None) => Ok(crate::Position::Top),
+                ("bottom", None) => Ok(crate::Position::Bottom),
+                ("at", Some(DynamicValue::String(anchor))) => {
+                    Ok(crate::Position::At(crate::Anchor::from_tokens(
+                        anchor
+                            .trim_start_matches('#')
+                            .split('.')
+                            .map(str::to_owned)
+                            .collect(),
+                    )))
+                }
+                _ => Err(KernelError::InvalidRequest {
+                    message: "invalid read position".into(),
+                }),
+            },
+            DynamicValue::String(value) if value == "top" => Ok(crate::Position::Top),
+            DynamicValue::String(value) if value == "bottom" => Ok(crate::Position::Bottom),
+            DynamicValue::String(value) => Ok(crate::Position::At(crate::Anchor::from_tokens(
+                value
+                    .trim_start_matches('#')
+                    .split('.')
+                    .map(str::to_owned)
+                    .collect(),
+            ))),
+            _ => Err(KernelError::InvalidRequest {
+                message: "invalid read position".into(),
+            }),
+        })
+        .transpose()?;
+    let number = |name: &str| match fields.get(name) {
+        None | Some(DynamicValue::Option(None)) => Ok(None),
+        Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+            DynamicValue::U32(v) => Ok(Some(*v)),
+            DynamicValue::U64(v) if *v <= u32::MAX as u64 => Ok(Some(*v as u32)),
+            _ => Err(KernelError::InvalidRequest {
+                message: format!("read {name} must be u32"),
+            }),
+        },
+        Some(DynamicValue::U32(v)) => Ok(Some(*v)),
+        Some(DynamicValue::U64(v)) if *v <= u32::MAX as u64 => Ok(Some(*v as u32)),
+        _ => Err(KernelError::InvalidRequest {
+            message: format!("read {name} must be u32"),
+        }),
+    };
+    Ok((at, number("before")?, number("after")?))
 }
 
 impl RepositoryHandler {

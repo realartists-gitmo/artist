@@ -470,6 +470,17 @@ impl InvocationScope {
             .insert(key.into(), handle);
     }
 
+    pub fn pin_erased_generation_handle(
+        &self,
+        key: impl Into<String>,
+        handle: Arc<dyn Any + Send + Sync>,
+    ) {
+        self.generation_handles
+            .lock()
+            .unwrap()
+            .insert(key.into(), handle);
+    }
+
     /// Recover a previously pinned handler-owned generation.
     pub fn generation_handle<T>(&self, key: &str) -> Option<Arc<T>>
     where

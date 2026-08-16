@@ -323,6 +323,7 @@ pub async fn execute_sibling_calls(
     cancellation: tokio_util::sync::CancellationToken,
     catalog: Vec<artist_kernel::ToolDefinition>,
 ) -> Vec<(String, Result<(Value, bool), String>)> {
+    let advertised = catalog.clone();
     let definitions = catalog
         .into_iter()
         .map(|definition| (definition.name.clone(), definition))
@@ -350,6 +351,14 @@ pub async fn execute_sibling_calls(
         }
     }
     let scope = artist_kernel::InvocationScope::with_cancellation(context, cancellation);
+    for definition in &advertised {
+        if let Some(lease) = &definition.lease {
+            scope.pin_erased_generation_handle(
+                format!("advertised-tool:{}", definition.name),
+                lease.clone(),
+            );
+        }
+    }
 
     // Same-resource mutations are one transaction, regardless of tool name.
     // This is deliberately resolved before the ordinary per-tool groups so
@@ -537,6 +546,7 @@ pub async fn named_tools(
             let expected = definition.input_type.clone();
             let package = definition.package.clone();
             let generation = definition.generation;
+            let lease = definition.lease.clone();
             let callback_kernel = kernel.clone();
             let callback_context = context.clone();
             let callback_cancellation = cancellation.clone();
@@ -550,6 +560,7 @@ pub async fn named_tools(
                     let expected = expected.clone();
                     let package = package.clone();
                     let cancellation = callback_cancellation.clone();
+                    let lease = lease.clone();
                     let context = tool_context
                         .get::<ArtistToolContext>()
                         .map(|value| value.0.clone())
@@ -559,6 +570,12 @@ pub async fn named_tools(
                             context,
                             cancellation,
                         );
+                        if let Some(lease) = lease {
+                            scope.pin_erased_generation_handle(
+                                format!("advertised-tool:{name}"),
+                                lease,
+                            );
+                        }
                         if let (Some(package), Some(generation)) = (package, generation) {
                             scope.snapshot_generation(&package, generation);
                         }

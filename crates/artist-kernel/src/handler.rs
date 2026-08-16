@@ -1,7 +1,7 @@
 use crate::{InvocationContext, InvocationScope, KernelError};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -208,7 +208,7 @@ pub struct ResourceCatalogDoc {
     pub query: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
@@ -218,6 +218,36 @@ pub struct ToolDefinition {
     /// providers leave these unset.
     pub package: Option<String>,
     pub generation: Option<u64>,
+    /// The immutable published generation advertised for this slot. Keeping
+    /// the erased handle in the catalog makes the catalog itself the lease;
+    /// numeric metadata alone is not sufficient for hot-swap GC.
+    pub lease: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for ToolDefinition {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolDefinition")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("parameters", &self.parameters)
+            .field("input_type", &self.input_type)
+            .field("package", &self.package)
+            .field("generation", &self.generation)
+            .field("lease", &self.lease.as_ref().map(|_| "published"))
+            .finish()
+    }
+}
+
+impl PartialEq for ToolDefinition {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.description == other.description
+            && self.parameters == other.parameters
+            && self.input_type == other.input_type
+            && self.package == other.package
+            && self.generation == other.generation
+    }
 }
 
 /// The shared kernel surface available to handlers for nested calls.

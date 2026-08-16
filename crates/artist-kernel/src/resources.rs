@@ -55,10 +55,28 @@ pub trait DynamicResourceProvider: DynamicClaimProvider + Send + Sync {
         &'a self,
         verb: &'a VerbId,
         requests: Vec<ResourceRequest>,
-        _host: crate::KernelHandle,
+        host: crate::KernelHandle,
         scope: crate::InvocationScope,
     ) -> ResourceBatchFuture<'a> {
-        self.invoke_batch(verb, requests, scope)
+        Box::pin(async move {
+            join_all(requests.into_iter().map(|request| {
+                let request_scope = request.scope.unwrap_or_else(|| scope.child());
+                let uri = request.uri;
+                let input = request.input;
+                let host = host.clone();
+                async move {
+                    if request_scope.cancellation.is_cancelled() {
+                        Err(KernelError::Aborted {
+                            message: "resource batch cancelled".to_owned(),
+                        })
+                    } else {
+                        self.invoke_with_host(verb, &uri, input, host, request_scope)
+                            .await
+                    }
+                }
+            }))
+            .await
+        })
     }
 
     /// Invoke a resource after the caller has pinned the active verb

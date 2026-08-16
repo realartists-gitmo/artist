@@ -93,10 +93,14 @@ impl ProcessVerbBindings {
                 ]),
             ),
         ]));
-        let read_output = DynamicType::Record(BTreeMap::from([
+        let read_output_record = DynamicType::Record(BTreeMap::from([
             ("uri".to_owned(), uri.clone()),
             ("lines".to_owned(), DynamicType::List(Box::new(line))),
         ]));
+        let read_output = DynamicType::Variant(BTreeMap::from([(
+            "lines".to_owned(),
+            Some(read_output_record.clone()),
+        )]));
         let poll_input = DynamicType::Record(BTreeMap::from([
             ("uri".to_owned(), uri.clone()),
             (
@@ -118,7 +122,7 @@ impl ProcessVerbBindings {
         ]));
         let poll_output = DynamicType::Record(BTreeMap::from([
             ("uri".to_owned(), uri.clone()),
-            ("text".to_owned(), read_output.clone()),
+            ("text".to_owned(), read_output_record.clone()),
             (
                 "reason".to_owned(),
                 DynamicType::Enum(vec![
@@ -135,7 +139,7 @@ impl ProcessVerbBindings {
         ]));
         let grep_output = DynamicType::Record(BTreeMap::from([(
             "matches".to_owned(),
-            DynamicType::List(Box::new(read_output.clone())),
+            DynamicType::List(Box::new(read_output_record.clone())),
         )]));
         vec![
             VerbDefinition::new(self.run.clone(), "run", "run", "Run a direct executable")
@@ -534,12 +538,13 @@ impl DynamicResourceProvider for ProcessResourceProvider {
                 Self::poll_value(&manager, uri, &input).await?
             } else if verb == &bindings.read {
                 if uri.path().ends_with("/stdout") || uri.path().ends_with("/stderr") {
-                    process_text_bytes(
+                    process_read_bytes(
                         uri,
                         &manager.output_bytes(
                             uri.to_string().as_str(),
                             uri.path().ends_with("/stderr"),
                         )?,
+                        &input,
                         0,
                     )
                 } else {
@@ -827,6 +832,73 @@ fn process_text_bytes(uri: &ResourceUri, bytes: &[u8], base: u64) -> DynamicValu
             DynamicValue::List(process_lines_at_bytes(bytes, base)),
         ),
     ]))
+}
+
+fn process_read_bytes(
+    uri: &ResourceUri,
+    bytes: &[u8],
+    input: &DynamicValue,
+    base: u64,
+) -> DynamicValue {
+    let lines = process_lines_at_bytes(bytes, base);
+    let (at, before, after) = process_read_options(input);
+    let index = match at.as_deref() { Some("bottom") => lines.len(), Some("top") | None => 0, Some(anchor) => lines.iter().position(|line| matches!(line, DynamicValue::Record(fields) if fields.get("anchor") == Some(&DynamicValue::String(anchor.to_owned())))).unwrap_or(0) };
+    let (start, end) = if at.as_deref() == Some("bottom") {
+        (index.saturating_sub(before.unwrap_or(200) as usize), index)
+    } else {
+        (
+            index.saturating_sub(before.unwrap_or(0) as usize),
+            (index + after.unwrap_or(200) as usize + 1).min(lines.len()),
+        )
+    };
+    DynamicValue::Variant(
+        "lines".to_owned(),
+        Some(Box::new(DynamicValue::Record(BTreeMap::from([
+            ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+            (
+                "lines".to_owned(),
+                DynamicValue::List(lines[start..end].to_vec()),
+            ),
+        ])))),
+    )
+}
+
+fn process_read_options(input: &DynamicValue) -> (Option<String>, Option<u32>, Option<u32>) {
+    let DynamicValue::Record(fields) = input else {
+        return (None, None, None);
+    };
+    let at = match fields.get("at") {
+        Some(DynamicValue::Option(Some(value))) => position_name(value),
+        Some(value) => position_name(value),
+        _ => None,
+    };
+    let number = |name: &str| match fields.get(name) {
+        Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+            DynamicValue::U32(v) => Some(*v),
+            DynamicValue::U64(v) if *v <= u32::MAX as u64 => Some(*v as u32),
+            _ => None,
+        },
+        Some(DynamicValue::U32(v)) => Some(*v),
+        Some(DynamicValue::U64(v)) if *v <= u32::MAX as u64 => Some(*v as u32),
+        _ => None,
+    };
+    (at, number("before"), number("after"))
+}
+
+fn position_name(value: &DynamicValue) -> Option<String> {
+    match value {
+        DynamicValue::Variant(name, Some(value)) if name == "at" => match value.as_ref() {
+            DynamicValue::String(anchor) => Some(format!("#{}", anchor.trim_start_matches('#'))),
+            _ => None,
+        },
+        DynamicValue::Variant(name, None) => Some(name.clone()),
+        DynamicValue::String(value) => Some(if value.starts_with('#') {
+            value.clone()
+        } else {
+            value.to_owned()
+        }),
+        _ => None,
+    }
 }
 
 fn process_lines(text: &str) -> Vec<DynamicValue> {

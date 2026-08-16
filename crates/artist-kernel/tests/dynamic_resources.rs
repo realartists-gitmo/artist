@@ -167,6 +167,7 @@ async fn session_provider_executes_lifecycle_through_dynamic_resource_registry()
                 poll: poll.clone(),
                 abort: VerbId::new("artist:session/abort@1.0.0").unwrap(),
                 delete: VerbId::new("artist:session/delete@1.0.0").unwrap(),
+                grep: VerbId::new("artist:session/grep@1.0.0").unwrap(),
             },
         )))
         .unwrap();

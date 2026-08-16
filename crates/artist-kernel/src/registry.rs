@@ -240,11 +240,6 @@ impl Kernel {
                 .execute_transaction_request(transaction, verb, uri, input, scope)
                 .await
                 .map(|result| vec![result])?;
-            for value in &values {
-                self.inner
-                    .verbs
-                    .validate_result_for_lease(&call, &value.result, &lease)?;
-            }
             return Ok(values);
         }
         let result = self
@@ -291,6 +286,19 @@ impl Kernel {
             .await
     }
 
+    pub async fn invoke_dynamic_resource_with_scope(
+        &self,
+        verb: crate::VerbId,
+        uri: crate::ResourceUri,
+        input: crate::DynamicValue,
+        scope: InvocationScope,
+    ) -> Result<crate::DynamicVerbResult, KernelError> {
+        self.inner
+            .resources
+            .invoke_with_host(&verb, &uri, input, self.handle(), scope)
+            .await
+    }
+
     pub async fn invoke_mixed_dynamic_resources(
         &self,
         requests: Vec<crate::MixedResourceRequest>,
@@ -308,10 +316,135 @@ impl Kernel {
         requests: Vec<crate::ResourceRequest>,
         scope: InvocationScope,
     ) -> Vec<Result<crate::DynamicVerbResult, KernelError>> {
-        self.inner
+        let lease = match self.inner.verbs.acquire(&verb) {
+            Ok(lease) => lease,
+            Err(error) => return requests.into_iter().map(|_| Err(error.clone())).collect(),
+        };
+        let mut valid = Vec::with_capacity(requests.len());
+        let mut results = vec![None; requests.len()];
+        for (index, request) in requests.into_iter().enumerate() {
+            let call = crate::DynamicVerbCall {
+                verb: verb.clone(),
+                function: verb.function().to_owned(),
+                input: request.input.clone(),
+            };
+            if let Err(error) = self.inner.verbs.validate_call(&call) {
+                results[index] = Some(Err(error));
+            } else {
+                valid.push((index, request));
+            }
+        }
+        let invoked = self
+            .inner
             .resources
-            .invoke_batch_with_host(&verb, requests, self.handle(), scope)
-            .await
+            .invoke_batch_with_host(
+                &verb,
+                valid.iter().map(|(_, request)| request.clone()).collect(),
+                self.handle(),
+                scope,
+            )
+            .await;
+        for ((index, request), result) in valid.into_iter().zip(invoked) {
+            results[index] = Some(
+                result
+                    .map(|mut result| {
+                        result.output = Self::canonicalize_resource_output(&verb, result.output);
+                        result
+                    })
+                    .and_then(|result| {
+                        self.inner.verbs.validate_result_for_lease(
+                            &crate::DynamicVerbCall {
+                                verb: verb.clone(),
+                                function: verb.function().to_owned(),
+                                input: request.input,
+                            },
+                            &result,
+                            &lease,
+                        )?;
+                        Ok(result)
+                    }),
+            );
+        }
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| {
+                    Err(KernelError::Handler {
+                        message: "resource batch result missing".to_owned(),
+                    })
+                })
+            })
+            .collect()
+    }
+
+    fn canonicalize_resource_output(
+        verb: &crate::VerbId,
+        value: crate::DynamicValue,
+    ) -> crate::DynamicValue {
+        if verb.function() != "read" {
+            return value;
+        }
+        match value {
+            crate::DynamicValue::Variant(name, Some(inner)) if name == "lines" => {
+                crate::DynamicValue::Variant(
+                    name,
+                    Some(Box::new(match *inner {
+                        crate::DynamicValue::Record(fields) => {
+                            Self::canonicalize_text_record(fields)
+                        }
+                        other => other,
+                    })),
+                )
+            }
+            crate::DynamicValue::Record(fields) if fields.contains_key("lines") => {
+                crate::DynamicValue::Variant(
+                    "lines".to_owned(),
+                    Some(Box::new(Self::canonicalize_text_record(fields))),
+                )
+            }
+            crate::DynamicValue::Record(fields) if fields.contains_key("entries") => {
+                crate::DynamicValue::Variant(
+                    "entries".to_owned(),
+                    Some(Box::new(crate::DynamicValue::Record(fields))),
+                )
+            }
+            other => other,
+        }
+    }
+
+    fn canonicalize_text_record(
+        mut fields: std::collections::BTreeMap<String, crate::DynamicValue>,
+    ) -> crate::DynamicValue {
+        if let Some(crate::DynamicValue::List(lines)) = fields.remove("lines") {
+            let lines = lines
+                .into_iter()
+                .map(|line| match line {
+                    crate::DynamicValue::Record(mut line) => {
+                        if let Some(crate::DynamicValue::List(tokens)) = line.remove("anchor") {
+                            let anchor = tokens
+                                .into_iter()
+                                .filter_map(|token| match token {
+                                    crate::DynamicValue::String(value) => Some(value),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(".");
+                            line.insert(
+                                "anchor".to_owned(),
+                                crate::DynamicValue::String(format!("#{anchor}")),
+                            );
+                        }
+                        if let Some(crate::DynamicValue::String(ending)) = line.remove("ending") {
+                            line.insert("ending".to_owned(), crate::DynamicValue::Enum(ending));
+                        }
+                        crate::DynamicValue::Record(line)
+                    }
+                    other => other,
+                })
+                .collect();
+            fields.insert("lines".to_owned(), crate::DynamicValue::List(lines));
+        }
+        crate::DynamicValue::Record(fields)
     }
 
     pub async fn execute_dynamic_resources(
@@ -874,7 +1007,9 @@ impl Kernel {
                             message: "resource dispatch cancelled".to_owned(),
                         });
                     }
-                    kernel.invoke_dynamic_resource(verb, uri, input).await
+                    kernel
+                        .invoke_dynamic_resource_with_scope(verb, uri, input, scope)
+                        .await
                 })
             }),
             Arc::new(move |verb, requests, scope| {
