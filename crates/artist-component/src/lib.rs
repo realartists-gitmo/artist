@@ -5145,14 +5145,25 @@ pub mod tools {
                 Ok(published) => published.clone(),
                 Err(_) => return Vec::new(),
             };
+            let generations = match self.published_generations.lock() {
+                Ok(generations) => generations.clone(),
+                Err(_) => return Vec::new(),
+            };
             published
                 .into_iter()
                 .filter_map(|(package, definition)| {
-                    let generation = self.registry.current_generation(&package)?;
-                    let input_type = definition.input_type.clone();
+                    let generation = generations
+                        .iter()
+                        .filter(|((candidate_package, _), candidate)| {
+                            candidate_package == &package && candidate.definition == definition
+                        })
+                        .max_by_key(|((_, generation), _)| *generation)
+                        .map(|((_, generation), _)| *generation)?;
+                    let published_generation = generations.get(&(package.clone(), generation))?;
+                    let input_type = published_generation.input_type.clone();
                     Some(ToolDefinition {
-                        name: definition.function.clone(),
-                        description: definition.description.clone(),
+                        name: published_generation.definition.function.clone(),
+                        description: published_generation.description.clone(),
                         parameters: input_type
                             .as_ref()
                             .map(dynamic_type_schema)

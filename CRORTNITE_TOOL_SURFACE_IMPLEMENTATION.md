@@ -1541,3 +1541,7 @@ Observer scopes use the original logical batch slot. Programmatic scalar and bat
 **Final audit closure.** The remaining boundary defects were repaired: single-item tool calls no longer double-wrap an already canonical `{requests: [...]}` input; the nested AST resource bridge maps raw provider read records into its WIT response variants; and the lower-level dynamic resource registry preserves its typed provider record while the universal WASM adapter performs the WIT lift. Provider publication is serialized so concurrent watcher/catalog refreshes cannot leave a current generation without its published immutable metadata.
 
 Final verification was rerun after these changes: `cargo fmt --all`, `git diff --check`, and `cargo test --workspace --all-features` all passed. The complete workspace test run passed all unit, integration, and doc-test targets. No GitHub CI status was used.
+
+**Continuation audit repair.** The model catalog now derives its package, generation, schema, description, and name from the matching immutable `PublishedToolGeneration`, rather than reading the registry's current generation separately. This closes the remaining advertised-generation/executed-generation split when a package is replaced while a turn is in flight. A final verification pass is required after this source change.
+
+The required final verification for this continuation is complete: formatting, `git diff --check`, and the full `cargo test --workspace --all-features` suite passed.
