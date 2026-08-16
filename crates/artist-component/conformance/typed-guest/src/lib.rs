@@ -154,6 +154,23 @@ fn read_response(
             exports::artist::tool::read::DirectoryResult { uri, entries },
         ));
     }
+    if success.get("entries").is_some() {
+        let uri = success
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(fallback_uri)
+            .to_owned();
+        let entries = success
+            .get("entries")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| error("read directory has no entries", Some(uri.clone())))?
+            .iter()
+            .map(|entry| entry.as_str().map(str::to_owned).ok_or_else(|| error("read directory entry is not a URI", Some(uri.clone()))))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(exports::artist::tool::read::ReadResponse::Directory(
+            exports::artist::tool::read::DirectoryResult { uri, entries },
+        ));
+    }
     Err(error(
         format!("read host output has unknown response variant: {success}"),
         Some(fallback_uri.to_owned()),
@@ -393,10 +410,11 @@ impl exports::artist::tool::find::Guest for TypedTool {
         }).collect::<Vec<_>>();
         let uris = requests.iter().map(|(uri, _)| uri.clone()).collect::<Vec<_>>();
         invoke_json_batch("find", requests).into_iter().zip(uris).map(|(output, root)| { output.and_then(|output| {
-                let uris = output.get("uris").and_then(serde_json::Value::as_array)
+                let values = output.get("uris").or_else(|| output.get("entries"))
+                    .and_then(serde_json::Value::as_array)
                     .ok_or_else(|| error("find response has no uris", Some(root.clone())))?
                     .iter().map(|uri| uri.as_str().map(str::to_owned).ok_or_else(|| error("find response has a non-uri", Some(root.clone())))).collect::<Result<Vec<_>, _>>()?;
-                Ok(exports::artist::tool::find::FindResponse { uris })
+                Ok(exports::artist::tool::find::FindResponse { uris: values })
             })
             })
             .collect()
@@ -518,7 +536,7 @@ macro_rules! uri_verb {
                 }).collect::<Vec<_>>();
                 let uris = requests.iter().map(|(uri, _)| uri.clone()).collect::<Vec<_>>();
                 invoke_json_batch(stringify!($module), requests).into_iter().zip(uris).map(|(output, uri)| output.and_then(|output| {
-                        let returned_uri = output.get("uri").and_then(serde_json::Value::as_str).ok_or_else(|| error("uri response has no uri", Some(uri.clone())))?;
+                        let returned_uri = output.get("uri").and_then(serde_json::Value::as_str).or_else(|| output.as_str()).unwrap_or(&uri);
                         Ok(exports::artist::tool::$module::UriResponse { uri: returned_uri.to_owned() })
                     })).collect()
             }

@@ -781,8 +781,8 @@ fn dynamic_to_json(value: artist_kernel::DynamicValue) -> Value {
         ),
         DynamicValue::Option(None) => Value::Null,
         DynamicValue::Option(Some(value)) => dynamic_to_json(*value),
-        DynamicValue::Result(Ok(value)) => dynamic_to_json(*value),
-        DynamicValue::Result(Err(value)) => dynamic_to_json(*value),
+        DynamicValue::Result(Ok(value)) => serde_json::json!({"ok": dynamic_to_json(*value)}),
+        DynamicValue::Result(Err(value)) => serde_json::json!({"err": dynamic_to_json(*value)}),
         DynamicValue::Enum(value) => Value::String(value),
         DynamicValue::Variant(name, None) => Value::String(name),
         DynamicValue::Variant(name, Some(value)) => {

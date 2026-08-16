@@ -61,15 +61,32 @@ impl ProcessVerbBindings {
             ),
             ("aborted".to_owned(), DynamicType::Bool),
         ]));
-        let output = DynamicType::Record(BTreeMap::from([
-            ("uri".to_owned(), uri.clone()),
+        let line = DynamicType::Record(BTreeMap::from([
+            ("anchor".to_owned(), DynamicType::String),
             ("text".to_owned(), DynamicType::String),
+            (
+                "ending".to_owned(),
+                DynamicType::Enum(vec![
+                    "lf".to_owned(),
+                    "crlf".to_owned(),
+                    "cr".to_owned(),
+                    "none".to_owned(),
+                ]),
+            ),
         ]));
-        let read_output = DynamicType::Variant(BTreeMap::from([
-            ("state".to_owned(), Some(snapshot.clone())),
-            ("output".to_owned(), Some(output)),
+        let read_output = DynamicType::Record(BTreeMap::from([
+            ("uri".to_owned(), uri.clone()),
+            ("lines".to_owned(), DynamicType::List(Box::new(line))),
         ]));
         let poll_input = DynamicType::Record(BTreeMap::from([
+            (
+                "from".to_owned(),
+                DynamicType::Option(Box::new(DynamicType::Variant(BTreeMap::from([
+                    ("top".to_owned(), None),
+                    ("bottom".to_owned(), None),
+                    ("at".to_owned(), Some(DynamicType::String)),
+                ])))),
+            ),
             (
                 "match".to_owned(),
                 DynamicType::Option(Box::new(DynamicType::String)),
@@ -476,27 +493,19 @@ impl DynamicResourceProvider for ProcessResourceProvider {
                 Self::poll_value(&manager, uri, &input).await?
             } else if verb == &bindings.read {
                 if uri.path().ends_with("/stdout") || uri.path().ends_with("/stderr") {
-                    DynamicValue::Variant(
-                        "output".to_owned(),
-                        Some(Box::new(DynamicValue::Record(BTreeMap::from([
-                            ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
-                            (
-                                "text".to_owned(),
-                                DynamicValue::String(manager.output(
-                                    uri.to_string().as_str(),
-                                    uri.path().ends_with("/stderr"),
-                                )?),
-                            ),
-                        ])))),
+                    process_text_value(
+                        uri,
+                        manager
+                            .output(uri.to_string().as_str(), uri.path().ends_with("/stderr"))?,
                     )
                 } else {
                     let snapshot = manager.snapshot(uri.to_string().as_str())?;
-                    DynamicValue::Variant(
-                        "state".to_owned(),
-                        Some(Box::new(Self::value(
-                            ResourceUri::parse(&snapshot.uri)?,
-                            snapshot,
-                        ))),
+                    process_text_value(
+                        uri,
+                        format!(
+                            "running={} exit-code={:?} aborted={}",
+                            snapshot.running, snapshot.exit_code, snapshot.aborted
+                        ),
                     )
                 }
             } else if verb == &bindings.abort {
@@ -549,8 +558,8 @@ impl ProcessResourceProvider {
             } else {
                 manager.output(uri.to_string().as_str(), false)?
             };
-            let line_count = text.lines().count() as u64;
-            let changed = from.is_none_or(|from| line_count > from);
+            let revision = text.len() as u64;
+            let changed = revision > from.unwrap_or(0);
             if matcher
                 .as_ref()
                 .is_some_and(|matcher| matcher.is_match(&text))
@@ -609,6 +618,30 @@ fn process_poll_result(uri: &ResourceUri, text: String, reason: &str) -> Dynamic
             ])),
         ),
         ("reason".to_owned(), DynamicValue::Enum(reason.to_owned())),
+    ]))
+}
+
+fn process_text_value(uri: &ResourceUri, text: String) -> DynamicValue {
+    DynamicValue::Record(BTreeMap::from([
+        ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+        (
+            "lines".to_owned(),
+            DynamicValue::List(
+                text.lines()
+                    .enumerate()
+                    .map(|(index, line)| {
+                        DynamicValue::Record(BTreeMap::from([
+                            (
+                                "anchor".to_owned(),
+                                DynamicValue::String(format!("#{}", index + 1)),
+                            ),
+                            ("text".to_owned(), DynamicValue::String(line.to_owned())),
+                            ("ending".to_owned(), DynamicValue::Enum("lf".to_owned())),
+                        ]))
+                    })
+                    .collect(),
+            ),
+        ),
     ]))
 }
 

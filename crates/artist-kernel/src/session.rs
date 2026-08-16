@@ -323,10 +323,11 @@ impl SessionHandler {
                 message: error.to_string(),
             })?;
         let timeout = timeout_ms.map(std::time::Duration::from_millis);
+        let started = std::time::Instant::now();
         loop {
             let notified = session.changed.notified();
             let state = session.state.lock().await;
-            let since = from.unwrap_or(0);
+            let since = from.map(|cursor| cursor.saturating_add(1)).unwrap_or(0);
             let accumulated = state
                 .events
                 .iter()
@@ -355,7 +356,8 @@ impl SessionHandler {
             }
             drop(state);
             if let Some(timeout) = timeout {
-                if tokio::time::timeout(timeout, notified).await.is_err() {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() || tokio::time::timeout(remaining, notified).await.is_err() {
                     let state = session.state.lock().await;
                     let text = anchored_session_window(&uri, &snapshot(&state, since), None, None)?;
                     return Ok(DynamicValue::Record(BTreeMap::from([

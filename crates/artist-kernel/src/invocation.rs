@@ -331,35 +331,11 @@ impl InvocationResourceProvider {
 
     fn output(invocation: &Invocation, channel: &str) -> DynamicValue {
         match channel {
-            "stdin" => invocation.stdin.clone(),
-            "stdout" => invocation
-                .stdout
-                .clone()
-                .map_or(DynamicValue::Option(None), |result| {
-                    DynamicValue::Result(
-                        result
-                            .map(Box::new)
-                            .map_err(|error| Box::new(kernel_error_value(&error))),
-                    )
-                }),
-            "stderr" => DynamicValue::String(invocation.stderr.clone()),
-            "stdobs" => DynamicValue::String(invocation.stdobs.clone()),
-            "status" => {
-                let (state, code) = match &invocation.status {
-                    InvocationStatus::Running => ("running", None),
-                    InvocationStatus::Completed(code) => ("completed", Some(*code)),
-                    InvocationStatus::Aborted => ("aborted", None),
-                };
-                DynamicValue::Record(BTreeMap::from([
-                    ("state".to_owned(), DynamicValue::Enum(state.to_owned())),
-                    (
-                        "code".to_owned(),
-                        code.map_or(DynamicValue::Option(None), |code| {
-                            DynamicValue::Option(Some(Box::new(DynamicValue::S32(code))))
-                        }),
-                    ),
-                ]))
-            }
+            "stdin" => channel_text(invocation, channel, format!("{:?}", invocation.stdin)),
+            "stdout" => channel_text(invocation, channel, format!("{:?}", invocation.stdout)),
+            "stderr" => channel_text(invocation, channel, invocation.stderr.clone()),
+            "stdobs" => channel_text(invocation, channel, invocation.stdobs.clone()),
+            "status" => channel_text(invocation, channel, format!("{:?}", invocation.status)),
             "root" => DynamicValue::Record(BTreeMap::from([(
                 "entries".to_owned(),
                 DynamicValue::List(vec![DynamicValue::ResourceUri(invocation.uri.clone())]),
@@ -387,6 +363,26 @@ impl InvocationResourceProvider {
             _ => None,
         }
     }
+}
+
+fn channel_text(invocation: &Invocation, channel: &str, text: String) -> DynamicValue {
+    DynamicValue::Record(BTreeMap::from([
+        (
+            "uri".to_owned(),
+            DynamicValue::ResourceUri(invocation.uri.clone()),
+        ),
+        (
+            "lines".to_owned(),
+            DynamicValue::List(vec![DynamicValue::Record(BTreeMap::from([
+                (
+                    "anchor".to_owned(),
+                    DynamicValue::String(format!("#{}", channel_revision(invocation, channel))),
+                ),
+                ("text".to_owned(), DynamicValue::String(text)),
+                ("ending".to_owned(), DynamicValue::Enum("none".to_owned())),
+            ]))]),
+        ),
+    ]))
 }
 
 fn poll_cursor(input: &DynamicValue) -> Option<u64> {

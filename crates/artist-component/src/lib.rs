@@ -1949,103 +1949,105 @@ async fn invoke_resource_host_batch(
         .await;
     }
     let mut parsed = Vec::with_capacity(uris.len());
-    for (uri, input) in uris.iter().zip(inputs) {
+    let mut outputs: Vec<Option<Result<String, KernelError>>> =
+        (0..uris.len()).map(|_| None).collect();
+    for (index, (uri, input)) in uris.iter().zip(inputs).enumerate() {
         let resource_uri = match ResourceUri::parse(uri) {
             Ok(uri) => uri,
             Err(error) => {
-                return Ok(uris
-                    .clone()
-                    .into_iter()
-                    .map(|uri| {
-                        serde_json::to_string(&serde_json::json!({
-                            "err": tools::kernel_error_to_json_host(error.clone(), &uri)
-                        }))
-                        .map_err(|encode| KernelError::Handler {
-                            message: encode.to_string(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?);
+                outputs[index] = Some(Ok(serde_json::json!({
+                    "err": tools::kernel_error_to_json_host(error, uri)
+                })
+                .to_string()));
+                continue;
             }
         };
-        let mut value: serde_json::Value =
-            serde_json::from_str(&input).map_err(|error| KernelError::InvalidRequest {
-                message: format!("invalid resource host input: {error}"),
-            })?;
+        let mut value: serde_json::Value = match serde_json::from_str(&input) {
+            Ok(value) => value,
+            Err(error) => {
+                outputs[index] = Some(Ok(serde_json::json!({
+                    "err": tools::kernel_error_to_json_host(
+                        KernelError::InvalidRequest {
+                            message: format!("invalid resource host input: {error}"),
+                        },
+                        uri,
+                    )
+                })
+                .to_string()));
+                continue;
+            }
+        };
         if let serde_json::Value::Object(fields) = &mut value {
             fields.insert("uri".to_owned(), serde_json::Value::String(uri.clone()));
         }
         let input_type = match kernel.universal_input_type(verb.clone(), resource_uri.clone()) {
             Ok(input_type) => input_type,
             Err(error) => {
-                return Ok(uris
-                    .clone()
-                    .into_iter()
-                    .map(|uri| {
-                        serde_json::to_string(&serde_json::json!({
-                            "err": tools::kernel_error_to_json_host(error.clone(), &uri)
-                        }))
-                        .map_err(|encode| KernelError::Handler {
-                            message: encode.to_string(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?);
+                outputs[index] = Some(Ok(serde_json::json!({
+                    "err": tools::kernel_error_to_json_host(error, uri)
+                })
+                .to_string()));
+                continue;
             }
         };
         let dynamic = match input_type {
             Some(input_type) => match tools::json_to_dynamic_typed(&value, &input_type) {
                 Ok(value) => value,
                 Err(error) => {
-                    return Ok(uris
-                        .clone()
-                        .into_iter()
-                        .map(|uri| {
-                            serde_json::to_string(&serde_json::json!({
-                                "err": tools::kernel_error_to_json_host(error.clone(), &uri)
-                            }))
-                            .map_err(|encode| KernelError::Handler {
-                                message: encode.to_string(),
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?);
+                    outputs[index] = Some(Ok(serde_json::json!({
+                        "err": tools::kernel_error_to_json_host(error, uri)
+                    })
+                    .to_string()));
+                    continue;
                 }
             },
             None => match tools::json_to_dynamic_host(value, uri) {
                 Ok(value) => value,
                 Err(error) => {
-                    return Ok(uris
-                        .clone()
-                        .into_iter()
-                        .map(|uri| {
-                            serde_json::to_string(&serde_json::json!({
-                                "err": tools::kernel_error_to_json_host(error.clone(), &uri)
-                            }))
-                            .map_err(|encode| KernelError::Handler {
-                                message: encode.to_string(),
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?);
+                    outputs[index] = Some(Ok(serde_json::json!({
+                        "err": tools::kernel_error_to_json_host(error, uri)
+                    })
+                    .to_string()));
+                    continue;
                 }
             },
         };
-        parsed.push((resource_uri, dynamic));
+        parsed.push((index, resource_uri, dynamic));
     }
     let values = kernel
-        .execute_universal_batch_with_scope(verb, parsed, scope)
+        .execute_universal_batch_with_scope(
+            verb,
+            parsed
+                .iter()
+                .map(|(_, uri, value)| (uri.clone(), value.clone()))
+                .collect(),
+            scope,
+        )
         .await;
-    Ok(values
+    for ((index, _, _), result) in parsed.into_iter().zip(values) {
+        let uri = &uris[index];
+        let output = match result {
+            Ok(value) => {
+                serde_json::json!({"ok": tools::dynamic_to_json_host(value.result.output)})
+            }
+            Err(error) => {
+                serde_json::json!({"err": tools::kernel_error_to_json_host(error, &uri)})
+            }
+        };
+        outputs[index] =
+            Some(
+                serde_json::to_string(&output).map_err(|error| KernelError::Handler {
+                    message: format!("could not encode resource host output: {error}"),
+                }),
+            );
+    }
+    Ok(outputs
         .into_iter()
-        .zip(uris)
-        .map(|(result, uri)| {
-            let output = match result {
-                Ok(value) => {
-                    serde_json::json!({"ok": tools::dynamic_to_json_host(value.result.output)})
-                }
-                Err(error) => {
-                    serde_json::json!({"err": tools::kernel_error_to_json_host(error, &uri)})
-                }
-            };
-            serde_json::to_string(&output).map_err(|error| KernelError::Handler {
-                message: format!("could not encode resource host output: {error}"),
+        .map(|output| {
+            output.unwrap_or_else(|| {
+                Err(KernelError::Handler {
+                    message: "resource host produced no batch slot".to_owned(),
+                })
             })
         })
         .collect::<Result<Vec<_>, _>>()?)
@@ -4008,7 +4010,9 @@ pub mod tools {
 
     impl DynamicResourceProvider for DynamicToolsProvider {
         fn verb_definitions(&self) -> Vec<artist_kernel::VerbDefinition> {
-            let _ = self.handler.dynamic_verb_definitions();
+            if self.handler.dynamic_verb_definitions().is_err() {
+                return Vec::new();
+            }
             [
                 (&self.bindings.read, "read"),
                 (&self.bindings.write, "write"),
@@ -4339,6 +4343,8 @@ pub mod tools {
                 ),
                 known_packages: Arc::new(Mutex::new(HashMap::new())),
             };
+            let registrations = handler.registrations()?;
+            handler.ensure_activated(&registrations);
             Ok(handler)
         }
 
@@ -4429,10 +4435,15 @@ pub mod tools {
             &self,
         ) -> Result<Vec<artist_kernel::VerbDefinition>, KernelError> {
             let registrations = self.registrations()?;
-            self.ensure_activated(&registrations)?;
+            self.ensure_activated(&registrations);
             Ok(registrations
                 .into_iter()
-                .filter_map(|registration| registration.dynamic_definition().ok())
+                .filter_map(|registration| {
+                    self.registry
+                        .current(&registration.package)
+                        .ok()
+                        .and_then(|_| registration.dynamic_definition().ok())
+                })
                 .collect())
         }
 
@@ -4440,20 +4451,26 @@ pub mod tools {
         /// effect. The model catalog and the resource catalog therefore never
         /// advertise a generation that has not already passed component
         /// loading and ABI validation.
-        fn ensure_activated(&self, registrations: &[ToolRegistration]) -> Result<(), KernelError> {
+        fn ensure_activated(&self, registrations: &[ToolRegistration]) {
+            let granted = &self.options.granted_capabilities;
             for registration in registrations {
-                let package_root = self.package_path_for_name(&registration.package)?;
+                if !registration
+                    .capabilities
+                    .iter()
+                    .all(|capability| granted.iter().any(|granted| granted == capability))
+                {
+                    continue;
+                }
+                let Ok(package_root) = self.package_path_for_name(&registration.package) else {
+                    continue;
+                };
                 if !package_root.join("tool.wasm").is_file()
                     && !package_root.join("Cargo.toml").is_file()
                 {
                     continue;
                 }
-                // A malformed extension is isolated from valid published
-                // packages; it must not prevent the catalog transaction from
-                // activating the rest of the generation set.
                 let _ = self.activate(&package_root);
             }
-            Ok(())
         }
 
         fn relative_uri_path(&self, uri: &ResourceUri) -> Result<PathBuf, KernelError> {
@@ -4604,16 +4621,12 @@ pub mod tools {
             if let Some(active) = scope.generation_handle::<super::runtime::ActiveVersion>(&key) {
                 return Ok((*active).clone());
             }
-            let active = match self.registry.current(package) {
-                Ok(active) => active,
-                Err(_) => {
-                    // Publication normally performs this work. This branch
-                    // only repairs a provider registered before its catalog
-                    // was materialized; it is not the normal execution path.
-                    let package_root = self.package_path_for_name(package)?;
-                    self.activate(&package_root)?
-                }
-            };
+            let active = self
+                .registry
+                .current(package)
+                .map_err(|error| KernelError::Handler {
+                    message: error.to_string(),
+                })?;
             let generation = scope.snapshot_generation(package, active.generation());
             if generation != active.generation() {
                 return Err(KernelError::Conflict {
@@ -4963,15 +4976,14 @@ pub mod tools {
                         scope,
                     )
                     .await?;
-                let (value, stdobs) =
+                let (value, _stdobs) =
                     values
                         .into_iter()
                         .next()
                         .ok_or_else(|| KernelError::Handler {
                             message: "component returned no tool result".to_owned(),
                         })?;
-                let _ = value;
-                json_to_dynamic(Value::String(stdobs))
+                json_to_dynamic(value)
             })
         }
 
@@ -5006,9 +5018,14 @@ pub mod tools {
                     .ok_or_else(|| KernelError::Handler {
                         message: "component returned no tool result".to_owned(),
                     })?;
+                let stdout = typed_tool_output(&value, &registration)?;
                 Ok(artist_kernel::ToolModelResult {
-                    stdout: Ok(typed_tool_output(&value, &registration)?),
-                    stdobs,
+                    stdobs: serde_json::to_string(&dynamic_to_json_host(stdout.clone())).map_err(
+                        |error| KernelError::Handler {
+                            message: error.to_string(),
+                        },
+                    )?,
+                    stdout: Ok(stdout),
                     verb,
                     generation,
                 })
@@ -5058,7 +5075,7 @@ pub mod tools {
                 };
                 values
                     .into_iter()
-                    .map(|(_, stdobs)| Ok(DynamicValue::String(stdobs)))
+                    .map(|(value, _stdobs)| json_to_dynamic(value).map_err(|error| error))
                     .collect()
             })
         }
@@ -5111,10 +5128,14 @@ pub mod tools {
                 };
                 values
                     .into_iter()
-                    .map(|(value, stdobs)| {
+                    .map(|(value, _stdobs)| {
+                        let stdout = typed_tool_output(&value, &registration)?;
                         Ok(artist_kernel::ToolModelResult {
-                            stdout: Ok(typed_tool_output(&value, &registration)?),
-                            stdobs,
+                            stdobs: serde_json::to_string(&dynamic_to_json_host(stdout.clone()))
+                                .map_err(|error| KernelError::Handler {
+                                    message: error.to_string(),
+                                })?,
+                            stdout: Ok(stdout),
                             verb: verb.clone(),
                             generation,
                         })
@@ -5407,11 +5428,17 @@ pub mod tools {
             }
             DynamicType::Record(types) => {
                 let fields = value.as_object().ok_or_else(invalid)?;
+                if fields.keys().any(|name| !types.contains_key(name)) {
+                    return Err(invalid());
+                }
                 types
                     .iter()
-                    .map(|(name, ty)| {
-                        let field = fields.get(name).ok_or_else(invalid)?;
-                        Ok((name.clone(), json_to_dynamic_typed(field, ty)?))
+                    .map(|(name, ty)| match fields.get(name) {
+                        Some(field) => Ok((name.clone(), json_to_dynamic_typed(field, ty)?)),
+                        None if matches!(ty, DynamicType::Option(_)) => {
+                            Ok((name.clone(), DynamicValue::Option(None)))
+                        }
+                        None => Err(invalid()),
                     })
                     .collect::<Result<BTreeMap<_, _>, KernelError>>()
                     .map(DynamicValue::Record)
@@ -5588,8 +5615,10 @@ pub mod tools {
                 }
                 DynamicValue::Option(None) => Value::Null,
                 DynamicValue::Option(Some(value)) => lower(*value, field),
-                DynamicValue::Result(Ok(value)) => lower(*value, field),
-                DynamicValue::Result(Err(value)) => lower(*value, field),
+                DynamicValue::Result(Ok(value)) => serde_json::json!({"ok": lower(*value, field)}),
+                DynamicValue::Result(Err(value)) => {
+                    serde_json::json!({"err": lower(*value, field)})
+                }
                 DynamicValue::Variant(name, value) => {
                     let mut object = serde_json::Map::new();
                     object.insert(
@@ -8102,7 +8131,9 @@ pub mod resources {
 
     impl DynamicResourceProvider for DynamicResourcesProvider {
         fn verb_definitions(&self) -> Vec<artist_kernel::VerbDefinition> {
-            let _ = self.handler.ensure_activated();
+            if self.handler.ensure_activated().is_err() {
+                return Vec::new();
+            }
             [
                 (&self.bindings.read, "read"),
                 (&self.bindings.write, "write"),

@@ -213,32 +213,11 @@ impl Kernel {
                 .await
                 .map(|result| vec![result]);
         }
-        let invocation = self.inner.invocations.begin(input.clone());
-        let result = match self
+        let result = self
             .inner
             .resources
             .invoke_with_host(&verb, &uri, input, self.handle(), scope)
-            .await
-        {
-            Ok(result) => {
-                let _ = self.inner.invocations.complete(
-                    &invocation.uri,
-                    Ok(result.output.clone()),
-                    "",
-                    "",
-                );
-                result
-            }
-            Err(error) => {
-                let _ = self.inner.invocations.complete(
-                    &invocation.uri,
-                    Err(error.clone()),
-                    "",
-                    error.to_string(),
-                );
-                return Err(error);
-            }
-        };
+            .await?;
         Ok(vec![crate::DynamicResourceResult { uri, result }])
     }
 
@@ -262,9 +241,7 @@ impl Kernel {
         if uri.scheme() == "invocations" {
             return self.inner.resources.invoke(&verb, &uri, input).await;
         }
-        let invocation = self.inner.invocations.begin(input.clone());
-        let result = self
-            .inner
+        self.inner
             .resources
             .invoke_with_host(
                 &verb,
@@ -273,18 +250,7 @@ impl Kernel {
                 self.handle(),
                 InvocationScope::new(InvocationContext::default()),
             )
-            .await;
-        let stdout = result.clone().map(|value| value.output.clone());
-        let stderr = result
-            .as_ref()
-            .err()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let _ = self
-            .inner
-            .invocations
-            .complete(&invocation.uri, stdout, "", stderr);
-        result
+            .await
     }
 
     pub async fn invoke_mixed_dynamic_resources(
@@ -292,28 +258,10 @@ impl Kernel {
         requests: Vec<crate::MixedResourceRequest>,
         scope: InvocationScope,
     ) -> Vec<Result<crate::DynamicVerbResult, KernelError>> {
-        let invocations = requests
-            .iter()
-            .map(|request| self.inner.invocations.begin(request.input.clone()))
-            .collect::<Vec<_>>();
-        let results = self
-            .inner
+        self.inner
             .resources
             .invoke_mixed_batch(requests, scope)
-            .await;
-        for (invocation, result) in invocations.iter().zip(results.iter()) {
-            let stdout = result.clone().map(|value| value.output.clone());
-            let stderr = result
-                .as_ref()
-                .err()
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            let _ = self
-                .inner
-                .invocations
-                .complete(&invocation.uri, stdout, "", stderr);
-        }
-        results
+            .await
     }
 
     pub async fn invoke_dynamic_resource_batch(
@@ -322,28 +270,10 @@ impl Kernel {
         requests: Vec<crate::ResourceRequest>,
         scope: InvocationScope,
     ) -> Vec<Result<crate::DynamicVerbResult, KernelError>> {
-        let invocations = requests
-            .iter()
-            .map(|request| self.inner.invocations.begin(request.input.clone()))
-            .collect::<Vec<_>>();
-        let results = self
-            .inner
+        self.inner
             .resources
             .invoke_batch_with_host(&verb, requests, self.handle(), scope)
-            .await;
-        for (invocation, result) in invocations.iter().zip(results.iter()) {
-            let stdout = result.clone().map(|value| value.output.clone());
-            let stderr = result
-                .as_ref()
-                .err()
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            let _ = self
-                .inner
-                .invocations
-                .complete(&invocation.uri, stdout, "", stderr);
-        }
-        results
+            .await
     }
 
     pub async fn execute_dynamic_resources(
@@ -581,10 +511,7 @@ impl Kernel {
                     Ok(value) => (value.stdout, value.stdobs),
                     Err(error) => (Err(error), String::new()),
                 };
-                let result = stdout
-                    .as_ref()
-                    .map(|_| DynamicValue::String(observation.clone()))
-                    .map_err(Clone::clone);
+                let result = stdout.clone();
                 let stderr = stdout
                     .as_ref()
                     .err()
@@ -650,10 +577,7 @@ impl Kernel {
                         Ok(value) => {
                             let observation = value.stdobs.clone();
                             let stdout = value.stdout;
-                            let result = stdout
-                                .as_ref()
-                                .map(|_| DynamicValue::String(observation.clone()))
-                                .map_err(Clone::clone);
+                            let result = stdout.clone();
                             let stderr = stdout
                                 .as_ref()
                                 .err()
@@ -700,6 +624,11 @@ impl Kernel {
         args: Vec<crate::DynamicValue>,
         scope: InvocationScope,
     ) -> Vec<Result<crate::ToolModelResult, KernelError>> {
+        let invocations = args
+            .iter()
+            .cloned()
+            .map(|arg| self.inner.invocations.begin(arg))
+            .collect::<Vec<_>>();
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
@@ -708,14 +637,53 @@ impl Kernel {
                 .iter()
                 .any(|definition| definition.name == name)
             {
-                return provider
+                let values = provider
                     .execute_tools_for_model_results(name, args, host, scope)
                     .await;
+                for (invocation, value) in invocations.iter().zip(values.iter()) {
+                    match value {
+                        Ok(value) => {
+                            let stdout = value.stdout.clone();
+                            let stderr = stdout
+                                .as_ref()
+                                .err()
+                                .map(ToString::to_string)
+                                .unwrap_or_default();
+                            let _ = self.inner.invocations.complete(
+                                &invocation.uri,
+                                stdout,
+                                value.stdobs.clone(),
+                                stderr,
+                            );
+                        }
+                        Err(error) => {
+                            let _ = self.inner.invocations.complete(
+                                &invocation.uri,
+                                Err(error.clone()),
+                                "",
+                                error.to_string(),
+                            );
+                        }
+                    }
+                }
+                return values;
             }
         }
-        vec![Err(KernelError::Handler {
+        let error = KernelError::Handler {
             message: format!("no named tool registered: {name}"),
-        })]
+        };
+        invocations
+            .into_iter()
+            .map(|invocation| {
+                let _ = self.inner.invocations.complete(
+                    &invocation.uri,
+                    Err(error.clone()),
+                    "",
+                    error.to_string(),
+                );
+                Err(error.clone())
+            })
+            .collect()
     }
 
     pub async fn execute_tool_batch_with_scope(
