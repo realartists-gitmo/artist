@@ -73,7 +73,7 @@ pub trait ToolProvider: Send + Sync {
                 .await?;
             Ok(ToolModelResult {
                 stdout: Ok(value.clone()),
-                stdobs: format!("{value:?}"),
+                stdobs: value.to_lossless_string(),
                 verb: crate::VerbId::new(format!("artist:tool/{name}@1.0.0"))
                     .map_err(|message| KernelError::InvalidRequest { message })?,
                 generation: 0,

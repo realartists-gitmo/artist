@@ -370,8 +370,7 @@ pub async fn execute_sibling_calls(
             handled.insert(index);
             results[index].1 = Some(
                 output
-                    .and_then(|value| value.stdout)
-                    .map(|value| dynamic_to_json(value))
+                    .map(|value| model_result_json(&value))
                     .map_err(|error| error.to_string()),
             );
         }
@@ -386,7 +385,7 @@ pub async fn execute_sibling_calls(
             let scope = scope.child();
             async move {
                 let values = kernel
-                    .execute_tools_for_model(
+                    .execute_tool_models_for_model(
                         name.as_str(),
                         items.iter().map(|(_, value)| value.clone()).collect(),
                         scope,
@@ -401,7 +400,7 @@ pub async fn execute_sibling_calls(
         for ((index, _), value) in items.into_iter().zip(values) {
             results[index].1 = Some(
                 value
-                    .map(dynamic_to_json)
+                    .map(|value| model_result_json(&value))
                     .map_err(|error| error.to_string()),
             );
         }
@@ -415,6 +414,19 @@ pub async fn execute_sibling_calls(
             )
         })
         .collect()
+}
+
+/// Model-facing tool content is the authoritative stdout projection.  Keep
+/// its lossless DynamicValue encoding intact, including Result/Variant/Option
+/// constructors and numeric widths; the ordinary JSON helper is intentionally
+/// only for typed WIT ingress/egress where the expected type is known.
+fn model_result_json(value: &artist_kernel::ToolModelResult) -> Value {
+    serde_json::from_str(&value.stdobs).unwrap_or_else(|_| {
+        value.stdout.as_ref().map_or_else(
+            |error| serde_json::json!({"error": error.to_string()}),
+            |value| value.to_lossless_json(),
+        )
+    })
 }
 
 fn value_uri(value: &DynamicValue) -> Option<String> {

@@ -1,8 +1,8 @@
 use crate::{
-    ClaimDecision, ClaimRegistry, DynamicValue, InvocationContext, InvocationResourceProvider,
-    InvocationScope, InvocationStore, KernelError, KernelHandle, ProcessManager,
-    ResourceCatalogEntry, ResourceCatalogProvider, ResourceRegistry, RouteRegistry, ToolDefinition,
-    ToolProvider, VerbDefinition, VerbRegistry,
+    ClaimDecision, ClaimRegistry, InvocationContext, InvocationResourceProvider, InvocationScope,
+    InvocationStore, KernelError, KernelHandle, ProcessManager, ResourceCatalogEntry,
+    ResourceCatalogProvider, ResourceRegistry, RouteRegistry, ToolDefinition, ToolProvider,
+    VerbDefinition, VerbRegistry,
 };
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -208,17 +208,47 @@ impl Kernel {
     ) -> Result<Vec<crate::DynamicResourceResult>, KernelError> {
         let verb = self.resolve_resource_verb(&function, &uri)?;
         if let Some(transaction) = scope.mutation_transaction() {
-            return self
+            let publish_scope = scope.clone();
+            let result = self
                 .execute_transaction_request(transaction, verb, uri, input, scope)
                 .await
                 .map(|result| vec![result]);
+            self.publish_scoped_invocation(&publish_scope, &result);
+            return result;
         }
         let result = self
             .inner
             .resources
-            .invoke_with_host(&verb, &uri, input, self.handle(), scope)
+            .invoke_with_host(&verb, &uri, input, self.handle(), scope.clone())
             .await?;
-        Ok(vec![crate::DynamicResourceResult { uri, result }])
+        let values = vec![crate::DynamicResourceResult { uri, result }];
+        self.publish_scoped_invocation(&scope, &Ok(values.clone()));
+        Ok(values)
+    }
+
+    fn publish_scoped_invocation(
+        &self,
+        scope: &InvocationScope,
+        result: &Result<Vec<crate::DynamicResourceResult>, KernelError>,
+    ) {
+        let Some(correlation_id) = scope.context.correlation_id.as_deref() else {
+            return;
+        };
+        let Ok(uri) = crate::ResourceUri::parse(correlation_id) else {
+            return;
+        };
+        let stdout = match result {
+            Ok(values) => values
+                .last()
+                .map(|value| Ok(value.result.output.clone()))
+                .unwrap_or_else(|| {
+                    Err(KernelError::Handler {
+                        message: "resource dispatch returned no result".to_owned(),
+                    })
+                }),
+            Err(error) => Err(error.clone()),
+        };
+        let _ = self.inner.invocations.publish_stdout(&uri, stdout);
     }
 
     pub fn active_verb_tools(&self) -> Result<Vec<crate::VerbToolDescriptor>, KernelError> {
@@ -402,6 +432,8 @@ impl Kernel {
         context: InvocationContext,
     ) -> Result<crate::DynamicValue, KernelError> {
         let invocation = self.inner.invocations.begin(args.clone());
+        let mut context = context;
+        context.correlation_id = Some(invocation.uri.to_string());
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
@@ -449,6 +481,7 @@ impl Kernel {
         scope: InvocationScope,
     ) -> Result<crate::DynamicValue, KernelError> {
         let invocation = self.inner.invocations.begin(args.clone());
+        let scope = scope.with_invocation_uri(invocation.uri.clone());
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
@@ -496,6 +529,7 @@ impl Kernel {
         scope: InvocationScope,
     ) -> Result<crate::DynamicValue, KernelError> {
         let invocation = self.inner.invocations.begin(args.clone());
+        let scope = scope.with_invocation_uri(invocation.uri.clone());
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {

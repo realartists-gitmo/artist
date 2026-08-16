@@ -136,6 +136,50 @@ pub enum DynamicValue {
 }
 
 impl DynamicValue {
+    /// Lossless JSON suitable for an untyped stream boundary. Tags preserve
+    /// constructors, numeric widths, and result success/error identity.
+    pub fn to_lossless_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Self::Bool(value) => json!({"type":"bool","value":value}),
+            Self::S8(value) => json!({"type":"s8","value":value}),
+            Self::S16(value) => json!({"type":"s16","value":value}),
+            Self::S32(value) => json!({"type":"s32","value":value}),
+            Self::S64(value) => json!({"type":"s64","value":value}),
+            Self::U8(value) => json!({"type":"u8","value":value}),
+            Self::U16(value) => json!({"type":"u16","value":value}),
+            Self::U32(value) => json!({"type":"u32","value":value}),
+            Self::U64(value) => json!({"type":"u64","value":value}),
+            Self::F32(value) => json!({"type":"f32","value":value}),
+            Self::F64(value) => json!({"type":"f64","value":value}),
+            Self::Char(value) => json!({"type":"char","value":value.to_string()}),
+            Self::String(value) => json!({"type":"string","value":value}),
+            Self::ResourceUri(value) => json!({"type":"resource-uri","value":value.to_string()}),
+            Self::List(values) => {
+                json!({"type":"list","value":values.iter().map(Self::to_lossless_json).collect::<Vec<_>>() })
+            }
+            Self::Tuple(values) => {
+                json!({"type":"tuple","value":values.iter().map(Self::to_lossless_json).collect::<Vec<_>>() })
+            }
+            Self::Record(values) => {
+                json!({"type":"record","value":values.iter().map(|(name,value)|(name.clone(),value.to_lossless_json())).collect::<BTreeMap<_,_>>() })
+            }
+            Self::Option(None) => json!({"type":"option","value":null}),
+            Self::Option(Some(value)) => json!({"type":"option","value":value.to_lossless_json()}),
+            Self::Result(Ok(value)) => json!({"type":"result","ok":value.to_lossless_json()}),
+            Self::Result(Err(value)) => json!({"type":"result","err":value.to_lossless_json()}),
+            Self::Enum(value) => json!({"type":"enum","value":value}),
+            Self::Variant(name, value) => {
+                json!({"type":"variant","case":name,"value":value.as_deref().map(Self::to_lossless_json)})
+            }
+            Self::Flags(values) => json!({"type":"flags","value":values}),
+        }
+    }
+
+    pub fn to_lossless_string(&self) -> String {
+        self.to_lossless_json().to_string()
+    }
+
     pub fn validate(&self, ty: &DynamicType) -> Result<(), KernelError> {
         let valid = match (self, ty) {
             (Self::Bool(_), DynamicType::Bool)

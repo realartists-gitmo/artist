@@ -82,17 +82,22 @@ pub trait DynamicResourceProvider: DynamicClaimProvider + Send + Sync {
         scope: crate::InvocationScope,
     ) -> ResourceBatchFuture<'a> {
         Box::pin(async move {
-            let mut results = Vec::with_capacity(requests.len());
-            for request in requests {
+            join_all(requests.into_iter().map(|request| {
                 if scope.cancellation.is_cancelled() {
-                    results.push(Err(KernelError::Aborted {
-                        message: "resource batch cancelled".to_owned(),
-                    }));
-                    continue;
+                    futures::future::Either::Left(async {
+                        Err(KernelError::Aborted {
+                            message: "resource batch cancelled".to_owned(),
+                        })
+                    })
+                } else {
+                    let uri = request.uri;
+                    let input = request.input;
+                    futures::future::Either::Right(
+                        async move { self.invoke(verb, &uri, input).await },
+                    )
                 }
-                results.push(self.invoke(verb, &request.uri, request.input).await);
-            }
-            results
+            }))
+            .await
         })
     }
 
@@ -493,15 +498,22 @@ impl ResourceRegistry {
                 assignments.push(result);
             }
         }
-        let mut grouped = BTreeMap::new();
-        for (index, requests) in groups {
-            grouped.insert(
-                index,
-                providers[index]
-                    .invoke_batch_with_host(verb, requests, host.clone(), scope.child())
-                    .await,
-            );
-        }
+        let mut grouped = join_all(groups.into_iter().map(|(index, requests)| {
+            let provider = providers[index].clone();
+            let host = host.clone();
+            let scope = scope.child();
+            async move {
+                (
+                    index,
+                    provider
+                        .invoke_batch_with_host(verb, requests, host, scope)
+                        .await,
+                )
+            }
+        }))
+        .await
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
         let mut offsets = BTreeMap::<usize, usize>::new();
         assignments
             .into_iter()

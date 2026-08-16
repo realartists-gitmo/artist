@@ -158,6 +158,8 @@ struct DynamicVerbCatalogWatcher {
 
 impl DynamicVerbCatalogWatcher {
     fn start(kernel: Kernel, tools: ToolsHandler) -> Self {
+        let route_registry = kernel.route_registry();
+        let verb_registry = kernel.verb_registry();
         let (stop, receiver) = mpsc::channel();
         let join = thread::spawn(move || {
             loop {
@@ -167,14 +169,13 @@ impl DynamicVerbCatalogWatcher {
                 let Ok(definitions) = tools.dynamic_verb_definitions() else {
                     continue;
                 };
-                let route_registry = kernel.route_registry();
                 for definition in &definitions {
                     let _ = route_registry.register(
                         definition.identity.clone(),
                         Arc::new(artist_kernel::ResourceUriValueExtractor),
                     );
                 }
-                let _ = kernel.reconcile_verbs(definitions);
+                let _ = verb_registry.reconcile_packages(definitions);
             }
         });
         Self {
@@ -242,6 +243,25 @@ fn seed_ast_resource(root: &Path) -> Result<()> {
             std::fs::write(path, bytes)?;
         }
     }
+    let artifact = package.join("resource.wasm");
+    if !artifact.exists() {
+        if let Some(cached) = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../artist-component/conformance/resources/ast/target/wasm32-wasip2/product")
+            .read_dir()
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .find(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension == "wasm")
+                    })
+            })
+        {
+            std::fs::copy(cached, artifact)?;
+        }
+    }
     Ok(())
 }
 
@@ -291,6 +311,33 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
             let refresh = !path.exists();
             if refresh {
                 std::fs::write(path, bytes)?;
+            }
+        }
+        let artifact = package.join("tool.wasm");
+        if !artifact.exists() {
+            let cached = entry
+                .path()
+                .join("target/wasm32-wasip2/product")
+                .read_dir()
+                .ok()
+                .and_then(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .find(|path| {
+                            path.extension()
+                                .is_some_and(|extension| extension == "wasm")
+                        })
+                })
+                .or_else(|| {
+                    let name = entry.file_name();
+                    let cached = Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../target/wasm32-wasip2/product")
+                        .join(format!("artist_tool_{}.wasm", name.to_string_lossy()));
+                    cached.is_file().then_some(cached)
+                });
+            if let Some(cached) = cached {
+                std::fs::copy(cached, artifact)?;
             }
         }
     }

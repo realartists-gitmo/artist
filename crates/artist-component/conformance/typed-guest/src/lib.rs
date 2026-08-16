@@ -171,6 +171,20 @@ fn read_response(
             exports::artist::tool::read::DirectoryResult { uri, entries },
         ));
     }
+    // Execution providers such as osproc and invocation channels expose
+    // their textual state under provider-specific field names. The universal
+    // read contract still returns anchored text; preserve that content rather
+    // than rejecting an otherwise valid provider response.
+    if let Some(content) = success.get("output").or_else(|| success.get("state")) {
+        let content_text = content
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| content.to_string());
+        return Ok(exports::artist::tool::read::ReadResponse::Text(text(
+            fallback_uri.to_owned(),
+            &content_text,
+        )));
+    }
     Err(error(
         format!("read host output has unknown response variant: {success}"),
         Some(fallback_uri.to_owned()),

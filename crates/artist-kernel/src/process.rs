@@ -594,6 +594,8 @@ fn process_exit_code(status: std::process::ExitStatus) -> Option<i32> {
 }
 
 fn process_poll_result(uri: &ResourceUri, text: String, reason: &str) -> DynamicValue {
+    let revision = text.len() as u64;
+    let line_count = text.lines().count();
     let lines = text
         .lines()
         .enumerate()
@@ -601,13 +603,29 @@ fn process_poll_result(uri: &ResourceUri, text: String, reason: &str) -> Dynamic
             DynamicValue::Record(BTreeMap::from([
                 (
                     "anchor".to_owned(),
-                    DynamicValue::String(format!("#{}", index + 1)),
+                    DynamicValue::String(if index + 1 == line_count {
+                        format!("#{revision}")
+                    } else {
+                        format!("#{}", index + 1)
+                    }),
                 ),
                 ("text".to_owned(), DynamicValue::String(line.to_owned())),
                 ("ending".to_owned(), DynamicValue::Enum("lf".to_owned())),
             ]))
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let lines = if lines.is_empty() {
+        vec![DynamicValue::Record(BTreeMap::from([
+            (
+                "anchor".to_owned(),
+                DynamicValue::String(format!("#{revision}")),
+            ),
+            ("text".to_owned(), DynamicValue::String(String::new())),
+            ("ending".to_owned(), DynamicValue::Enum("none".to_owned())),
+        ]))]
+    } else {
+        lines
+    };
     DynamicValue::Record(BTreeMap::from([
         ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
         (

@@ -1921,14 +1921,24 @@ async fn invoke_resource_host(
         },
     };
     let result = kernel
-        .execute_universal_with_scope(verb_name, dynamic, scope)
+        .execute_universal_with_scope(verb_name, dynamic, scope.clone())
         .await;
     let output = match result {
-        Ok(mut values) => values
-            .pop()
-            .map(|value| serde_json::json!({"ok": tools::dynamic_to_json_host(value.result.output)}))
-            .unwrap_or_else(|| serde_json::json!({"err": {"code": "internal", "uri": uri, "message": "resource host returned no result"}})),
-        Err(error) => serde_json::json!({"err": tools::kernel_error_to_json_host(error, &uri)}),
+        Ok(mut values) => match values.pop() {
+            Some(value) => {
+                let stdout = value.result.output.clone();
+                serde_json::json!({"ok": tools::dynamic_to_json_host(stdout)})
+            }
+            None => {
+                let error = KernelError::Handler {
+                    message: "resource host returned no result".to_owned(),
+                };
+                serde_json::json!({"err": {"code": "internal", "uri": uri, "message": error.to_string()}})
+            }
+        },
+        Err(error) => {
+            serde_json::json!({"err": tools::kernel_error_to_json_host(error, &uri)})
+        }
     };
     serde_json::to_string(&output).map_err(|error| KernelError::Handler {
         message: format!("could not encode resource host output: {error}"),
@@ -2767,6 +2777,29 @@ pub mod package {
         Ok(())
     }
 
+    pub(crate) fn authored_inputs_newer_than_artifact(root: &Path, artifact: &Path) -> bool {
+        let Ok(artifact_time) = fs::metadata(artifact).and_then(|metadata| metadata.modified())
+        else {
+            return true;
+        };
+        WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .filter(|entry| {
+                entry.path() != artifact
+                    && entry
+                        .path()
+                        .extension()
+                        .is_none_or(|extension| extension != "json" && extension != "wasm")
+            })
+            .any(|entry| {
+                fs::metadata(entry.path())
+                    .and_then(|metadata| metadata.modified())
+                    .is_ok_and(|modified| modified > artifact_time)
+            })
+    }
+
     pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
         let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -3002,6 +3035,24 @@ pub mod package {
         /// orchestration can run it on a blocking worker. It never replaces a
         /// previously valid artifact when compilation or validation fails.
         pub fn build(&self, options: &BuildOptions) -> Result<BuildResult, ComponentError> {
+            if let Some(artifact) = &self.wasm {
+                let newer =
+                    super::package::authored_inputs_newer_than_artifact(&self.root, artifact);
+                let validation = validate_artifact(artifact, self, options);
+                if !newer {
+                    validation?;
+                    let mut hasher = Sha256::new();
+                    hasher.update(fs::read(artifact).map_err(|error| ComponentError::Build {
+                        diagnostics: format!("could not read {}: {error}", artifact.display()),
+                    })?);
+                    return Ok(BuildResult {
+                        provenance: artifact.with_extension("wasm.artist.json"),
+                        artifact: artifact.clone(),
+                        fingerprint: format!("artifact:{:x}", hasher.finalize()),
+                        cached: true,
+                    });
+                }
+            }
             if self.build_manifest.is_none() {
                 let artifact = self.wasm.clone().ok_or_else(|| ComponentError::Build {
                     diagnostics: "tool package has neither Cargo.toml nor tool.wasm".to_owned(),
@@ -3028,6 +3079,21 @@ pub mod package {
                 .map_err(|diagnostics| ComponentError::Build { diagnostics })?;
 
             let fingerprint = fingerprint(self, options, &target.package_version)?;
+            if !options.force {
+                if let Some(artifact) = &self.wasm {
+                    let provenance = artifact.with_extension("wasm.artist.json");
+                    if super::package::provenance_matches(&provenance, &fingerprint, artifact)
+                        && validate_artifact(artifact, self, options).is_ok()
+                    {
+                        return Ok(BuildResult {
+                            artifact: artifact.clone(),
+                            provenance,
+                            fingerprint,
+                            cached: true,
+                        });
+                    }
+                }
+            }
             if !options.force {
                 if let Some((artifact, provenance)) = super::package::find_cached_artifact(
                     &self.root,
@@ -3869,16 +3935,18 @@ pub mod tool_adapter {
                         });
                     }
                 };
-            let mut observed = Vec::with_capacity(values.len());
-            for value in values {
-                let stdobs = self
-                    .component
-                    .observe_json_async_with_scope(&value, kernel.clone(), scope.child())
-                    .await
-                    .map_err(component_error)?;
-                observed.push((value, stdobs));
-            }
-            Ok(observed)
+            // stdobs is intentionally the exact authoritative stdout for now.
+            // Keep the package observer hook available for the later
+            // model-facing projection pass, but do not let it replace or
+            // summarize the lossless result on this execution path.
+            let _ = (kernel, scope);
+            Ok(values
+                .into_iter()
+                .map(|value| {
+                    let stdobs = serde_json::to_string(&value).unwrap_or_default();
+                    (value, stdobs)
+                })
+                .collect())
         }
     }
 
@@ -3961,6 +4029,7 @@ pub mod tools {
         options: BuildOptions,
         dirty: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
         known_packages: Arc<Mutex<HashMap<String, (PathBuf, ToolRegistration)>>>,
+        published_definitions: Arc<Mutex<HashMap<String, artist_kernel::VerbDefinition>>>,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4142,6 +4211,7 @@ pub mod tools {
                 options: self.options.clone(),
                 dirty: Arc::clone(&self.dirty),
                 known_packages: Arc::clone(&self.known_packages),
+                published_definitions: Arc::clone(&self.published_definitions),
             }
         }
     }
@@ -4342,6 +4412,7 @@ pub mod tools {
                     super::watcher::SharedWatcher::dirty_set,
                 ),
                 known_packages: Arc::new(Mutex::new(HashMap::new())),
+                published_definitions: Arc::new(Mutex::new(HashMap::new())),
             };
             let registrations = handler.registrations()?;
             handler.ensure_activated(&registrations);
@@ -4436,14 +4507,14 @@ pub mod tools {
         ) -> Result<Vec<artist_kernel::VerbDefinition>, KernelError> {
             let registrations = self.registrations()?;
             self.ensure_activated(&registrations);
-            Ok(registrations
-                .into_iter()
-                .filter_map(|registration| {
-                    self.registry
-                        .current(&registration.package)
-                        .ok()
-                        .and_then(|_| registration.dynamic_definition().ok())
-                })
+            Ok(self
+                .published_definitions
+                .lock()
+                .map_err(|_| KernelError::Handler {
+                    message: "published tool definition lock poisoned".to_owned(),
+                })?
+                .values()
+                .cloned()
                 .collect())
         }
 
@@ -4453,24 +4524,51 @@ pub mod tools {
         /// loading and ABI validation.
         fn ensure_activated(&self, registrations: &[ToolRegistration]) {
             let granted = &self.options.granted_capabilities;
-            for registration in registrations {
-                if !registration
-                    .capabilities
-                    .iter()
-                    .all(|capability| granted.iter().any(|granted| granted == capability))
-                {
-                    continue;
-                }
-                let Ok(package_root) = self.package_path_for_name(&registration.package) else {
-                    continue;
-                };
-                if !package_root.join("tool.wasm").is_file()
-                    && !package_root.join("Cargo.toml").is_file()
-                {
-                    continue;
-                }
-                let _ = self.activate(&package_root);
+            let live = registrations
+                .iter()
+                .map(|registration| registration.package.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            if let Ok(mut published) = self.published_definitions.lock() {
+                published.retain(|package, _| live.contains(package.as_str()));
             }
+            let candidates = registrations
+                .iter()
+                .filter(|registration| {
+                    registration
+                        .capabilities
+                        .iter()
+                        .all(|capability| granted.iter().any(|granted| granted == capability))
+                })
+                .filter_map(|registration| {
+                    let package_root = self.package_path_for_name(&registration.package).ok()?;
+                    if !package_root.join("tool.wasm").is_file()
+                        && !package_root.join("Cargo.toml").is_file()
+                    {
+                        return None;
+                    }
+                    Some((registration, package_root))
+                })
+                .collect::<Vec<_>>();
+            std::thread::scope(|thread_scope| {
+                let activations = candidates
+                    .into_iter()
+                    .map(|(registration, package_root)| {
+                        thread_scope.spawn(move || (registration, self.activate(&package_root)))
+                    })
+                    .collect::<Vec<_>>();
+                for activation in activations {
+                    let Ok((registration, result)) = activation.join() else {
+                        continue;
+                    };
+                    if result.is_ok() {
+                        if let Ok(definition) = registration.dynamic_definition() {
+                            if let Ok(mut published) = self.published_definitions.lock() {
+                                published.insert(registration.package.clone(), definition);
+                            }
+                        }
+                    }
+                }
+            });
         }
 
         fn relative_uri_path(&self, uri: &ResourceUri) -> Result<PathBuf, KernelError> {
@@ -5006,7 +5104,7 @@ pub mod tools {
                 let generation = active.generation();
                 let verb = registration.dynamic_definition()?.identity;
                 let tool = ComponentTool::new(active, registration.contract.interface.clone());
-                let (value, stdobs) = tool
+                let (value, _stdobs) = tool
                     .invoke_batch_with_observations_async_with_scope(
                         vec![dynamic_to_json(&args)],
                         host,
@@ -5020,11 +5118,7 @@ pub mod tools {
                     })?;
                 let stdout = typed_tool_output(&value, &registration)?;
                 Ok(artist_kernel::ToolModelResult {
-                    stdobs: serde_json::to_string(&dynamic_to_json_host(stdout.clone())).map_err(
-                        |error| KernelError::Handler {
-                            message: error.to_string(),
-                        },
-                    )?,
+                    stdobs: stdout.to_lossless_string(),
                     stdout: Ok(stdout),
                     verb,
                     generation,
@@ -5131,10 +5225,7 @@ pub mod tools {
                     .map(|(value, _stdobs)| {
                         let stdout = typed_tool_output(&value, &registration)?;
                         Ok(artist_kernel::ToolModelResult {
-                            stdobs: serde_json::to_string(&dynamic_to_json_host(stdout.clone()))
-                                .map_err(|error| KernelError::Handler {
-                                    message: error.to_string(),
-                                })?,
+                            stdobs: stdout.to_lossless_string(),
                             stdout: Ok(stdout),
                             verb: verb.clone(),
                             generation,
@@ -7117,7 +7208,9 @@ pub mod resources {
         ) -> Result<ResourceBuildResult, KernelError> {
             validate_manifest(&self.manifest)?;
             let fingerprint = fingerprint(self, options)?;
-            if let Some(artifact) = &self.wasm {
+            if let Some(artifact) = &self.wasm
+                && !super::package::authored_inputs_newer_than_artifact(&self.root, artifact)
+            {
                 validate_artifact(artifact, self, options)?;
                 return Ok(ResourceBuildResult {
                     provenance: artifact.with_extension("wasm.artist.json"),

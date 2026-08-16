@@ -12,7 +12,7 @@ use crate::{
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvocationStatus {
@@ -43,6 +43,7 @@ pub struct InvocationStore {
     values: Arc<Mutex<BTreeMap<String, Invocation>>>,
     changed: Arc<Notify>,
     per_invocation: Arc<Mutex<BTreeMap<String, Arc<Notify>>>>,
+    stdin_updates: Arc<Mutex<BTreeMap<String, mpsc::UnboundedSender<DynamicValue>>>>,
 }
 
 impl Default for InvocationStore {
@@ -52,6 +53,7 @@ impl Default for InvocationStore {
             values: Arc::new(Mutex::new(BTreeMap::new())),
             changed: Arc::new(Notify::new()),
             per_invocation: Arc::new(Mutex::new(BTreeMap::new())),
+            stdin_updates: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -62,6 +64,7 @@ impl InvocationStore {
         let uri =
             ResourceUri::parse(&format!("invocations://{id}")).expect("canonical invocation URI");
         let invocation = Invocation::running(uri, stdin);
+        let (sender, _receiver) = mpsc::unbounded_channel();
         self.values
             .lock()
             .expect("invocation store lock")
@@ -70,6 +73,10 @@ impl InvocationStore {
             .lock()
             .expect("invocation notification store lock")
             .insert(id.to_string(), Arc::new(Notify::new()));
+        self.stdin_updates
+            .lock()
+            .expect("invocation stdin store lock")
+            .insert(id.to_string(), sender);
         self.changed.notify_waiters();
         invocation
     }
@@ -78,7 +85,7 @@ impl InvocationStore {
         &self,
         uri: &ResourceUri,
         stdout: Result<DynamicValue, KernelError>,
-        stdobs: impl Into<String>,
+        _stdobs: impl Into<String>,
         stderr: impl Into<String>,
     ) -> Result<Invocation, KernelError> {
         let id = invocation_id(uri)?;
@@ -93,13 +100,15 @@ impl InvocationStore {
             })?;
         let stdin = current.stdin.clone();
         let stdin_history = current.stdin_history.clone();
-        let completed = Invocation::completed(
-            current.uri.clone(),
-            stdin,
-            stdout,
-            stdobs.into(),
-            stderr.into(),
-        );
+        let stdobs = match &stdout {
+            Ok(value) => value.to_lossless_string(),
+            Err(error) => format!(
+                "{{\"type\":\"error\",\"value\":{}}}",
+                kernel_error_value(error).to_lossless_string()
+            ),
+        };
+        let completed =
+            Invocation::completed(current.uri.clone(), stdin, stdout, stdobs, stderr.into());
         let completed = Invocation {
             stdin_history,
             revision: current.revision + 1,
@@ -112,6 +121,73 @@ impl InvocationStore {
         self.notify_invocation(uri);
         self.changed.notify_waiters();
         Ok(completed)
+    }
+
+    /// Publish authoritative stdout while the logical invocation is still
+    /// running. Completion later updates the same record rather than creating
+    /// a second invocation or replacing the channel with a debug rendering.
+    pub fn publish_stdout(
+        &self,
+        uri: &ResourceUri,
+        stdout: Result<DynamicValue, KernelError>,
+    ) -> Result<Invocation, KernelError> {
+        self.publish(uri, Some(stdout), None, None)
+    }
+
+    pub fn publish_stderr(
+        &self,
+        uri: &ResourceUri,
+        stderr: impl Into<String>,
+    ) -> Result<Invocation, KernelError> {
+        self.publish(uri, None, Some(stderr.into()), None)
+    }
+
+    fn publish(
+        &self,
+        uri: &ResourceUri,
+        stdout: Option<Result<DynamicValue, KernelError>>,
+        stderr: Option<String>,
+        stdobs: Option<String>,
+    ) -> Result<Invocation, KernelError> {
+        let id = invocation_id(uri)?;
+        let mut values = self.values.lock().map_err(|_| KernelError::Handler {
+            message: "invocation store lock poisoned".into(),
+        })?;
+        let current = values
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| KernelError::NotFound {
+                uri: uri.to_string(),
+            })?;
+        let mut updated = current.clone();
+        updated.revision += 1;
+        if let Some(stdout) = stdout {
+            updated.stdout = Some(stdout);
+            updated.stdout_revision = updated.revision;
+            updated.stdobs = updated
+                .stdout
+                .as_ref()
+                .map(|result| match result {
+                    Ok(value) => value.to_lossless_string(),
+                    Err(error) => format!(
+                        "{{\"type\":\"error\",\"value\":{}}}",
+                        kernel_error_value(error).to_lossless_string()
+                    ),
+                })
+                .unwrap_or_default();
+            updated.stdobs_revision = updated.revision;
+        }
+        if let Some(stderr) = stderr {
+            updated.stderr = stderr;
+            updated.stderr_revision = updated.revision;
+        }
+        if let Some(stdobs) = stdobs {
+            updated.stdobs = stdobs;
+            updated.stdobs_revision = updated.revision;
+        }
+        values.insert(id, updated.clone());
+        self.notify_invocation(uri);
+        Ok(updated)
     }
 
     pub fn abort(
@@ -185,6 +261,7 @@ impl InvocationStore {
             .ok_or_else(|| KernelError::NotFound {
                 uri: uri.to_string(),
             })?;
+        let stdin_update = stdin.clone();
         let mut stdin_history = current.stdin_history;
         stdin_history.push(stdin.clone());
         let updated = Invocation {
@@ -194,6 +271,11 @@ impl InvocationStore {
             stdin_revision: current.stdin_revision + 1,
             ..current
         };
+        if let Ok(senders) = self.stdin_updates.lock() {
+            if let Some(sender) = senders.get(&id) {
+                let _ = sender.send(stdin_update);
+            }
+        }
         values.insert(id, updated.clone());
         self.notify_invocation(uri);
         self.changed.notify_waiters();
@@ -214,6 +296,9 @@ impl InvocationStore {
             })?;
         if let Ok(mut notifications) = self.per_invocation.lock() {
             notifications.remove(&id);
+        }
+        if let Ok(mut senders) = self.stdin_updates.lock() {
+            senders.remove(&id);
         }
         self.changed.notify_waiters();
         Ok(())
@@ -269,6 +354,28 @@ impl InvocationStore {
                 true
             }
         }
+    }
+
+    /// Subscribe to stdin writes for a running invocation. The logical tool
+    /// executor may consume this channel while its invocation is active.
+    pub fn subscribe_stdin(
+        &self,
+        uri: &ResourceUri,
+    ) -> Result<mpsc::UnboundedReceiver<DynamicValue>, KernelError> {
+        let id = invocation_id(uri)?;
+        if self.get(uri).is_err() {
+            return Err(KernelError::NotFound {
+                uri: uri.to_string(),
+            });
+        }
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.stdin_updates
+            .lock()
+            .map_err(|_| KernelError::Handler {
+                message: "invocation stdin store lock poisoned".into(),
+            })?
+            .insert(id, sender);
+        Ok(receiver)
     }
 }
 
@@ -331,11 +438,25 @@ impl InvocationResourceProvider {
 
     fn output(invocation: &Invocation, channel: &str) -> DynamicValue {
         match channel {
-            "stdin" => channel_text(invocation, channel, format!("{:?}", invocation.stdin)),
-            "stdout" => channel_text(invocation, channel, format!("{:?}", invocation.stdout)),
+            "stdin" => channel_text(invocation, channel, invocation.stdin.to_lossless_string()),
+            "stdout" => channel_text(
+                invocation,
+                channel,
+                invocation
+                    .stdout
+                    .as_ref()
+                    .map(|result| match result {
+                        Ok(value) => value.to_lossless_string(),
+                        Err(error) => format!(
+                            "{{\"type\":\"error\",\"value\":{}}}",
+                            kernel_error_value(error).to_lossless_string()
+                        ),
+                    })
+                    .unwrap_or_else(|| "{\"type\":\"pending\"}".to_owned()),
+            ),
             "stderr" => channel_text(invocation, channel, invocation.stderr.clone()),
             "stdobs" => channel_text(invocation, channel, invocation.stdobs.clone()),
-            "status" => channel_text(invocation, channel, format!("{:?}", invocation.status)),
+            "status" => channel_text(invocation, channel, status_text(&invocation.status)),
             "root" => DynamicValue::Record(BTreeMap::from([(
                 "entries".to_owned(),
                 DynamicValue::List(vec![DynamicValue::ResourceUri(invocation.uri.clone())]),
@@ -404,17 +525,23 @@ fn poll_cursor(input: &DynamicValue) -> Option<u64> {
     anchor.trim_start_matches('#').parse().ok()
 }
 
-fn poll_output(invocation: &Invocation, channel: &str) -> DynamicValue {
+fn poll_output(invocation: &Invocation, channel: &str, reason: &str) -> DynamicValue {
     let value = match channel {
         "stdout" => invocation
             .stdout
             .as_ref()
-            .map(|result| format!("{result:?}"))
-            .unwrap_or_default(),
+            .map(|result| match result {
+                Ok(value) => value.to_lossless_string(),
+                Err(error) => format!(
+                    "{{\"type\":\"error\",\"value\":{}}}",
+                    kernel_error_value(error).to_lossless_string()
+                ),
+            })
+            .unwrap_or_else(|| "{\"type\":\"pending\"}".to_owned()),
         "stderr" => invocation.stderr.clone(),
         "stdobs" => invocation.stdobs.clone(),
-        "status" => format!("{:?}", invocation.status),
-        "stdin" => format!("{:?}", invocation.stdin),
+        "status" => status_text(&invocation.status),
+        "stdin" => invocation.stdin.to_lossless_string(),
         _ => String::new(),
     };
     DynamicValue::Record(BTreeMap::from([
@@ -445,18 +572,16 @@ fn poll_output(invocation: &Invocation, channel: &str) -> DynamicValue {
                 ),
             ])),
         ),
-        (
-            "reason".to_owned(),
-            DynamicValue::Enum(
-                if matches!(invocation.status, InvocationStatus::Running) {
-                    "changed"
-                } else {
-                    "terminated"
-                }
-                .to_owned(),
-            ),
-        ),
+        ("reason".to_owned(), DynamicValue::Enum(reason.to_owned())),
     ]))
+}
+
+fn status_text(status: &InvocationStatus) -> String {
+    match status {
+        InvocationStatus::Running => "running".to_owned(),
+        InvocationStatus::Completed(code) => code.to_string(),
+        InvocationStatus::Aborted => "aborted".to_owned(),
+    }
 }
 
 fn channel_revision(invocation: &Invocation, channel: &str) -> u64 {
@@ -467,6 +592,27 @@ fn channel_revision(invocation: &Invocation, channel: &str) -> u64 {
         "stdobs" => invocation.stdobs_revision,
         "status" => invocation.revision,
         _ => invocation.revision,
+    }
+}
+
+fn channel_content(invocation: &Invocation, channel: &str) -> String {
+    match channel {
+        "stdin" => invocation.stdin.to_lossless_string(),
+        "stdout" => invocation
+            .stdout
+            .as_ref()
+            .map(|result| match result {
+                Ok(value) => value.to_lossless_string(),
+                Err(error) => format!(
+                    "{{\"type\":\"error\",\"value\":{}}}",
+                    kernel_error_value(error).to_lossless_string()
+                ),
+            })
+            .unwrap_or_else(|| "{\"type\":\"pending\"}".to_owned()),
+        "stderr" => invocation.stderr.clone(),
+        "stdobs" => invocation.stdobs.clone(),
+        "status" => format!("{:?}", invocation.status),
+        _ => String::new(),
     }
 }
 
@@ -605,15 +751,22 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                     let from = poll_cursor(&input);
                     loop {
                         let invocation = self.store.get(uri)?;
-                        let snapshot = poll_output(&invocation, channel);
-                        let matched = pattern
-                            .as_ref()
-                            .is_none_or(|pattern| format!("{snapshot:?}").contains(pattern));
+                        let matched = pattern.as_ref().is_none_or(|pattern| {
+                            channel_content(&invocation, channel).contains(pattern)
+                        });
                         let changed = from
                             .map_or(channel_revision(&invocation, channel) > 0, |from| {
                                 channel_revision(&invocation, channel) > from
                             });
-                        if changed && matched {
+                        let reason = if pattern.is_some() && matched {
+                            "matched"
+                        } else if matches!(invocation.status, InvocationStatus::Running) {
+                            "changed"
+                        } else {
+                            "terminated"
+                        };
+                        let snapshot = poll_output(&invocation, channel, reason);
+                        if (changed || pattern.is_some()) && matched {
                             break snapshot;
                         }
                         if !matches!(invocation.status, InvocationStatus::Running) && matched {
@@ -624,7 +777,7 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                         if timeout.is_some_and(|timeout| timeout.is_zero())
                             || !self.store.wait_for_invocation_change(uri, timeout).await
                         {
-                            break snapshot;
+                            break poll_output(&invocation, channel, "timeout");
                         }
                         // A channel update is itself a meaningful stream
                         // event, even while the logical invocation remains
@@ -766,7 +919,10 @@ mod tests {
             saved.stdout,
             Some(Ok(DynamicValue::String("response".into())))
         );
-        assert_eq!(saved.stdobs, "compact");
+        assert_eq!(
+            saved.stdobs,
+            DynamicValue::String("response".into()).to_lossless_string()
+        );
         assert_eq!(saved.status, InvocationStatus::Completed(0));
         for channel in ["stdin", "stdout", "stderr", "stdobs", "status"] {
             assert!(

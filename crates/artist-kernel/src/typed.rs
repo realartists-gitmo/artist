@@ -312,6 +312,16 @@ impl InvocationScope {
         }
     }
 
+    /// Associate the scope with the public logical invocation that owns it.
+    /// Nested provider dispatch shares this value, so host adapters can
+    /// publish channel material without creating an implementation-detail
+    /// invocation root.
+    pub fn with_invocation_uri(&self, uri: ResourceUri) -> Self {
+        let mut scope = self.clone();
+        scope.context.correlation_id = Some(uri.to_string());
+        scope
+    }
+
     pub fn with_mutation_transaction(mut self, transaction: Arc<MutationTransaction>) -> Self {
         self.mutation_transaction = Some(transaction);
         self
