@@ -29,6 +29,13 @@ pub trait ToolProvider: Send + Sync {
             .any(|definition| definition.name == name)
     }
 
+    /// Resolve against the catalog generation pinned to this logical turn.
+    /// Providers may keep historical generations only for this scoped lease;
+    /// unscoped callers must use the current catalog above.
+    fn can_execute_tool_in_scope(&self, name: &str, _scope: &InvocationScope) -> bool {
+        self.can_execute_tool(name)
+    }
+
     fn execute_tool<'a>(
         &'a self,
         name: &'a str,

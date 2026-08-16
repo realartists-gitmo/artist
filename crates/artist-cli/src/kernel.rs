@@ -62,6 +62,7 @@ pub async fn build(root: &Path) -> Result<Kernel> {
         poll: native_verb("osproc", "poll"),
         abort: native_verb("osproc", "abort"),
         delete: native_verb("osproc", "delete"),
+        grep: native_verb("osproc", "grep"),
     };
     for definition in process_bindings.definitions() {
         kernel.route_registry().register(

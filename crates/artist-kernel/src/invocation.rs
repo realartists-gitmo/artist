@@ -439,10 +439,19 @@ impl InvocationResourceProvider {
             "stderr" => channel_text(invocation, channel, invocation.stderr.clone()),
             "stdobs" => channel_text(invocation, channel, invocation.stdobs.clone()),
             "status" => channel_text(invocation, channel, status_text(&invocation.status)),
-            "root" => DynamicValue::Record(BTreeMap::from([(
+            "root" => DynamicValue::Variant(
                 "entries".to_owned(),
-                DynamicValue::List(vec![DynamicValue::ResourceUri(invocation.uri.clone())]),
-            )])),
+                Some(Box::new(DynamicValue::Record(BTreeMap::from([
+                    (
+                        "uri".to_owned(),
+                        DynamicValue::ResourceUri(invocation.uri.clone()),
+                    ),
+                    (
+                        "entries".to_owned(),
+                        DynamicValue::List(vec![DynamicValue::ResourceUri(invocation.uri.clone())]),
+                    ),
+                ])))),
+            ),
             _ => DynamicValue::Record(BTreeMap::new()),
         }
     }
@@ -469,6 +478,13 @@ impl InvocationResourceProvider {
 }
 
 fn channel_text(invocation: &Invocation, channel: &str, text: String) -> DynamicValue {
+    DynamicValue::Variant(
+        "lines".to_owned(),
+        Some(Box::new(channel_text_record(invocation, channel, text))),
+    )
+}
+
+fn channel_text_record(invocation: &Invocation, channel: &str, text: String) -> DynamicValue {
     let channel_uri = invocation
         .channel_uri(channel)
         .unwrap_or_else(|_| invocation.uri.clone());
@@ -652,7 +668,7 @@ impl DynamicClaimProvider for InvocationResourceProvider {
             && verb.interface() == "invocations"
             && matches!(
                 verb.function(),
-                "read" | "find" | "write" | "poll" | "abort" | "delete"
+                "read" | "find" | "write" | "poll" | "grep" | "abort" | "delete"
             )
         {
             ClaimDecision::Handle
@@ -664,7 +680,7 @@ impl DynamicClaimProvider for InvocationResourceProvider {
 
 impl DynamicResourceProvider for InvocationResourceProvider {
     fn verb_definitions(&self) -> Vec<crate::VerbDefinition> {
-        ["read", "find", "write", "poll", "abort", "delete"]
+        ["read", "find", "write", "poll", "grep", "abort", "delete"]
             .into_iter()
             .map(|function| {
                 let identity = VerbId::new(format!("artist:invocations/{function}@1.0.0"))
@@ -707,21 +723,60 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                             .collect()
                     };
                     DynamicValue::Record(BTreeMap::from([(
-                        "entries".to_owned(),
+                        "uris".to_owned(),
                         DynamicValue::List(entries),
                     )]))
                 }
-                "read" if channel == "root" => DynamicValue::Record(BTreeMap::from([(
+                "read" if channel == "root" => DynamicValue::Variant(
                     "entries".to_owned(),
-                    DynamicValue::List(
-                        self.store
-                            .all()?
-                            .into_iter()
-                            .map(|invocation| DynamicValue::ResourceUri(invocation.uri))
-                            .collect(),
-                    ),
-                )])),
+                    Some(Box::new(DynamicValue::Record(BTreeMap::from([
+                        ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+                        (
+                            "entries".to_owned(),
+                            DynamicValue::List(
+                                self.store
+                                    .all()?
+                                    .into_iter()
+                                    .map(|invocation| DynamicValue::ResourceUri(invocation.uri))
+                                    .collect(),
+                            ),
+                        ),
+                    ])))),
+                ),
                 "read" => Self::output(&self.store.get(uri)?, channel),
+                "grep" => {
+                    let pattern = match &input {
+                        DynamicValue::Record(fields) => match fields.get("pattern") {
+                            Some(DynamicValue::String(value)) => value.clone(),
+                            _ => {
+                                return Err(KernelError::InvalidRequest {
+                                    message: "grep pattern must be a string".into(),
+                                });
+                            }
+                        },
+                        _ => {
+                            return Err(KernelError::InvalidRequest {
+                                message: "grep input must be a record".into(),
+                            });
+                        }
+                    };
+                    let invocation = self.store.get(uri)?;
+                    let channel = Self::channel(uri)?;
+                    let content = channel_content(&invocation, channel);
+                    let matches = regex::Regex::new(&pattern)
+                        .map_err(|error| KernelError::InvalidPattern {
+                            message: error.to_string(),
+                        })?
+                        .is_match(&content);
+                    DynamicValue::Record(BTreeMap::from([(
+                        "matches".to_owned(),
+                        DynamicValue::List(if matches {
+                            vec![channel_text_record(&invocation, channel, content)]
+                        } else {
+                            Vec::new()
+                        }),
+                    )]))
+                }
                 "poll" => {
                     let started = std::time::Instant::now();
                     let pattern = match &input {
@@ -791,11 +846,17 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                 }
                 "abort" => {
                     self.store.abort(uri, "invocation aborted")?;
-                    DynamicValue::Enum("aborted".into())
+                    DynamicValue::Record(BTreeMap::from([(
+                        "uri".to_owned(),
+                        DynamicValue::ResourceUri(uri.clone()),
+                    )]))
                 }
                 "delete" => {
                     self.store.delete(uri)?;
-                    DynamicValue::Option(None)
+                    DynamicValue::Record(BTreeMap::from([(
+                        "uri".to_owned(),
+                        DynamicValue::ResourceUri(uri.clone()),
+                    )]))
                 }
                 _ => {
                     return Err(KernelError::UnsupportedVerb {

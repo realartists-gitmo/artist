@@ -1109,24 +1109,30 @@ impl FileHandler {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             entries.sort_by_key(ToString::to_string);
-            Ok(DynamicValue::Record(BTreeMap::from([
-                ("uri".to_owned(), DynamicValue::ResourceUri(uri)),
-                (
-                    "entries".to_owned(),
-                    DynamicValue::List(
-                        entries.into_iter().map(DynamicValue::ResourceUri).collect(),
+            Ok(DynamicValue::Variant(
+                "entries".to_owned(),
+                Some(Box::new(DynamicValue::Record(BTreeMap::from([
+                    ("uri".to_owned(), DynamicValue::ResourceUri(uri)),
+                    (
+                        "entries".to_owned(),
+                        DynamicValue::List(
+                            entries.into_iter().map(DynamicValue::ResourceUri).collect(),
+                        ),
                     ),
-                ),
-            ])))
+                ])))),
+            ))
         } else {
             let bytes = self.cap_read(&path)?;
             let text = self.anchored_text(uri, &path, &bytes)?;
-            Ok(dynamic_text(select_read_window(
-                text,
-                at.as_ref(),
-                before,
-                after,
-            )?))
+            Ok(DynamicValue::Variant(
+                "lines".to_owned(),
+                Some(Box::new(dynamic_text(select_read_window(
+                    text,
+                    at.as_ref(),
+                    before,
+                    after,
+                )?))),
+            ))
         }
     }
 
@@ -1292,6 +1298,15 @@ fn dynamic_position(input: &DynamicValue) -> Result<Option<Position>, KernelErro
         value => value,
     };
     match value {
+        DynamicValue::Variant(name, payload) if name == "top" && payload.is_none() => {
+            Ok(Some(Position::Top))
+        }
+        DynamicValue::Variant(name, payload) if name == "bottom" && payload.is_none() => {
+            Ok(Some(Position::Bottom))
+        }
+        DynamicValue::Variant(name, Some(payload)) if name == "at" => {
+            Ok(Some(Position::At(dynamic_anchor(payload)?)))
+        }
         DynamicValue::String(value) if value == "top" => Ok(Some(Position::Top)),
         DynamicValue::String(value) if value == "bottom" => Ok(Some(Position::Bottom)),
         DynamicValue::String(value) => {
@@ -1378,14 +1393,7 @@ fn dynamic_line(line: AnchoredLine) -> DynamicValue {
     DynamicValue::Record(BTreeMap::from([
         (
             "anchor".to_owned(),
-            DynamicValue::List(
-                line.anchor
-                    .tokens()
-                    .iter()
-                    .cloned()
-                    .map(DynamicValue::String)
-                    .collect(),
-            ),
+            DynamicValue::String(line.anchor.to_string()),
         ),
         ("text".to_owned(), DynamicValue::String(line.text)),
         (

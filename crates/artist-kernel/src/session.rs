@@ -303,7 +303,10 @@ impl SessionHandler {
         });
         drop(state);
         session.changed.notify_waiters();
-        Ok(DynamicValue::ResourceUri(uri))
+        Ok(DynamicValue::Record(BTreeMap::from([(
+            "uri".to_owned(),
+            DynamicValue::ResourceUri(uri),
+        )])))
     }
 
     async fn dynamic_poll(
@@ -350,7 +353,7 @@ impl SessionHandler {
                 };
                 return Ok(DynamicValue::Record(BTreeMap::from([
                     ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
-                    ("text".to_owned(), session_text(text)),
+                    ("text".to_owned(), session_text_record(text)),
                     ("reason".to_owned(), DynamicValue::String(reason.to_owned())),
                 ])));
             }
@@ -362,7 +365,7 @@ impl SessionHandler {
                     let text = anchored_session_window(&uri, &snapshot(&state, since), None, None)?;
                     return Ok(DynamicValue::Record(BTreeMap::from([
                         ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
-                        ("text".to_owned(), session_text(text)),
+                        ("text".to_owned(), session_text_record(text)),
                         (
                             "reason".to_owned(),
                             DynamicValue::String("timeout".to_owned()),
@@ -383,7 +386,10 @@ impl SessionHandler {
         state.status = Status::Aborted;
         drop(state);
         session.changed.notify_waiters();
-        Ok(DynamicValue::ResourceUri(uri))
+        Ok(DynamicValue::Record(BTreeMap::from([(
+            "uri".to_owned(),
+            DynamicValue::ResourceUri(uri),
+        )])))
     }
 
     async fn dynamic_delete(&self, uri: ResourceUri) -> Result<DynamicValue, KernelError> {
@@ -391,7 +397,10 @@ impl SessionHandler {
         if self.sessions.write().await.remove(&key).is_none() {
             return Err(KernelError::NotFound { uri: key });
         }
-        Ok(DynamicValue::ResourceUri(uri))
+        Ok(DynamicValue::Record(BTreeMap::from([(
+            "uri".to_owned(),
+            DynamicValue::ResourceUri(uri),
+        )])))
     }
 }
 
@@ -501,6 +510,13 @@ fn session_line(line: AnchoredLine) -> DynamicValue {
 }
 
 fn session_text(text: AnchoredText) -> DynamicValue {
+    DynamicValue::Variant(
+        "lines".to_owned(),
+        Some(Box::new(session_text_record(text))),
+    )
+}
+
+fn session_text_record(text: AnchoredText) -> DynamicValue {
     DynamicValue::Record(BTreeMap::from([
         ("uri".to_owned(), DynamicValue::ResourceUri(text.uri)),
         (

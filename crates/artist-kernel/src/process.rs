@@ -35,6 +35,7 @@ pub struct ProcessVerbBindings {
     pub poll: VerbId,
     pub abort: VerbId,
     pub delete: VerbId,
+    pub grep: VerbId,
 }
 
 impl ProcessVerbBindings {
@@ -128,6 +129,14 @@ impl ProcessVerbBindings {
                 ]),
             ),
         ]));
+        let grep_input = DynamicType::Record(BTreeMap::from([
+            ("uri".to_owned(), uri.clone()),
+            ("pattern".to_owned(), DynamicType::String),
+        ]));
+        let grep_output = DynamicType::Record(BTreeMap::from([(
+            "matches".to_owned(),
+            DynamicType::List(Box::new(read_output.clone())),
+        )]));
         vec![
             VerbDefinition::new(self.run.clone(), "run", "run", "Run a direct executable")
                 .with_contract(
@@ -163,6 +172,9 @@ impl ProcessVerbBindings {
                     DynamicType::Record(BTreeMap::from([("uri".to_owned(), uri.clone())])),
                     DynamicType::Record(BTreeMap::from([("uri".to_owned(), uri)])),
                 )
+                .with_extractor("resource-uri"),
+            VerbDefinition::new(self.grep.clone(), "grep", "grep", "Search process output")
+                .with_contract(grep_input, grep_output)
                 .with_extractor("resource-uri"),
         ]
     }
@@ -342,6 +354,10 @@ impl ProcessManager {
     }
 
     pub fn output(&self, uri: &str, stderr: bool) -> Result<String, KernelError> {
+        Ok(String::from_utf8_lossy(&self.output_bytes(uri, stderr)?).into_owned())
+    }
+
+    pub fn output_bytes(&self, uri: &str, stderr: bool) -> Result<Vec<u8>, KernelError> {
         let process = self.lookup(uri)?;
         let process = process.lock().map_err(|_| KernelError::Handler {
             message: "process lock poisoned".into(),
@@ -351,12 +367,12 @@ impl ProcessManager {
         } else {
             process.stdout.clone()
         };
-        Ok(
-            String::from_utf8_lossy(&bytes.lock().map_err(|_| KernelError::Handler {
+        Ok(bytes
+            .lock()
+            .map_err(|_| KernelError::Handler {
                 message: "process output lock poisoned".into(),
-            })?)
-            .into_owned(),
-        )
+            })?
+            .clone())
     }
 
     pub fn abort(&self, uri: &str) -> Result<(), KernelError> {
@@ -467,7 +483,8 @@ impl DynamicClaimProvider for ProcessResourceProvider {
             || ((verb == &self.bindings.read
                 || verb == &self.bindings.poll
                 || verb == &self.bindings.abort
-                || verb == &self.bindings.delete)
+                || verb == &self.bindings.delete
+                || verb == &self.bindings.grep)
                 && (uri.scheme() == "osproc"))
         {
             ClaimDecision::Handle
@@ -492,7 +509,12 @@ impl DynamicResourceProvider for ProcessResourceProvider {
         let bindings = self.bindings.clone();
         Box::pin(async move {
             let output = if verb == &bindings.run {
-                let executable = Self::string(&input, "uri")?;
+                let executable_uri = ResourceUri::parse(&Self::string(&input, "uri")?)?;
+                let executable = executable_uri.as_ref().to_file_path().map_err(|_| {
+                    KernelError::InvalidUri {
+                        message: executable_uri.to_string(),
+                    }
+                })?;
                 DynamicValue::Record(BTreeMap::from([(
                     "uri".into(),
                     DynamicValue::ResourceUri(ResourceUri::parse(
@@ -512,19 +534,29 @@ impl DynamicResourceProvider for ProcessResourceProvider {
                 Self::poll_value(&manager, uri, &input).await?
             } else if verb == &bindings.read {
                 if uri.path().ends_with("/stdout") || uri.path().ends_with("/stderr") {
-                    process_text_value(
+                    process_text_bytes(
                         uri,
-                        manager
-                            .output(uri.to_string().as_str(), uri.path().ends_with("/stderr"))?,
+                        &manager.output_bytes(
+                            uri.to_string().as_str(),
+                            uri.path().ends_with("/stderr"),
+                        )?,
+                        0,
                     )
                 } else {
                     let snapshot = manager.snapshot(uri.to_string().as_str())?;
-                    process_text_value(
+                    process_status_value(
                         uri,
                         format!(
                             "running={} exit-code={:?} aborted={}",
                             snapshot.running, snapshot.exit_code, snapshot.aborted
                         ),
+                        if snapshot.aborted {
+                            2
+                        } else if snapshot.running {
+                            0
+                        } else {
+                            1
+                        },
                     )
                 }
             } else if verb == &bindings.abort {
@@ -539,6 +571,8 @@ impl DynamicResourceProvider for ProcessResourceProvider {
                     "uri".into(),
                     DynamicValue::ResourceUri(uri.clone()),
                 )]))
+            } else if verb == &bindings.grep {
+                process_grep_value(&manager, uri, &input)?
             } else {
                 return Err(KernelError::UnsupportedVerb {
                     verb: verb.to_string(),
@@ -552,6 +586,53 @@ impl DynamicResourceProvider for ProcessResourceProvider {
             })
         })
     }
+}
+
+fn process_grep_value(
+    manager: &ProcessManager,
+    uri: &ResourceUri,
+    input: &DynamicValue,
+) -> Result<DynamicValue, KernelError> {
+    let pattern = match input {
+        DynamicValue::Record(fields) => match fields.get("pattern") {
+            Some(DynamicValue::String(pattern)) => pattern.clone(),
+            _ => {
+                return Err(KernelError::InvalidRequest {
+                    message: "grep pattern must be a string".into(),
+                });
+            }
+        },
+        _ => {
+            return Err(KernelError::InvalidRequest {
+                message: "grep input must be a record".into(),
+            });
+        }
+    };
+    let regex = regex::Regex::new(&pattern).map_err(|error| KernelError::InvalidPattern {
+        message: error.to_string(),
+    })?;
+    let bytes = if uri.path().ends_with("/stderr") {
+        manager.output_bytes(&uri.to_string(), true)?
+    } else if uri.path().ends_with("/stdout") {
+        manager.output_bytes(&uri.to_string(), false)?
+    } else {
+        let snapshot = manager.snapshot(&uri.to_string())?;
+        format!(
+            "running={} exit-code={:?} aborted={}",
+            snapshot.running, snapshot.exit_code, snapshot.aborted
+        )
+        .into_bytes()
+    };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let matches = if regex.is_match(&text) {
+        vec![process_text_bytes(uri, &bytes, 0)]
+    } else {
+        Vec::new()
+    };
+    Ok(DynamicValue::Record(BTreeMap::from([(
+        "matches".into(),
+        DynamicValue::List(matches),
+    )])))
 }
 
 impl ProcessResourceProvider {
@@ -572,39 +653,74 @@ impl ProcessResourceProvider {
         let started = std::time::Instant::now();
         loop {
             let snapshot = manager.snapshot(uri.to_string().as_str())?;
-            let text = if uri.path().ends_with("/stderr") {
-                manager.output(uri.to_string().as_str(), true)?
-            } else if uri.path().ends_with("/stdout") {
-                manager.output(uri.to_string().as_str(), false)?
-            } else {
-                format!(
-                    "running={} exit-code={:?} aborted={}",
-                    snapshot.running, snapshot.exit_code, snapshot.aborted
-                )
+            let (observed, raw, cursor, changed, status_revision) =
+                if uri.path().ends_with("/stderr") {
+                    let bytes = manager.output_bytes(uri.to_string().as_str(), true)?;
+                    let revision = bytes.len() as u64;
+                    let cursor = from.unwrap_or(0).min(revision);
+                    (
+                        String::from_utf8_lossy(&bytes[cursor as usize..]).into_owned(),
+                        Some(bytes[cursor as usize..].to_vec()),
+                        cursor,
+                        from.is_some() && revision > from.unwrap_or(0),
+                        None,
+                    )
+                } else if uri.path().ends_with("/stdout") {
+                    let bytes = manager.output_bytes(uri.to_string().as_str(), false)?;
+                    let revision = bytes.len() as u64;
+                    let cursor = from.unwrap_or(0).min(revision);
+                    (
+                        String::from_utf8_lossy(&bytes[cursor as usize..]).into_owned(),
+                        Some(bytes[cursor as usize..].to_vec()),
+                        cursor,
+                        from.is_some() && revision > from.unwrap_or(0),
+                        None,
+                    )
+                } else {
+                    let revision = if snapshot.aborted {
+                        2
+                    } else if snapshot.running {
+                        0
+                    } else {
+                        1
+                    };
+                    (
+                        format!(
+                            "running={} exit-code={:?} aborted={}",
+                            snapshot.running, snapshot.exit_code, snapshot.aborted
+                        ),
+                        None,
+                        0,
+                        from.is_some() && revision > from.unwrap_or(0),
+                        Some(revision),
+                    )
+                };
+            let make_result = |reason: &str| {
+                raw.as_deref()
+                    .map(|bytes| process_poll_result_bytes(uri, bytes, reason, cursor))
+                    .unwrap_or_else(|| {
+                        status_revision.map_or_else(
+                            || process_poll_result(uri, observed.clone(), reason, cursor),
+                            |revision| {
+                                process_poll_result_status(uri, observed.clone(), reason, revision)
+                            },
+                        )
+                    })
             };
-            let revision = text.len() as u64;
-            let cursor = from.unwrap_or(0).min(revision) as usize;
-            let observed = String::from_utf8_lossy(&text.as_bytes()[cursor..]).into_owned();
-            let changed = from.is_some() && revision > from.unwrap_or(0);
             if matcher
                 .as_ref()
                 .is_some_and(|matcher| matcher.is_match(&observed))
             {
-                return Ok(process_poll_result(uri, observed, "matched", cursor as u64));
+                return Ok(make_result("matched"));
             }
             if changed {
-                return Ok(process_poll_result(uri, observed, "changed", cursor as u64));
+                return Ok(make_result("changed"));
             }
             if !snapshot.running {
-                return Ok(process_poll_result(
-                    uri,
-                    observed,
-                    "terminated",
-                    cursor as u64,
-                ));
+                return Ok(make_result("terminated"));
             }
             if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
-                return Ok(process_poll_result(uri, observed, "timeout", cursor as u64));
+                return Ok(make_result("timeout"));
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
@@ -626,6 +742,43 @@ fn process_exit_code(status: std::process::ExitStatus) -> Option<i32> {
 
 fn process_poll_result(uri: &ResourceUri, text: String, reason: &str, base: u64) -> DynamicValue {
     let lines = process_lines_at(&text, base);
+    process_poll_result_with_lines(uri, lines, reason)
+}
+
+fn process_poll_result_status(
+    uri: &ResourceUri,
+    text: String,
+    reason: &str,
+    revision: u64,
+) -> DynamicValue {
+    process_poll_result_with_lines(
+        uri,
+        vec![DynamicValue::Record(BTreeMap::from([
+            (
+                "anchor".to_owned(),
+                DynamicValue::String(format!("#{revision}")),
+            ),
+            ("text".to_owned(), DynamicValue::String(text)),
+            ("ending".to_owned(), DynamicValue::Enum("none".to_owned())),
+        ]))],
+        reason,
+    )
+}
+
+fn process_poll_result_bytes(
+    uri: &ResourceUri,
+    bytes: &[u8],
+    reason: &str,
+    base: u64,
+) -> DynamicValue {
+    process_poll_result_with_lines(uri, process_lines_at_bytes(bytes, base), reason)
+}
+
+fn process_poll_result_with_lines(
+    uri: &ResourceUri,
+    lines: Vec<DynamicValue>,
+    reason: &str,
+) -> DynamicValue {
     DynamicValue::Record(BTreeMap::from([
         ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
         (
@@ -640,9 +793,39 @@ fn process_poll_result(uri: &ResourceUri, text: String, reason: &str, base: u64)
 }
 
 fn process_text_value(uri: &ResourceUri, text: String) -> DynamicValue {
+    DynamicValue::Variant(
+        "lines".to_owned(),
+        Some(Box::new(process_text_bytes(uri, text.as_bytes(), 0))),
+    )
+}
+
+fn process_status_value(uri: &ResourceUri, text: String, revision: u64) -> DynamicValue {
+    DynamicValue::Variant(
+        "lines".to_owned(),
+        Some(Box::new(DynamicValue::Record(BTreeMap::from([
+            ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
+            (
+                "lines".to_owned(),
+                DynamicValue::List(vec![DynamicValue::Record(BTreeMap::from([
+                    (
+                        "anchor".to_owned(),
+                        DynamicValue::String(format!("#{revision}")),
+                    ),
+                    ("text".to_owned(), DynamicValue::String(text)),
+                    ("ending".to_owned(), DynamicValue::Enum("none".to_owned())),
+                ]))]),
+            ),
+        ])))),
+    )
+}
+
+fn process_text_bytes(uri: &ResourceUri, bytes: &[u8], base: u64) -> DynamicValue {
     DynamicValue::Record(BTreeMap::from([
         ("uri".to_owned(), DynamicValue::ResourceUri(uri.clone())),
-        ("lines".to_owned(), DynamicValue::List(process_lines(&text))),
+        (
+            "lines".to_owned(),
+            DynamicValue::List(process_lines_at_bytes(bytes, base)),
+        ),
     ]))
 }
 
@@ -651,23 +834,33 @@ fn process_lines(text: &str) -> Vec<DynamicValue> {
 }
 
 fn process_lines_at(text: &str, base: u64) -> Vec<DynamicValue> {
+    process_lines_at_bytes(text.as_bytes(), base)
+}
+
+fn process_lines_at_bytes(bytes: &[u8], base: u64) -> Vec<DynamicValue> {
     let mut offset = base;
     let mut lines = Vec::new();
-    for chunk in text.split_inclusive('\n') {
+    for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
         offset += chunk.len() as u64;
-        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+        let line = chunk.strip_suffix(&[b'\n']).unwrap_or(chunk);
         lines.push(DynamicValue::Record(BTreeMap::from([
             (
                 "anchor".to_owned(),
                 DynamicValue::String(format!("#{offset}")),
             ),
-            ("text".to_owned(), DynamicValue::String(line.to_owned())),
+            (
+                "text".to_owned(),
+                DynamicValue::String(String::from_utf8_lossy(line).into_owned()),
+            ),
             ("ending".to_owned(), DynamicValue::Enum("lf".to_owned())),
         ])));
     }
     if lines.is_empty() {
         lines.push(DynamicValue::Record(BTreeMap::from([
-            ("anchor".to_owned(), DynamicValue::String("#0".to_owned())),
+            (
+                "anchor".to_owned(),
+                DynamicValue::String(format!("#{base}")),
+            ),
             ("text".to_owned(), DynamicValue::String(String::new())),
             ("ending".to_owned(), DynamicValue::Enum("none".to_owned())),
         ])));

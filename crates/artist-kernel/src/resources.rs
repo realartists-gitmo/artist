@@ -232,7 +232,20 @@ impl ResourceRegistry {
                 uri: uri.to_string(),
             })?
         };
-        provider.invoke(verb, uri, input).await
+        let mut result = provider.invoke(verb, uri, input).await?;
+        // `invoke` is the historical direct/native API. Keep its compact
+        // compatibility shape while the host-facing path below carries the
+        // canonical universal typed shape across WASM.
+        if let DynamicValue::Variant(_, Some(value)) = result.output {
+            result.output = *value;
+        } else if matches!(verb.function(), "delete" | "abort") {
+            if let DynamicValue::Record(fields) = &result.output {
+                if let Some(DynamicValue::ResourceUri(uri)) = fields.get("uri") {
+                    result.output = DynamicValue::ResourceUri(uri.clone());
+                }
+            }
+        }
+        Ok(result)
     }
 
     pub async fn invoke_at_generation(

@@ -1545,3 +1545,17 @@ Final verification was rerun after these changes: `cargo fmt --all`, `git diff -
 **Continuation audit repair.** The model catalog now derives its package, generation, schema, description, and name from the matching immutable `PublishedToolGeneration`, rather than reading the registry's current generation separately. This closes the remaining advertised-generation/executed-generation split when a package is replaced while a turn is in flight. A final verification pass is required after this source change.
 
 The required final verification for this continuation is complete: formatting, `git diff --check`, and the full `cargo test --workspace --all-features` suite passed.
+## Latest audit repair status
+
+The latest audit is now incorporated into the implementation work. The repair covers:
+
+- `run(file://...)` converts the canonical URI back to an operating-system path before spawning.
+- Batched tool dispatch consults the turn-scoped generation lease, so rename/removal cannot strand a call that was already advertised.
+- Ambiguous model-facing names are suppressed from the published catalog and ambiguous historical resolutions fail explicitly.
+- Filesystem positions consume the typed `top`/`bottom`/`at(anchor)` variant, with canonical public anchor strings.
+- Native resource results are normalized to the canonical universal result shapes and validated against the selected leased verb before crossing the WASM boundary.
+- Process and invocation resources expose universal `grep`; process cursors use raw byte offsets for output and semantic revisions for status.
+- Scalar model execution preserves observer stderr, and physical component batches reject result-count mismatches before demultiplexing.
+- Published component metadata is retained as immutable generation data and historical generations are garbage-collected once no live turn lease retains them.
+
+The remaining verification step is intentionally deferred until the complete repair is written: run formatting, diff checks, the workspace test/check suite, then commit and push the finished result.

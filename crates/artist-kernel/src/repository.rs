@@ -655,24 +655,30 @@ impl RepositoryHandler {
             })?
         };
         let text = repository_anchored_text(uri, &file, &source, &self.structure)?;
-        Ok(repository_text(select_repository_read_window(
-            text, None, None, None,
-        )?))
+        Ok(DynamicValue::Variant(
+            "lines".to_owned(),
+            Some(Box::new(repository_text(select_repository_read_window(
+                text, None, None, None,
+            )?))),
+        ))
     }
 
     fn dynamic_find(&self, uri: ResourceUri, query: String) -> Result<DynamicValue, KernelError> {
         let paths = self.find_paths(&ResourceAddress::uri(uri), &query)?;
         let mut seen = std::collections::HashSet::new();
-        Ok(DynamicValue::List(
-            paths
-                .into_iter()
-                .filter(|(path, _)| seen.insert(path.clone()))
-                .map(|(path, directory)| {
-                    ResourceUri::parse(&format!("{}{}", path, if directory { "/" } else { "" }))
-                        .map(DynamicValue::ResourceUri)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ))
+        Ok(DynamicValue::Record(BTreeMap::from([(
+            "uris".to_owned(),
+            DynamicValue::List(
+                paths
+                    .into_iter()
+                    .filter(|(path, _)| seen.insert(path.clone()))
+                    .map(|(path, directory)| {
+                        ResourceUri::parse(&format!("{}{}", path, if directory { "/" } else { "" }))
+                            .map(DynamicValue::ResourceUri)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        )])))
     }
 
     fn dynamic_grep(&self, uri: ResourceUri, pattern: String) -> Result<DynamicValue, KernelError> {
@@ -697,9 +703,10 @@ impl RepositoryHandler {
                 ))?;
             }
         }
-        Ok(DynamicValue::List(
-            matches.into_iter().map(repository_text).collect(),
-        ))
+        Ok(DynamicValue::Record(BTreeMap::from([(
+            "matches".to_owned(),
+            DynamicValue::List(matches.into_iter().map(repository_text).collect()),
+        )])))
     }
 }
 

@@ -226,20 +226,35 @@ impl Kernel {
         scope: crate::InvocationScope,
     ) -> Result<Vec<crate::DynamicResourceResult>, KernelError> {
         let verb = self.resolve_resource_verb(&function, &uri)?;
+        let lease = self.inner.verbs.acquire(&verb)?;
+        let call = crate::DynamicVerbCall {
+            verb: verb.clone(),
+            function: function.clone(),
+            input: input.clone(),
+        };
+        self.inner.verbs.validate_call(&call)?;
         if let Some(transaction) = scope.mutation_transaction()
             && matches!(function.as_str(), "write" | "edit" | "insert")
         {
-            let result = self
+            let values = self
                 .execute_transaction_request(transaction, verb, uri, input, scope)
                 .await
-                .map(|result| vec![result]);
-            return result;
+                .map(|result| vec![result])?;
+            for value in &values {
+                self.inner
+                    .verbs
+                    .validate_result_for_lease(&call, &value.result, &lease)?;
+            }
+            return Ok(values);
         }
         let result = self
             .inner
             .resources
             .invoke_with_host(&verb, &uri, input, self.handle(), scope.clone())
             .await?;
+        self.inner
+            .verbs
+            .validate_result_for_lease(&call, &result, &lease)?;
         let values = vec![crate::DynamicResourceResult { uri, result }];
         Ok(values)
     }
@@ -390,12 +405,24 @@ impl Kernel {
     }
 
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.inner
+        let definitions = self
+            .inner
             .tool_providers
             .read()
             .await
             .iter()
             .flat_map(|provider| provider.tool_definitions())
+            .collect::<Vec<_>>();
+        let mut counts = BTreeMap::<String, usize>::new();
+        for definition in &definitions {
+            *counts.entry(definition.name.clone()).or_default() += 1;
+        }
+        // A model name is an advertised dispatch slot, never a provider
+        // lookup key. Suppress ambiguous slots rather than silently choosing
+        // whichever provider happened to be iterated first.
+        definitions
+            .into_iter()
+            .filter(|definition| counts.get(&definition.name) == Some(&1))
             .collect()
     }
 
@@ -441,7 +468,7 @@ impl Kernel {
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
-            if provider.can_execute_tool(name) {
+            if provider.can_execute_tool_in_scope(name, &scope) {
                 let result = provider
                     .execute_tool_for_model_result(name, args, host, scope)
                     .await;
@@ -501,7 +528,7 @@ impl Kernel {
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
-            if provider.can_execute_tool(name) {
+            if provider.can_execute_tool_in_scope(name, &scope) {
                 let result = provider
                     .execute_tool_for_model_result(name, args, host, scope)
                     .await;
@@ -561,20 +588,22 @@ impl Kernel {
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
-            if provider.can_execute_tool(name) {
+            if provider.can_execute_tool_in_scope(name, &scope) {
                 let model_result = provider
                     .execute_tool_for_model_result(name, args, host, scope)
                     .await;
-                let (stdout, observation) = match model_result {
-                    Ok(value) => (value.stdout, value.stdobs),
-                    Err(error) => (Err(error), String::new()),
+                let (stdout, observation, mut stderr) = match model_result {
+                    Ok(value) => (value.stdout, value.stdobs, value.stderr),
+                    Err(error) => (Err(error), String::new(), String::new()),
                 };
                 let result = stdout.clone();
-                let stderr = stdout
-                    .as_ref()
-                    .err()
-                    .map(ToString::to_string)
-                    .unwrap_or_default();
+                if stderr.is_empty() {
+                    stderr = stdout
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                }
                 let _ =
                     self.inner
                         .invocations
@@ -612,7 +641,7 @@ impl Kernel {
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
-            if provider.can_execute_tool(name) {
+            if provider.can_execute_tool_in_scope(name, &scope) {
                 let model_results = provider
                     .execute_tools_for_model_results(name, args, host, scope)
                     .await;
@@ -702,11 +731,7 @@ impl Kernel {
             })
             .collect::<Vec<_>>();
         for provider in providers.iter() {
-            if provider
-                .tool_definitions()
-                .iter()
-                .any(|definition| definition.name == name)
-            {
+            if provider.can_execute_tool_in_scope(name, &scope) {
                 let values = provider
                     .execute_tools_for_model_results_with_scopes(name, args, host, scopes)
                     .await;
@@ -775,11 +800,7 @@ impl Kernel {
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
-            if provider
-                .tool_definitions()
-                .iter()
-                .any(|definition| definition.name == name)
-            {
+            if provider.can_execute_tool_in_scope(name, &scope) {
                 let values = provider
                     .execute_tools_for_model_results_with_scopes(name, args, host, scopes)
                     .await;

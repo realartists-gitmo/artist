@@ -3719,6 +3719,18 @@ pub mod runtime {
                 .map(|version| version.generation)
         }
 
+        pub fn remove(&self, package: &str) {
+            self.active.remove_where(|active| active.package == package);
+        }
+
+        pub fn packages(&self) -> Vec<String> {
+            self.active
+                .values()
+                .into_iter()
+                .map(|active| active.package.clone())
+                .collect()
+        }
+
         /// Schedule an explicit reload after a quiet period. Repeated source
         /// edits supersede earlier requests; the transactional reload remains
         /// the only operation that can activate a candidate.
@@ -3939,6 +3951,7 @@ pub mod tool_adapter {
             kernel: KernelHandle,
             scope: artist_kernel::InvocationScope,
         ) -> Result<Vec<Value>, KernelError> {
+            let expected = args.len();
             let input = serde_json::json!({ "requests": args });
             let output = self
                 .component
@@ -3953,7 +3966,7 @@ pub mod tool_adapter {
                 .await
                 .map_err(component_error)?;
             Ok(self
-                .invoke_batch_with_observations_from_output(&output, kernel, scope)
+                .invoke_batch_with_observations_from_output(&output, expected, kernel, scope)
                 .await?
                 .into_iter()
                 .map(|(value, _, _)| value)
@@ -3966,6 +3979,7 @@ pub mod tool_adapter {
             kernel: KernelHandle,
             scope: artist_kernel::InvocationScope,
         ) -> Result<Vec<(Value, String, String)>, KernelError> {
+            let expected = args.len();
             let input = serde_json::json!({ "requests": args });
             let output = self
                 .component
@@ -3979,13 +3993,14 @@ pub mod tool_adapter {
                 )
                 .await
                 .map_err(component_error)?;
-            self.invoke_batch_with_observations_from_output(&output, kernel, scope)
+            self.invoke_batch_with_observations_from_output(&output, expected, kernel, scope)
                 .await
         }
 
         async fn invoke_batch_with_observations_from_output(
             &self,
             output: &str,
+            expected: usize,
             kernel: KernelHandle,
             scope: artist_kernel::InvocationScope,
         ) -> Result<Vec<(Value, String, String)>, KernelError> {
@@ -4000,6 +4015,14 @@ pub mod tool_adapter {
                         });
                     }
                 };
+            if values.len() != expected {
+                return Err(KernelError::Handler {
+                    message: format!(
+                        "component returned {} results for {expected} requests",
+                        values.len()
+                    ),
+                });
+            }
             let mut observed = Vec::with_capacity(values.len());
             for (index, value) in values.into_iter().enumerate() {
                 let (stdobs, stderr) = match self
@@ -4105,7 +4128,7 @@ pub mod tools {
         dirty: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
         known_packages: Arc<Mutex<HashMap<String, (PathBuf, ToolRegistration)>>>,
         published_definitions: Arc<Mutex<HashMap<String, artist_kernel::VerbDefinition>>>,
-        published_generations: Arc<Mutex<HashMap<(String, u64), PublishedToolGeneration>>>,
+        published_generations: Arc<Mutex<HashMap<(String, u64), Arc<PublishedToolGeneration>>>>,
         publication_lock: Arc<Mutex<()>>,
     }
 
@@ -4619,10 +4642,15 @@ pub mod tools {
             let granted = &self.options.granted_capabilities;
             let live = registrations
                 .iter()
-                .map(|registration| registration.package.as_str())
+                .map(|registration| registration.package.clone())
                 .collect::<std::collections::HashSet<_>>();
+            for package in self.registry.packages() {
+                if !live.contains(&package) {
+                    self.registry.remove(&package);
+                }
+            }
             if let Ok(mut published) = self.published_definitions.lock() {
-                published.retain(|package, _| live.contains(package.as_str()));
+                published.retain(|package, _| live.contains(package));
             }
             let candidates = registrations
                 .iter()
@@ -4659,7 +4687,7 @@ pub mod tools {
                                 if let Ok(mut generations) = self.published_generations.lock() {
                                     generations.insert(
                                         (registration.package.clone(), active.generation()),
-                                        PublishedToolGeneration {
+                                        Arc::new(PublishedToolGeneration {
                                             active: active.clone(),
                                             interface: registration.contract.interface.clone(),
                                             input_type: definition.input_type.clone(),
@@ -4674,7 +4702,7 @@ pub mod tools {
                                                 }),
                                             description: definition.description.clone(),
                                             definition: definition.clone(),
-                                        },
+                                        }),
                                     );
                                 }
                             }
@@ -4685,6 +4713,13 @@ pub mod tools {
                     }
                 }
             });
+            if let Ok(mut generations) = self.published_generations.lock() {
+                generations.retain(|(package, generation), published| {
+                    live.contains(package)
+                        && (self.registry.current_generation(package) == Some(*generation)
+                            || Arc::strong_count(published) > 1)
+                });
+            }
         }
 
         fn relative_uri_path(&self, uri: &ResourceUri) -> Result<PathBuf, KernelError> {
@@ -4861,7 +4896,7 @@ pub mod tools {
             &self,
             package: &str,
             generation: u64,
-        ) -> Result<PublishedToolGeneration, KernelError> {
+        ) -> Result<Arc<PublishedToolGeneration>, KernelError> {
             self.published_generations
                 .lock()
                 .map_err(|_| KernelError::Handler {
@@ -4878,7 +4913,8 @@ pub mod tools {
             &self,
             name: &str,
             scope: &artist_kernel::InvocationScope,
-        ) -> Result<(super::runtime::ActiveVersion, PublishedToolGeneration), KernelError> {
+        ) -> Result<(super::runtime::ActiveVersion, Arc<PublishedToolGeneration>), KernelError>
+        {
             let candidates = self
                 .published_generations
                 .lock()
@@ -4895,13 +4931,20 @@ pub mod tools {
                 })
                 .map(|((package, _), published)| (package.clone(), published.clone()))
                 .collect::<Vec<_>>();
-            let (package, published) =
-                candidates
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| KernelError::Handler {
+            let mut candidates = candidates;
+            let (package, published) = match candidates.len() {
+                0 => {
+                    return Err(KernelError::Handler {
                         message: format!("no published generation for tool {name}"),
-                    })?;
+                    });
+                }
+                1 => candidates.pop().expect("one candidate"),
+                _ => {
+                    return Err(KernelError::Conflict {
+                        uri: format!("ambiguous tool name {name}"),
+                    });
+                }
+            };
             if scope
                 .snapshotted_generation(&package)
                 .is_some_and(|generation| generation != published.active.generation())
@@ -4910,6 +4953,10 @@ pub mod tools {
                     uri: format!("tool generation changed: {package}"),
                 });
             }
+            scope.pin_generation_handle(
+                format!("tool-metadata-generation:{package}"),
+                published.clone(),
+            );
             Ok((published.active.clone(), published))
         }
 
@@ -5121,7 +5168,7 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> Result<Value, KernelError> {
             let (active, registration) = self.published_for_name(name, &scope)?;
-            ComponentTool::new(active, registration.interface)
+            ComponentTool::new(active, registration.interface.clone())
                 .invoke_async_with_scope(args, host, scope)
                 .await
         }
@@ -5137,6 +5184,14 @@ pub mod tools {
                         .any(|generation| generation.definition.function == name)
                 })
                 .unwrap_or(false)
+        }
+
+        fn can_execute_tool_in_scope(
+            &self,
+            name: &str,
+            scope: &artist_kernel::InvocationScope,
+        ) -> bool {
+            self.published_for_name(name, scope).is_ok()
         }
 
         fn tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -8403,6 +8458,16 @@ pub mod resources {
                         .handler
                         .invoke_bootstrap_dynamic(verb, uri.clone(), input, &self.bindings)
                         .await?;
+                    let result = if verb.to_string().starts_with("artist:resource/")
+                        && verb.function() == "read"
+                    {
+                        match result {
+                            DynamicValue::Variant(_, Some(value)) => *value,
+                            other => other,
+                        }
+                    } else {
+                        result
+                    };
                     return Ok(DynamicVerbResult {
                         verb: verb.clone(),
                         function: verb.function().to_owned(),
@@ -8443,6 +8508,16 @@ pub mod resources {
                         .handler
                         .invoke_bootstrap_dynamic(verb, uri.clone(), input, &self.bindings)
                         .await?;
+                    let result = if verb.to_string().starts_with("artist:resource/")
+                        && verb.function() == "read"
+                    {
+                        match result {
+                            DynamicValue::Variant(_, Some(value)) => *value,
+                            other => other,
+                        }
+                    } else {
+                        result
+                    };
                     return Ok(DynamicVerbResult {
                         verb: verb.clone(),
                         function: verb.function().to_owned(),
