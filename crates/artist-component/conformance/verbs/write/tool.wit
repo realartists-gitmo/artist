@@ -1,9 +1,0 @@
-package artist:tool@1.0.0;
-interface write {
-    use artist:%resource/types@1.0.0.{anchored-text, error, uri};
-    record write-request { uri: uri, content: string }
-    record write-response { uri: uri, text: option<anchored-text> }
-    write: func(requests: list<write-request>) -> list<result<write-response, error>>;
-    observe: func(response: result<write-response, error>) -> string;
-}
-world tool-world { import artist:%resource/host@1.0.0; export write; }

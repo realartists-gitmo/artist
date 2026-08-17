@@ -1,3 +1,8 @@
+//! WIPE FLAG: this crate may need to be wiped and rebuilt. The kernel and
+//! component crates were wiped on 2026-08-17 because the refactor ignored
+//! substantial prior art; the session store has not been audited yet against
+//! that decision. Audit before rebuilding the VFS layer.
+//!
 //! Event-sourced session store for Artist.
 //!
 //! The canonical record of a session is an append-only JSONL event log

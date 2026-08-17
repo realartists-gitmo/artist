@@ -1,8 +1,0 @@
-package artist-extension:ast@1.0.0;
-
-world ast {
-    import filesystem: artist:%resource/filesystem@1.0.0;
-    import source-read: artist:%resource/read@1.0.0;
-    export artist:%resource/extension@1.0.0;
-    export artist:%resource/read@1.0.0;
-}
