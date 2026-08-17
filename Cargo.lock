@@ -242,7 +242,6 @@ dependencies = [
  "arboard",
  "artist-agent",
  "artist-component",
- "artist-herdr",
  "artist-kernel",
  "artist-session",
  "clap",
@@ -293,14 +292,6 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "wit-parser 0.252.0",
-]
-
-[[package]]
-name = "artist-herdr"
-version = "0.1.0"
-dependencies = [
- "tempfile",
- "tokio",
 ]
 
 [[package]]

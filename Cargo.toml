@@ -5,7 +5,6 @@ members = [
     "crates/llm-provider",
     "crates/artist-cli",
     "crates/artist-agent",
-    "crates/artist-herdr",
     "crates/artist-session",
     "crates/artist-component",
 ]

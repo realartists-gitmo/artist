@@ -1,20 +1,10 @@
-//! Saved provider configuration and authentication primitives.
+//! WIPED STUB — llm-provider.
 //!
-//! Secrets are serializable because callers need to persist them, but are always
-//! redacted from `Debug`. Persist [`SavedProvider`] values in an OS keychain or an
-//! equivalently protected encrypted store, never in plaintext configuration.
-
-mod chatgpt;
-mod error;
-mod provider;
-mod registry;
-mod secret;
-
-pub use chatgpt::{
-    CHATGPT_CODEX_BASE_URL, CODEX_CLIENT_ID, ChatGptOAuth, LoginRequest, PendingLogin,
-    RefreshOutcome,
-};
-pub use error::{Error, Result};
-pub use provider::{Auth, Credentials, OpenAiApi, ProviderId, RequestAuth, SavedProvider};
-pub use registry::{PROVIDERS, ProviderKind, ProviderMetadata, metadata};
-pub use secret::Secret;
+//! The previous provider/auth layer was wiped on 2026-08-17 because the
+//! refactor ignored substantial prior art and needs to be rebuilt from the
+//! ground up. Nothing in `src/` survives; this crate is an empty skeleton.
+//!
+//! `Cargo.toml` is intentionally left intact (deps + workspace wiring) so the
+//! rebuild has its original dependency picture available.
+//!
+//! TODO(rebuild): design the new provider layer against prior art before writing code.

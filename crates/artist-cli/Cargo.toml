@@ -5,14 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "artist"
-path = "src/main.rs"
-
 [dependencies]
 artist-agent = { path = "../artist-agent" }
 artist-component = { path = "../artist-component" }
-artist-herdr = { path = "../artist-herdr" }
 artist-kernel = { path = "../artist-kernel" }
 artist-session = { path = "../artist-session" }
 fs2 = "0.4"
