@@ -9,6 +9,7 @@ rust-version.workspace = true
 artist-agent = { path = "../artist-agent" }
 artist-component = { path = "../artist-component" }
 artist-kernel = { path = "../artist-kernel" }
+artist-wasm = { path = "../artist-kernel/wasm" }
 artist-wasm-verbs = { path = "../artist-kernel/wasm/verbs" }
 artist-session = { path = "../artist-session" }
 fs2 = "0.4"

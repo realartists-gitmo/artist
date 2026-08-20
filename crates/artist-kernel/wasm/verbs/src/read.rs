@@ -356,7 +356,7 @@ mod tests {
             &TestReader,
             &TestAddresser,
             ReadRequest {
-                uri: "files:///note.txt".into(),
+                uri: "file:///note.txt".into(),
                 range: None,
             },
         )
@@ -373,7 +373,7 @@ mod tests {
             &TestReader,
             &TestAddresser,
             ReadRequest {
-                uri: "files:///note.txt#a1+1".into(),
+                uri: "file:///note.txt#a1+1".into(),
                 range: Some("-1..+1".into()),
             },
         )

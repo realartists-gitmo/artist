@@ -19,9 +19,9 @@ fn mounts_kernel_read_only() {
         .expect("read_dir should succeed")
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names, vec!["resources", "tools", "events", "files"]);
+    assert_eq!(names, vec!["url"]);
 
-    let resource_dir = mountpoint.join("resources");
+    let resource_dir = mountpoint.join("url");
     let attrs = fs::metadata(&resource_dir).expect("metadata should succeed");
     assert!(attrs.is_dir());
     assert!(

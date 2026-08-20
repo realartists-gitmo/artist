@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use artist_kernel::{Kernel, ResourceError};
+use artist_component::ComponentToolRegistry;
 use artist_session::{EventLog, EventLogTranscript, LogError};
 use futures::StreamExt;
 use llm_provider::{
@@ -48,6 +49,43 @@ pub enum ToolError {
 #[async_trait::async_trait]
 pub trait ToolInvoker: Send + Sync {
     async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError>;
+}
+
+/// Agent-loop adapter for the session-local component tool registry. The
+/// registry owns TOON and component dispatch; the agent loop only translates
+/// its provider-neutral `ToolCall`/`ToolResult` records.
+pub struct ComponentToolInvoker {
+    registry: ComponentToolRegistry,
+}
+
+impl ComponentToolInvoker {
+    pub fn new(registry: ComponentToolRegistry) -> Self { Self { registry } }
+    pub fn registry(&self) -> &ComponentToolRegistry { &self.registry }
+}
+
+#[async_trait::async_trait]
+impl ToolInvoker for ComponentToolInvoker {
+    async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
+        let request = toon_format::encode_default(&call.arguments)
+            .map_err(|error| ToolError::Failed { message: format!("encode tool request: {error}") })?;
+        match self.registry.invoke(&call.name, request.as_bytes()).await {
+            Ok(response) => {
+                let value: serde_json::Value = toon_format::decode_default(
+                    std::str::from_utf8(&response).map_err(|error| ToolError::Failed { message: error.to_string() })?,
+                ).map_err(|error| ToolError::Failed { message: format!("decode tool response: {error}") })?;
+                Ok(ToolResult {
+                    call_id: call.id,
+                    content: vec![llm_provider::ContentPart::Text { text: serde_json::to_string(&value).unwrap_or_default() }],
+                    is_error: false,
+                })
+            }
+            Err(error) => Ok(ToolResult {
+                call_id: call.id,
+                content: vec![llm_provider::ContentPart::Text { text: error.to_string() }],
+                is_error: true,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -172,7 +210,7 @@ where
     }
 
     /// Publish this engine's existing durable event log through the kernel's
-    /// `agents://<agent>/transcript` resource.
+    /// `agent://<agent>/transcript` resource.
     pub fn register_transcript(
         &self,
         kernel: &Kernel,

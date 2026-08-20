@@ -203,7 +203,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             mover.deletes.lock().unwrap().as_slice(),
-            &["files:///new.txt"]
+            &["file:///new.txt"]
         );
     }
 
@@ -212,7 +212,7 @@ mod tests {
         let error = move_resource(
             &RecordingMover::default(),
             MoveRequest {
-                source: "files:///old.txt#anchor".into(),
+                source: "file:///old.txt#anchor".into(),
                 destination: None,
             },
         )

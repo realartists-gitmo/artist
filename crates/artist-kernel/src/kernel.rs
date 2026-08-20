@@ -8,14 +8,13 @@ use async_trait::async_trait;
 use crate::agents::{AgentProcess, AgentTranscript, AgentsProvider};
 use crate::contracts::{ContractRegistry, ExtensionContract};
 use crate::namespace::Namespace;
-use crate::native::{EmptyNamespace, FilesNamespace};
+use crate::native::FilesNamespace;
 use crate::provider::{
     LayeredResourceProvider, ProviderAttrs, ProviderEntry, ResourceError, ResourceErrorCode,
     ResourceProvider,
 };
-use crate::resources::Resources;
+use crate::resources::UrlNamespace;
 use crate::uri::{ResourceUri, UriError};
-use crate::verbs::{VerbHandler, VerbInvocationError, VerbRegistry};
 use crate::vfs::{Attrs, DirEntry, Ino, NodeKind, Vfs, VfsError};
 
 #[derive(Clone)]
@@ -25,17 +24,17 @@ enum ProviderSlot {
 }
 
 impl ProviderSlot {
-    fn claims(&self, uri: &ResourceUri) -> bool {
-        match self {
-            Self::Namespace(provider) => provider.claims(uri),
-            Self::Resource(provider) => provider.claims(uri),
-        }
-    }
-
     fn priority(&self) -> u32 {
         match self {
             Self::Namespace(provider) => provider.priority(),
             Self::Resource(provider) => provider.priority(),
+        }
+    }
+
+    async fn matches(&self, uri: &ResourceUri) -> bool {
+        match self {
+            Self::Namespace(provider) => provider.matches(uri).await,
+            Self::Resource(provider) => provider.matches(uri).await,
         }
     }
 
@@ -142,43 +141,57 @@ struct Registry {
 pub struct Kernel {
     registry: RwLock<Registry>,
     next_ino: AtomicU64,
-    verbs: Arc<VerbRegistry>,
     agents: Arc<AgentsProvider>,
     contracts: Arc<ContractRegistry>,
 }
 
 impl Kernel {
-    /// Construct the complete native bootstrap surface.
+    /// Construct the kernel bootstrap surface.
     ///
-    /// `files://` mirrors the current working directory by default, excluding
+    /// `file://` mirrors the current working directory by default, excluding
     /// every `.artist` directory and its descendants. Embedders that need a
     /// different host root should use [`Self::with_files_root`].
     pub fn new() -> Self {
-        let root = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        Self::with_files_root(root)
+        Self::with_url()
+    }
+
+    /// Construct a kernel with only the kernel-owned `url://` namespace root.
+    ///
+    /// Filesystem, tools, events, and other model-facing surfaces are opt-in
+    /// providers/extensions rather than kernel requirements.
+    pub fn with_url() -> Self {
+        let kernel = Self::empty();
+        kernel.register(UrlNamespace::new());
+        kernel
+    }
+
+    /// Explicitly opt a kernel into the agent transcript/process provider.
+    /// Agent resources are not part of the resource bootstrap surface.
+    pub fn with_agents() -> Self {
+        let kernel = Self::with_url();
+        let agents: Arc<dyn ResourceProvider> = kernel.agents.clone();
+        kernel
+            .registry
+            .write()
+            .unwrap()
+            .providers
+            .push(ProviderSlot::Resource(agents));
+        kernel
     }
 
     pub fn with_files_root(root: impl Into<std::path::PathBuf>) -> Self {
-        let kernel = Self::empty();
-        kernel.register(Resources::new());
-        kernel.register(EmptyNamespace::new("tools"));
-        kernel.register(EmptyNamespace::new("events"));
-        kernel.register(EmptyNamespace::new("prompts"));
+        let kernel = Self::with_url();
         kernel.register(FilesNamespace::new(root));
         kernel
     }
 
-    /// Construct a kernel with selected host paths hidden from `files://` in
+    /// Construct a kernel with selected host paths hidden from `file://` in
     /// addition to the universal `.artist` exclusion.
     pub fn with_files_root_excluding(
         root: impl Into<std::path::PathBuf>,
         exclusions: impl IntoIterator<Item = std::path::PathBuf>,
     ) -> Result<Self, ResourceError> {
-        let kernel = Self::empty();
-        kernel.register(Resources::new());
-        kernel.register(EmptyNamespace::new("tools"));
-        kernel.register(EmptyNamespace::new("events"));
-        kernel.register(EmptyNamespace::new("prompts"));
+        let kernel = Self::with_url();
         let files = FilesNamespace::new(root);
         for exclusion in exclusions {
             files.exclude_path(exclusion)?;
@@ -194,10 +207,9 @@ impl Kernel {
         Self {
             registry: RwLock::new(Registry {
                 namespaces: Vec::new(),
-                providers: vec![ProviderSlot::Resource(agents.clone())],
+                providers: Vec::new(),
             }),
             next_ino: AtomicU64::new(Ino::ROOT.0 + 1),
-            verbs: Arc::new(VerbRegistry::new()),
             agents,
             contracts,
         }
@@ -242,7 +254,7 @@ impl Kernel {
     }
 
     /// Publish an append-only transcript at
-    /// `agents://<agent>/transcript`.
+    /// `agent://<agent>/transcript`.
     pub fn register_agent_transcript<T: AgentTranscript + 'static>(
         &self,
         agent: impl Into<String>,
@@ -264,8 +276,8 @@ impl Kernel {
         self.agents.close(uri).await
     }
 
-    /// Publish the live process channels at `agents://<agent>/stdin` and
-    /// `agents://<agent>/stdout`.
+    /// Publish the live process channels at `agent://<agent>/stdin` and
+    /// `agent://<agent>/stdout`.
     pub fn register_agent_process<T: AgentProcess + 'static>(
         &self,
         agent: impl Into<String>,
@@ -303,29 +315,6 @@ impl Kernel {
         self.contracts.invoke(name, version, operation, input).await
     }
 
-    /// Register a model-facing verb for use by the harness and extensions.
-    pub fn register_verb<H: VerbHandler + 'static>(&self, handler: H) {
-        self.verbs.register(handler);
-    }
-
-    /// Obtain the shared verb registry for host adapters and extension
-    /// runtimes. The registry is independent of resource-provider routing.
-    pub fn verb_registry(&self) -> Arc<VerbRegistry> {
-        Arc::clone(&self.verbs)
-    }
-
-    pub fn verb_names(&self) -> Vec<String> {
-        self.verbs.names()
-    }
-
-    pub async fn invoke_verb(
-        &self,
-        name: &str,
-        request: &[u8],
-    ) -> Result<Vec<u8>, VerbInvocationError> {
-        self.verbs.invoke(name, request).await
-    }
-
     pub fn namespace_names(&self) -> Vec<String> {
         self.registry
             .read()
@@ -346,29 +335,31 @@ impl Kernel {
             .cloned()
     }
 
-    fn find_uri(&self, uri: &ResourceUri) -> Option<ProviderSlot> {
-        self.registry
-            .read()
-            .unwrap()
-            .providers
-            .iter()
-            .filter(|provider| provider.claims(uri))
+    async fn find_uri(&self, uri: &ResourceUri) -> Option<ProviderSlot> {
+        let providers = self.registry.read().unwrap().providers.clone();
+        let mut matches = Vec::new();
+        for provider in providers {
+            if provider.matches(uri).await {
+                matches.push(provider);
+            }
+        }
+        matches
+            .into_iter()
             .max_by_key(|provider| provider.priority())
-            .cloned()
     }
 
-    fn provider_for_uri(&self, uri: &ResourceUri) -> Result<ProviderSlot, ResourceError> {
-        self.find_uri(uri).ok_or_else(|| {
+    async fn provider_for_uri(&self, uri: &ResourceUri) -> Result<ProviderSlot, ResourceError> {
+        self.find_uri(uri).await.ok_or_else(|| {
             ResourceError::new(
                 ResourceErrorCode::NotFound,
-                format!("no provider claims resource URI {uri}"),
+                format!("no provider matches resource URI {uri}"),
             )
         })
     }
 
     pub async fn attrs_uri(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
         let base = uri.without_fragment();
-        self.provider_for_uri(&base)?.attrs(&base).await
+        self.provider_for_uri(&base).await?.attrs(&base).await
     }
 
     pub async fn readdir_uri(
@@ -376,7 +367,7 @@ impl Kernel {
         uri: &ResourceUri,
     ) -> Result<Vec<ProviderEntry>, ResourceError> {
         let base = uri.without_fragment();
-        self.provider_for_uri(&base)?.readdir(&base).await
+        self.provider_for_uri(&base).await?.readdir(&base).await
     }
 
     pub async fn read_uri(
@@ -386,14 +377,15 @@ impl Kernel {
         size: u32,
     ) -> Result<Vec<u8>, ResourceError> {
         let base = uri.without_fragment();
-        self.provider_for_uri(&base)?
+        self.provider_for_uri(&base)
+            .await?
             .read(&base, offset, size)
             .await
     }
 
     pub async fn parent_uri(&self, uri: &ResourceUri) -> Option<ResourceUri> {
         let base = uri.without_fragment();
-        self.find_uri(&base)?.parent(&base).await
+        self.find_uri(&base).await?.parent(&base).await
     }
 
     pub async fn write_uri(
@@ -403,19 +395,23 @@ impl Kernel {
         data: &[u8],
     ) -> Result<u32, ResourceError> {
         let base = uri.without_fragment();
-        self.provider_for_uri(&base)?
+        self.provider_for_uri(&base)
+            .await?
             .write(&base, offset, data)
             .await
     }
 
     pub async fn set_size_uri(&self, uri: &ResourceUri, size: u64) -> Result<(), ResourceError> {
         let base = uri.without_fragment();
-        self.provider_for_uri(&base)?.set_size(&base, size).await
+        self.provider_for_uri(&base)
+            .await?
+            .set_size(&base, size)
+            .await
     }
 
     pub async fn create_file_uri(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
         let base = uri.without_fragment();
-        self.provider_for_uri(&base)?.create_file(&base).await
+        self.provider_for_uri(&base).await?.create_file(&base).await
     }
 
     pub async fn create_directory_uri(
@@ -423,7 +419,10 @@ impl Kernel {
         uri: &ResourceUri,
     ) -> Result<ProviderAttrs, ResourceError> {
         let base = uri.without_fragment();
-        self.provider_for_uri(&base)?.create_directory(&base).await
+        self.provider_for_uri(&base)
+            .await?
+            .create_directory(&base)
+            .await
     }
 
     pub async fn move_uri(
@@ -433,14 +432,15 @@ impl Kernel {
     ) -> Result<(), ResourceError> {
         let source = source.without_fragment();
         let destination = destination.without_fragment();
-        self.provider_for_uri(&source)?
+        self.provider_for_uri(&source)
+            .await?
             .move_resource(&source, &destination)
             .await
     }
 
     pub async fn delete_uri(&self, uri: &ResourceUri) -> Result<(), ResourceError> {
         let base = uri.without_fragment();
-        self.provider_for_uri(&base)?.delete(&base).await
+        self.provider_for_uri(&base).await?.delete(&base).await
     }
 
     pub async fn attrs_str(&self, uri: &str) -> Result<ProviderAttrs, ResourceError> {
@@ -622,7 +622,7 @@ mod tests {
         fn provider_name(&self) -> &str {
             "virtual"
         }
-        fn claims(&self, uri: &ResourceUri) -> bool {
+        fn eligible(&self, uri: &ResourceUri) -> bool {
             uri.starts_with(&self.prefix)
         }
         fn priority(&self) -> u32 {
@@ -681,19 +681,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_roots_are_published() {
-        let kernel = Kernel::with_files_root(std::env::temp_dir());
-        assert_eq!(
-            kernel.namespace_names(),
-            vec!["resources", "tools", "events", "prompts", "files"]
-        );
+    async fn kernel_bootstrap_publishes_only_url_namespace() {
+        let kernel = Kernel::new();
+        assert_eq!(kernel.namespace_names(), vec!["url"]);
         let roots = kernel.readdir(Ino::ROOT).await.unwrap();
         assert_eq!(
             roots
                 .iter()
                 .map(|entry| entry.name.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
-            vec!["resources", "tools", "events", "prompts", "files"]
+            vec!["url"]
+        );
+    }
+
+    #[tokio::test]
+    async fn native_roots_are_published() {
+        let kernel = Kernel::with_files_root(std::env::temp_dir());
+        assert_eq!(kernel.namespace_names(), vec!["url", "file"]);
+        let roots = kernel.readdir(Ino::ROOT).await.unwrap();
+        assert_eq!(
+            roots
+                .iter()
+                .map(|entry| entry.name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["url", "file"]
         );
     }
 
@@ -702,7 +713,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("hello.txt"), b"hello").unwrap();
         let kernel = Kernel::with_files_root(temp.path());
-        let uri: ResourceUri = "files:///hello.txt".parse().unwrap();
+        let uri: ResourceUri = "file:///hello.txt".parse().unwrap();
         let attrs = kernel.attrs_uri(&uri).await.unwrap();
         assert_eq!(attrs.kind, NodeKind::File);
         assert_eq!(kernel.read_uri(&uri, 1, 3).await.unwrap(), b"ell");
@@ -715,13 +726,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("hello.txt"), b"hello").unwrap();
         let kernel = Kernel::with_files_root(temp.path());
-        let uri: ResourceUri = "files:///hello.txt?kind#content".parse().unwrap();
+        let uri: ResourceUri = "file:///hello.txt?kind#content".parse().unwrap();
 
         // The kernel strips the position fragment before provider I/O. The
         // provider still owns the meaning of the query projection.
         assert_eq!(kernel.read_uri(&uri, 0, 32).await.unwrap(), b"file");
 
-        let kind: ResourceUri = "files:///hello.txt?kind".parse().unwrap();
+        let kind: ResourceUri = "file:///hello.txt?kind".parse().unwrap();
         assert_eq!(kernel.read_uri(&kind, 0, 32).await.unwrap(), b"file");
     }
 
@@ -732,16 +743,16 @@ mod tests {
         std::fs::create_dir(temp.path().join("destination")).unwrap();
         let kernel = Kernel::with_files_root(temp.path());
 
-        let hello: ResourceUri = "files:///hello.txt#position".parse().unwrap();
+        let hello: ResourceUri = "file:///hello.txt#position".parse().unwrap();
         assert_eq!(kernel.write_uri(&hello, 5, b"!").await.unwrap(), 1);
         kernel.set_size_uri(&hello, 4).await.unwrap();
         assert_eq!(kernel.read_uri(&hello, 0, 16).await.unwrap(), b"hell");
 
-        let created: ResourceUri = "files:///created.txt#position".parse().unwrap();
+        let created: ResourceUri = "file:///created.txt#position".parse().unwrap();
         kernel.create_file_uri(&created).await.unwrap();
         assert_eq!(kernel.read_uri(&created, 0, 16).await.unwrap(), b"");
 
-        let created_dir: ResourceUri = "files:///created-dir#position".parse().unwrap();
+        let created_dir: ResourceUri = "file:///created-dir#position".parse().unwrap();
         assert_eq!(
             kernel
                 .create_directory_uri(&created_dir)
@@ -751,10 +762,10 @@ mod tests {
             NodeKind::Directory
         );
 
-        let destination: ResourceUri = "files:///destination".parse().unwrap();
+        let destination: ResourceUri = "file:///destination".parse().unwrap();
 
         kernel.move_uri(&hello, &destination).await.unwrap();
-        let moved: ResourceUri = "files:///destination/hello.txt".parse().unwrap();
+        let moved: ResourceUri = "file:///destination/hello.txt".parse().unwrap();
         assert_eq!(kernel.read_uri(&moved, 0, 16).await.unwrap(), b"hell");
 
         kernel.delete_uri(&created).await.unwrap();
@@ -782,13 +793,13 @@ mod tests {
         );
         assert_eq!(
             kernel
-                .attrs_str("files:///private/secret.txt")
+                .attrs_str("file:///private/secret.txt")
                 .await
                 .unwrap_err()
                 .code,
             ResourceErrorCode::NotFound
         );
-        let files = kernel.lookup(Ino::ROOT, OsStr::new("files")).await.unwrap();
+        let files = kernel.lookup(Ino::ROOT, OsStr::new("file")).await.unwrap();
         let entries = kernel.readdir(files.ino).await.unwrap();
         assert!(
             entries
@@ -813,18 +824,18 @@ mod tests {
 
         assert!(kernel.attrs_str("visible.txt").await.is_ok());
         for uri in [
-            "files:///.artist/private.txt",
-            "files:///nested/.artist/deeper/private.txt",
+            "file:///.artist/private.txt",
+            "file:///nested/.artist/deeper/private.txt",
         ] {
             assert_eq!(
                 kernel.attrs_str(uri).await.unwrap_err().code,
                 ResourceErrorCode::NotFound
             );
         }
-        let root = kernel.attrs_str("files:///").await.unwrap();
+        let root = kernel.attrs_str("file:///").await.unwrap();
         assert_eq!(root.kind, NodeKind::Directory);
         let entries = kernel
-            .readdir_uri(&"files:///".parse().unwrap())
+            .readdir_uri(&"file:///".parse().unwrap())
             .await
             .unwrap();
         assert!(entries.iter().all(|entry| entry.name != ".artist"));
@@ -835,7 +846,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("old.txt"), b"old").unwrap();
         let kernel = Kernel::with_files_root(temp.path());
-        let files = kernel.lookup(Ino::ROOT, OsStr::new("files")).await.unwrap();
+        let files = kernel.lookup(Ino::ROOT, OsStr::new("file")).await.unwrap();
         let old = kernel
             .lookup(files.ino, OsStr::new("old.txt"))
             .await
@@ -875,7 +886,7 @@ mod tests {
 
     #[tokio::test]
     async fn virtual_provider_claims_a_uri_subtree() {
-        let prefix: ResourceUri = "resources://demo".parse().unwrap();
+        let prefix: ResourceUri = "resource://demo".parse().unwrap();
         let mut data = HashMap::new();
         data.insert("answer".into(), b"42".to_vec());
         let kernel = Kernel::new();
@@ -883,7 +894,7 @@ mod tests {
             prefix: prefix.clone(),
             data,
         });
-        let uri: ResourceUri = "resources://demo/answer".parse().unwrap();
+        let uri: ResourceUri = "resource://demo/answer".parse().unwrap();
         assert_eq!(kernel.read_uri(&uri, 0, 2).await.unwrap(), b"42");
         assert_eq!(kernel.parent_uri(&uri).await.unwrap(), prefix);
     }

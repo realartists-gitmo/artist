@@ -230,7 +230,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             writer.files.lock().unwrap().as_slice(),
-            &["files:///notes.txt"]
+            &["file:///notes.txt"]
         );
         assert_eq!(writer.writes.lock().unwrap()[0].1, b"hello");
     }

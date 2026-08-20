@@ -21,7 +21,7 @@ enum Command {
         /// TOON input file. Omit it to read stdin.
         #[arg(short, long)]
         input: Option<PathBuf>,
-        /// Host directory exposed as files:///
+        /// Host directory exposed as file:///
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
                     payload
                 }
             };
-            let runner = ToolRunner::new(root)?;
+            let runner = ToolRunner::new(root).await?;
             let (output, ok) = runner.call_toon(&verb, &payload).await?;
             println!("{output}");
             if !ok {

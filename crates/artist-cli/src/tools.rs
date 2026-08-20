@@ -6,87 +6,44 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::{Context, anyhow};
+use artist_component::{ExtensionCatalog, UrlComposition, UrlCompositionSource};
 use artist_kernel::Kernel;
-use artist_kernel::VerbInvocationError;
-use artist_wasm_verbs::ToonVerbHandler;
-use artist_wasm_verbs::edit::{CompatibilityAnchorResolver, EditVerb, KernelEditor};
-use artist_wasm_verbs::find::FffFindIndex;
-use artist_wasm_verbs::find::FindVerb;
-use artist_wasm_verbs::grep::GrepVerb;
-use artist_wasm_verbs::move_::{KernelMover, MoveVerb};
-use artist_wasm_verbs::read::{AnchoredLine, KernelReader, LineAddresser, ReadError, ReadVerb};
-use artist_wasm_verbs::write::{KernelWriter, WriteVerb};
+use artist_component::{ComponentToolRegistry, ToolError};
+use artist_wasm::{ExtensionManager, KernelHostEnvironment, Runtime, build_engine};
 use serde_json::Value;
 
-/// A temporary compatibility addresser for the default CLI path. The actual
-/// Teca anchor implementation will replace this seam without changing the
-/// CLI or read contract.
-struct CompatibilityLineAddresser;
-
-impl LineAddresser for CompatibilityLineAddresser {
-    fn address_lines(&self, source: &str) -> Result<Vec<AnchoredLine>, ReadError> {
-        Ok(source
-            .lines()
-            .enumerate()
-            .map(|(index, content)| AnchoredLine {
-                anchor: format!("a{index}"),
-                content: content.to_string(),
-            })
-            .collect())
-    }
-}
-
 pub struct ToolRunner {
-    kernel: Arc<Kernel>,
+    tools: ComponentToolRegistry,
 }
 
 impl ToolRunner {
-    pub fn new(root: impl Into<PathBuf>) -> anyhow::Result<Self> {
+    pub async fn new(root: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let root = root.into();
         let kernel = Arc::new(Kernel::with_files_root(root.clone()));
-        let find_index = FffFindIndex::start(
-            root.clone(),
-            artist_kernel::ResourceUri::root("files")?,
-            Vec::new(),
+        let tools = ComponentToolRegistry::new();
+        let engine = build_engine()?;
+        let catalog = ExtensionCatalog::default();
+        catalog.install_into(&kernel);
+        let runtime = Arc::new(Runtime::new(
+            engine.clone(),
+            Arc::new(KernelHostEnvironment::new(kernel)),
+        ));
+        let manager = ExtensionManager::new(runtime);
+        let global = extension_root()?;
+        let local = root.join(".artist/url");
+        let composition = UrlComposition::new(
+            UrlCompositionSource::new(global, local),
+            engine,
+            manager,
+            catalog,
         )
-        .map_err(|error| anyhow!(error.to_string()))?;
-        if !find_index.wait_for_scan(Duration::from_secs(30)) {
-            return Err(anyhow!("filesystem index did not finish scanning"));
+        .with_tools(tools.clone());
+        composition.reload().await.context("load URL composition")?;
+        if tools.names().is_empty() {
+            return Err(anyhow!("URL composition registered no model-facing tools"));
         }
-        kernel.register_verb(ToonVerbHandler::new(
-            "read",
-            ReadVerb::new(
-                KernelReader::new(Arc::clone(&kernel)),
-                CompatibilityLineAddresser,
-            ),
-        ));
-        kernel.register_verb(ToonVerbHandler::new(
-            "write",
-            WriteVerb::new(KernelWriter::new(Arc::clone(&kernel))),
-        ));
-        kernel.register_verb(ToonVerbHandler::new(
-            "edit",
-            EditVerb::new(
-                KernelEditor::new(Arc::clone(&kernel)),
-                CompatibilityAnchorResolver,
-            ),
-        ));
-        kernel.register_verb(ToonVerbHandler::new(
-            "move",
-            MoveVerb::new(KernelMover::new(Arc::clone(&kernel))),
-        ));
-        kernel.register_verb(ToonVerbHandler::new(
-            "find",
-            FindVerb::new(find_index.clone()),
-        ));
-        kernel.register_verb(ToonVerbHandler::new(
-            "grep",
-            GrepVerb::new(find_index.clone()),
-        ));
-        Ok(Self { kernel })
+        Ok(Self { tools })
     }
 
     /// Decode one scalar request or a list of requests and return the same
@@ -122,14 +79,14 @@ impl ToolRunner {
             Value::Array(values) => values,
             value => vec![value],
         };
-        if !self.kernel.verb_names().iter().any(|name| name == verb) {
+        if !self.tools.names().iter().any(|name| name == verb) {
             return Err(anyhow!("unknown tool {verb:?}"));
         }
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
             let request =
                 toon_format::encode_default(&request).context("encode TOON tool request")?;
-            let result = self.kernel.invoke_verb(verb, request.as_bytes()).await;
+            let result = self.tools.invoke(verb, request.as_bytes()).await;
             results.push(match result {
                 Ok(response) => {
                     let response: Value = toon_format::decode_default(
@@ -149,15 +106,15 @@ impl ToolRunner {
     }
 }
 
-fn format_invocation_error(error: VerbInvocationError) -> &'static str {
+fn format_invocation_error(error: ToolError) -> &'static str {
     match error {
-        VerbInvocationError::InvalidArgument(_) => "invalid_argument",
-        VerbInvocationError::NotFound(_) => "not_found",
-        VerbInvocationError::Unsupported(_) => "unsupported",
-        VerbInvocationError::PermissionDenied(_) => "permission_denied",
-        VerbInvocationError::Conflict(_) => "conflict",
-        VerbInvocationError::Aborted(_) => "aborted",
-        VerbInvocationError::Internal(_) => "internal",
+        ToolError::InvalidArgument(_) => "invalid_argument",
+        ToolError::NotFound(_) => "not_found",
+        ToolError::Unsupported(_) => "unsupported",
+        ToolError::PermissionDenied(_) => "permission_denied",
+        ToolError::Conflict(_) => "conflict",
+        ToolError::Aborted(_) => "aborted",
+        ToolError::Internal(_) => "internal",
     }
 }
 
@@ -166,4 +123,28 @@ pub fn validate_root(root: &Path) -> anyhow::Result<()> {
         return Err(anyhow!("tool root is not a directory: {}", root.display()));
     }
     Ok(())
+}
+
+fn extension_root() -> anyhow::Result<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("ARTIST_EXTENSIONS_DIR") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            candidates.push(parent.join("extensions"));
+            if let Some(parent) = parent.parent() {
+                candidates.push(parent.join("extensions"));
+            }
+        }
+    }
+    if let Ok(current) = std::env::current_dir() {
+        for ancestor in current.ancestors() {
+            candidates.push(ancestor.join("extensions"));
+        }
+    }
+    candidates.dedup();
+    candidates.into_iter().find(|path| path.is_dir()).ok_or_else(|| anyhow!(
+        "no extension directory found; set ARTIST_EXTENSIONS_DIR or install extensions beside the Artist executable"
+    ))
 }

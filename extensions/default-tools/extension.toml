@@ -1,0 +1,3 @@
+name = "default-tools"
+version = "0.1.0"
+route_hints = ["read", "write", "edit", "move", "find", "grep"]

@@ -10,16 +10,19 @@ use wasmtime::{
     Engine, Store,
     component::{Component, Instance, Linker},
 };
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime::component::ResourceTable;
 
 use crate::classify::ExtensionClass;
 use crate::loader::Extension;
-use crate::verb_registry::VerbRegistryView;
+use crate::master::{ComponentLoader, MasterState, UnavailableComponentLoader};
+use crate::master::add_to_linker as add_master_to_linker;
 
-/// The trusted host environment shared by active components.
+/// The unrestricted host environment shared by active components.
 ///
-/// This is intentionally one universal host context rather than a per-component
-/// capability set. Role-specific WIT binders can project this context into the
-/// interfaces they implement.
+/// Every active extension receives the host's full kernel context. Role-specific
+/// WIT binders project that context into their interfaces; they do not impose a
+/// per-extension permission boundary.
 #[async_trait]
 pub trait HostEnvironment: Send + Sync {
     fn kernel(&self) -> Arc<Kernel>;
@@ -73,98 +76,13 @@ impl HostEnvironment for KernelHostEnvironment {
     }
 }
 
-/// Explicit URI capability set for a component host. An empty set denies all
-/// resource access; trusted unrestricted hosts use [`KernelHostEnvironment`].
-#[derive(Clone, Debug, Default)]
-pub struct ResourceCapabilities {
-    prefixes: Vec<ResourceUri>,
-}
-
-impl ResourceCapabilities {
-    pub fn new(prefixes: impl IntoIterator<Item = ResourceUri>) -> Self {
-        Self {
-            prefixes: prefixes.into_iter().collect(),
-        }
-    }
-
-    pub fn allows(&self, uri: &ResourceUri) -> bool {
-        self.prefixes.iter().any(|prefix| uri.starts_with(prefix))
-    }
-}
-
-/// Host environment that restricts resource access to explicit URI prefixes.
-/// This is independent of any concrete noun, verb, or event contract.
-#[derive(Clone)]
-pub struct ScopedHostEnvironment {
-    kernel: Arc<Kernel>,
-    capabilities: ResourceCapabilities,
-}
-
-impl ScopedHostEnvironment {
-    pub fn new(kernel: Arc<Kernel>, capabilities: ResourceCapabilities) -> Self {
-        Self {
-            kernel,
-            capabilities,
-        }
-    }
-
-    fn authorize(&self, uri: &ResourceUri) -> Result<(), ResourceError> {
-        if self.capabilities.allows(uri) {
-            Ok(())
-        } else {
-            Err(ResourceError::new(
-                artist_kernel::ResourceErrorCode::PermissionDenied,
-                format!("component is not authorized to access {uri}"),
-            ))
-        }
-    }
-}
-
-#[async_trait]
-impl HostEnvironment for ScopedHostEnvironment {
-    fn kernel(&self) -> Arc<Kernel> {
-        Arc::clone(&self.kernel)
-    }
-
-    async fn attrs(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
-        self.authorize(uri)?;
-        self.kernel.attrs_uri(uri).await
-    }
-
-    async fn readdir(&self, uri: &ResourceUri) -> Result<Vec<ProviderEntry>, ResourceError> {
-        self.authorize(uri)?;
-        self.kernel.readdir_uri(uri).await
-    }
-
-    async fn read(
-        &self,
-        uri: &ResourceUri,
-        offset: u64,
-        size: u32,
-    ) -> Result<Vec<u8>, ResourceError> {
-        self.authorize(uri)?;
-        self.kernel.read_uri(uri, offset, size).await
-    }
-
-    async fn invoke_contract(
-        &self,
-        name: &str,
-        version: &str,
-        operation: &str,
-        input: &[u8],
-    ) -> Result<Vec<u8>, ResourceError> {
-        self.kernel
-            .invoke_extension_contract(name, version, operation, input)
-            .await
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct ExtensionMetadata {
     pub name: String,
     pub version: String,
-    /// Canonical URI prefixes claimed by this component.
-    pub claims: Vec<String>,
+    /// Optional opaque routing hints. These are not authoritative routing
+    /// rules; noun components decide URI matches through their ABI.
+    pub route_hints: Vec<String>,
     /// Other active extensions required by this component.
     pub dependencies: Vec<ExtensionDependency>,
 }
@@ -187,7 +105,7 @@ impl ExtensionDependency {
 }
 
 impl ExtensionMetadata {
-    pub fn validate(&self) -> anyhow::Result<Vec<ResourceUri>> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         if self.name.trim().is_empty() {
             return Err(anyhow!("component metadata name is empty"));
         }
@@ -199,14 +117,7 @@ impl ExtensionMetadata {
         for dependency in &self.dependencies {
             dependency.validate()?;
         }
-        self.claims
-            .iter()
-            .map(|claim| {
-                claim
-                    .parse()
-                    .with_context(|| format!("invalid resource claim: {claim}"))
-            })
-            .collect()
+        Ok(())
     }
 }
 
@@ -214,11 +125,15 @@ impl ExtensionMetadata {
 /// WIT host implementations to a `Linker<RuntimeStore>` before instantiation.
 pub struct RuntimeStore {
     pub host: Arc<dyn HostEnvironment>,
+    pub component_loader: Arc<dyn ComponentLoader>,
+    pub(crate) master_state: Arc<Mutex<MasterState>>,
+    pub(crate) wasi: WasiCtx,
+    pub(crate) wasi_table: ResourceTable,
 }
 
-impl VerbRegistryView for RuntimeStore {
-    fn verb_registry(&mut self) -> crate::verb_registry::VerbRegistryContext<'_> {
-        crate::verb_registry::VerbRegistryContext::new(self.host.kernel().verb_registry())
+impl WasiView for RuntimeStore {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView { ctx: &mut self.wasi, table: &mut self.wasi_table }
     }
 }
 
@@ -237,9 +152,10 @@ struct GenerationInner {
     id: u64,
     engine: Engine,
     metadata: ExtensionMetadata,
-    claims: Vec<ResourceUri>,
     extension: Arc<Extension>,
     host: Arc<dyn HostEnvironment>,
+    component_loader: Arc<dyn ComponentLoader>,
+    master_state: Arc<Mutex<MasterState>>,
     limits: RuntimeLimits,
     state: AtomicU8,
     in_flight: AtomicUsize,
@@ -314,9 +230,10 @@ impl GenerationInner {
 pub struct PreparedGeneration {
     id: u64,
     metadata: ExtensionMetadata,
-    claims: Vec<ResourceUri>,
     extension: Arc<Extension>,
     host: Arc<dyn HostEnvironment>,
+    component_loader: Arc<dyn ComponentLoader>,
+    master_state: Arc<Mutex<MasterState>>,
 }
 
 /// An active generation that can be pinned for an invocation.
@@ -337,9 +254,6 @@ impl GenerationHandle {
     }
     pub fn class(&self) -> ExtensionClass {
         self.inner.extension.class
-    }
-    pub fn claims(&self) -> &[ResourceUri] {
-        &self.inner.claims
     }
     pub fn is_retiring(&self) -> bool {
         self.inner.state.load(Ordering::Acquire) != ACTIVE
@@ -393,6 +307,10 @@ impl GenerationLease {
             &self.generation.engine,
             RuntimeStore {
                 host: Arc::clone(&self.generation.host),
+                component_loader: Arc::clone(&self.generation.component_loader),
+                master_state: Arc::clone(&self.generation.master_state),
+                wasi: WasiCtxBuilder::new().build(),
+                wasi_table: ResourceTable::new(),
             },
         );
         store.set_fuel(self.generation.limits.fuel)?;
@@ -436,6 +354,8 @@ impl Drop for GenerationLease {
 pub struct Runtime {
     engine: Engine,
     host: Arc<dyn HostEnvironment>,
+    component_loader: Arc<dyn ComponentLoader>,
+    master_state: Arc<Mutex<MasterState>>,
     limits: RuntimeLimits,
     next_id: AtomicUsize,
     active: RwLock<BTreeMap<String, Arc<GenerationInner>>>,
@@ -583,6 +503,8 @@ impl Runtime {
         Self {
             engine,
             host,
+            component_loader: Arc::new(UnavailableComponentLoader),
+            master_state: Arc::new(Mutex::new(MasterState::default())),
             limits,
             next_id: AtomicUsize::new(1),
             active: RwLock::new(BTreeMap::new()),
@@ -591,6 +513,57 @@ impl Runtime {
 
     pub fn engine(&self) -> &Engine {
         &self.engine
+    }
+
+    /// Instantiate the trusted process-root component. The root is not an
+    /// ordinary extension generation: it is loaded once by the native
+    /// bootstrap and receives only the generic master contract. It is the
+    /// root's job to load and compose all child components.
+    pub async fn instantiate_root(
+        &self,
+        bytes: &[u8],
+    ) -> anyhow::Result<(Store<RuntimeStore>, Instance)> {
+        self.instantiate_root_with(bytes, |_| Ok(())).await
+    }
+
+    /// Variant used by the bootstrap when the root needs additional
+    /// component-defined imports (for example the URL claim table). The
+    /// kernel installs only the generic master contract; callers install
+    /// extension-specific contracts through this hook.
+    pub async fn instantiate_root_with<F>(
+        &self,
+        bytes: &[u8],
+        configure: F,
+    ) -> anyhow::Result<(Store<RuntimeStore>, Instance)>
+    where
+        F: FnOnce(&mut Linker<RuntimeStore>) -> wasmtime::Result<()>,
+    {
+        let component = Component::new(&self.engine, bytes)
+            .map_err(|error| anyhow!("compile trusted root component: {error}"))?;
+        let mut store = Store::new(
+            &self.engine,
+            RuntimeStore {
+                host: Arc::clone(&self.host),
+                component_loader: Arc::clone(&self.component_loader),
+                master_state: Arc::clone(&self.master_state),
+                wasi: WasiCtxBuilder::new().build(),
+                wasi_table: ResourceTable::new(),
+            },
+        );
+        store.set_fuel(self.limits.fuel)?;
+        let mut linker = Linker::new(&self.engine);
+        add_master_to_linker(&mut linker)?;
+        configure(&mut linker)?;
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        Ok((store, instance))
+    }
+
+    /// Install the loader used by the trusted root component. The loader is
+    /// intentionally separate from namespace semantics: each namespace may
+    /// interpret locators and package models however it wants.
+    pub fn with_component_loader(mut self, loader: Arc<dyn ComponentLoader>) -> Self {
+        self.component_loader = loader;
+        self
     }
 
     pub fn prepare(
@@ -608,7 +581,7 @@ impl Runtime {
         bytes: &[u8],
         metadata: ExtensionMetadata,
     ) -> anyhow::Result<PreparedGeneration> {
-        let claims = metadata.validate()?;
+        metadata.validate()?;
         let extension = Arc::new(
             Extension::load(&self.engine, bytes).context("compile and classify component")?,
         );
@@ -619,9 +592,10 @@ impl Runtime {
         Ok(PreparedGeneration {
             id,
             metadata,
-            claims,
             extension,
             host: Arc::clone(&self.host),
+            component_loader: Arc::clone(&self.component_loader),
+            master_state: Arc::clone(&self.master_state),
         })
     }
 
@@ -664,39 +638,6 @@ impl Runtime {
         Ok(requirement.matches(&version))
     }
 
-    fn conflicts(&self, prepared: &[PreparedGeneration]) -> Option<String> {
-        let active = self.active.read().unwrap();
-        for (index, candidate) in prepared.iter().enumerate() {
-            if let Some(conflict) = active.values().find_map(|generation| {
-                if generation.metadata.name == candidate.metadata.name {
-                    return None;
-                }
-                candidate
-                    .claims
-                    .iter()
-                    .any(|claim| {
-                        generation
-                            .claims
-                            .iter()
-                            .any(|other| claim.starts_with(other) || other.starts_with(claim))
-                    })
-                    .then(|| generation.metadata.name.clone())
-            }) {
-                return Some(conflict);
-            }
-            if prepared[index + 1..].iter().any(|other| {
-                candidate.claims.iter().any(|claim| {
-                    other.claims.iter().any(|other_claim| {
-                        claim.starts_with(other_claim) || other_claim.starts_with(claim)
-                    })
-                })
-            }) {
-                return Some(candidate.metadata.name.clone());
-            }
-        }
-        None
-    }
-
     /// Atomically publish a prepared generation, then retire the replaced
     /// generation after no pinned calls remain.
     pub async fn activate(&self, prepared: PreparedGeneration) -> anyhow::Result<GenerationHandle> {
@@ -708,11 +649,19 @@ impl Runtime {
         &self,
         prepared: Vec<PreparedGeneration>,
     ) -> anyhow::Result<Vec<GenerationHandle>> {
-        if let Some(conflict) = self.conflicts(&prepared) {
-            return Err(anyhow!(
-                "resource claims conflict with active component {conflict}"
-            ));
+        let replacing: std::collections::BTreeSet<_> = prepared
+            .iter()
+            .map(|generation| generation.metadata.name.clone())
+            .collect();
+        let mut dependents = std::collections::BTreeSet::new();
+        for name in &replacing {
+            dependents.extend(self.dependent_names(name));
         }
+        dependents.retain(|name| !replacing.contains(name));
+        for name in dependents {
+            self.retire(&name).await;
+        }
+
         let generations: Vec<_> = prepared
             .into_iter()
             .map(|prepared| {
@@ -720,9 +669,10 @@ impl Runtime {
                     id: prepared.id,
                     engine: self.engine.clone(),
                     metadata: prepared.metadata,
-                    claims: prepared.claims,
                     extension: prepared.extension,
                     host: prepared.host,
+                    component_loader: prepared.component_loader,
+                    master_state: prepared.master_state,
                     limits: self.limits,
                     state: AtomicU8::new(ACTIVE),
                     in_flight: AtomicUsize::new(0),
@@ -774,13 +724,48 @@ impl Runtime {
     }
 
     pub async fn retire(&self, name: &str) -> bool {
-        let generation = self.active.write().unwrap().remove(name);
-        if let Some(generation) = generation {
-            generation.retire().await;
-            true
-        } else {
-            false
+        let names = self.retirement_order(name);
+        if names.is_empty() {
+            return false;
         }
+        for name in names {
+            let generation = self.active.write().unwrap().remove(&name);
+            if let Some(generation) = generation {
+                generation.retire().await;
+            }
+        }
+        true
+    }
+
+    fn dependent_names(&self, dependency: &str) -> Vec<String> {
+        let active = self.active.read().unwrap();
+        active
+            .iter()
+            .filter(|(_, generation)| {
+                generation
+                    .metadata
+                    .dependencies
+                    .iter()
+                    .any(|candidate| candidate.name == dependency)
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    fn retirement_order(&self, root: &str) -> Vec<String> {
+        let mut order = Vec::new();
+        let mut pending = vec![root.to_string()];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let dependents = self.dependent_names(&name);
+            pending.extend(dependents.iter().cloned());
+            order.push(name);
+        }
+        order.reverse();
+        order
     }
 }
 
@@ -802,12 +787,12 @@ mod tests {
         );
         let wat = r#"(component
             (core module $m (func (export "f")))
-            (export "artist:nouns/namespace@1.0.0" (core module $m))
+            (export "artist:nouns/provider@2.0.0" (core module $m))
         )"#;
         let metadata = ExtensionMetadata {
             name: "demo".into(),
             version: "1.0.0".into(),
-            claims: vec!["demo:///".into()],
+            route_hints: vec!["file://**/*.rs/symbols".into()],
             dependencies: Vec::new(),
         };
         let prepared = runtime.prepare(wat.as_bytes(), metadata).unwrap();
@@ -827,19 +812,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_host_denies_unlisted_resources() {
-        let kernel = Arc::new(Kernel::empty());
-        let allowed: ResourceUri = "files:///workspace".parse().unwrap();
-        let host = ScopedHostEnvironment::new(kernel, ResourceCapabilities::new([allowed]));
-        let denied: ResourceUri = "files:///secrets/token".parse().unwrap();
-        let error = host.attrs(&denied).await.unwrap_err();
-        assert_eq!(
-            error.code,
-            artist_kernel::ResourceErrorCode::PermissionDenied
-        );
-    }
-
-    #[tokio::test]
     async fn extension_manager_replaces_and_retires_live_generations() {
         let kernel = Arc::new(Kernel::empty());
         let runtime = Arc::new(Runtime::new(
@@ -849,12 +821,12 @@ mod tests {
         let manager = ExtensionManager::new(runtime);
         let wat = r#"(component
             (core module $m (func (export "f")))
-            (export "artist:nouns/namespace@1.0.0" (core module $m))
+            (export "artist:nouns/provider@2.0.0" (core module $m))
         )"#;
         let metadata = || ExtensionMetadata {
             name: "read".into(),
             version: "1.0.0".into(),
-            claims: Vec::new(),
+            route_hints: Vec::new(),
             dependencies: Vec::new(),
         };
 
@@ -882,13 +854,13 @@ mod tests {
         let manager = ExtensionManager::new(Arc::clone(&runtime));
         let wat = r#"(component
             (core module $m (func (export "f")))
-            (export "artist:nouns/namespace@1.0.0" (core module $m))
+            (export "artist:nouns/provider@2.0.0" (core module $m))
         )"#;
 
         let child = ExtensionMetadata {
             name: "child".into(),
             version: "1.0.0".into(),
-            claims: Vec::new(),
+            route_hints: Vec::new(),
             dependencies: vec![ExtensionDependency {
                 name: "base".into(),
                 version: ">=1.0.0, <2.0.0".into(),
@@ -907,7 +879,7 @@ mod tests {
                 ExtensionMetadata {
                     name: "base".into(),
                     version: "1.4.0".into(),
-                    claims: Vec::new(),
+                    route_hints: Vec::new(),
                     dependencies: Vec::new(),
                 },
             )
@@ -926,18 +898,18 @@ mod tests {
         let manager = ExtensionManager::new(runtime);
         let wat = r#"(component
             (core module $m (func (export "f")))
-            (export "artist:nouns/namespace@1.0.0" (core module $m))
+            (export "artist:nouns/provider@2.0.0" (core module $m))
         )"#;
         let base = ExtensionMetadata {
             name: "base".into(),
             version: "1.0.0".into(),
-            claims: Vec::new(),
+            route_hints: Vec::new(),
             dependencies: Vec::new(),
         };
         let child = ExtensionMetadata {
             name: "child".into(),
             version: "1.0.0".into(),
-            claims: Vec::new(),
+            route_hints: Vec::new(),
             dependencies: vec![ExtensionDependency {
                 name: "base".into(),
                 version: "^1".into(),
@@ -957,5 +929,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["base", "child"]
         );
+        assert!(manager.retire("base").await);
+        assert!(manager.active_names().is_empty());
     }
 }

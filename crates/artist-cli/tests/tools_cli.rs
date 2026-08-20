@@ -20,7 +20,7 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
     fs::write(dir.path().join("src/nested/lib.rs"), "pub fn helper() {}\n").unwrap();
     fs::write(dir.path().join("old.txt"), "move me\n").unwrap();
 
-    let runner = ToolRunner::new(dir.path()).unwrap();
+    let runner = ToolRunner::new(dir.path()).await.unwrap();
 
     let registered = ["edit", "find", "grep", "move", "read", "write"];
     for verb in registered {
@@ -32,7 +32,7 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
                     "find" | "grep" => "uri: src\nquery: main\nlimit: 1\n",
                     "write" => "uri: registered.txt\ncontent: registered\n",
                     "edit" => {
-                        "uri: src/main.rs\nchanges[1]{anchor,replacement}:\n  a0,fn main() {\n"
+                        "uri: src/main.rs\nchanges[1]{anchor,content}:\n  line:0,fn main() {\n"
                     }
                     "move" => "source: missing\ndestination: missing2\n",
                     _ => unreachable!(),
@@ -50,8 +50,8 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
     assert!(ok);
     let read = decode(&read);
     assert_eq!(read["ok"], true);
-    assert_eq!(read["response"]["uri"], "files:///src/main.rs");
-    assert_eq!(read["response"]["lines"][0]["anchor"], "a0");
+    assert_eq!(read["response"]["uri"], "file:///src/main.rs");
+    assert_eq!(read["response"]["lines"][0]["anchor"], "line:0");
 
     let (find, ok) = runner
         .call_toon("find", "uri: src\nquery: \"**/*.rs\"\nlimit: 20\n")
@@ -64,10 +64,10 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
     assert!(
         results
             .iter()
-            .any(|result| { result["uri"] == "files:///src/main.rs" && result["kind"] == "file" })
+            .any(|result| { result["uri"] == "file:///src/main.rs" && result["kind"] == "file" })
     );
     assert!(results.iter().any(|result| {
-        result["uri"] == "files:///src/nested/lib.rs" && result["kind"] == "file"
+        result["uri"] == "file:///src/nested/lib.rs" && result["kind"] == "file"
     }));
 
     let (grep, ok) = runner
@@ -78,7 +78,7 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
     let grep = decode(&grep);
     let matches = grep["response"]["matches"].as_array().unwrap();
     assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0]["uri"], "files:///src/main.rs#2");
+    assert_eq!(matches[0]["uri"], "file:///src/main.rs#2");
     assert!(matches[0]["content"].as_str().unwrap().contains("println"));
 
     let (first_page, ok) = runner
@@ -91,7 +91,7 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
         first_page["response"]["results"].as_array().unwrap().len(),
         1
     );
-    assert!(first_page["response"]["next_cursor"].is_string());
+    assert!(first_page["response"].get("next_cursor").is_some());
 
     let (written, ok) = runner
         .call_toon("write", "uri: created.txt\ncontent: \"first\"\n")
@@ -103,7 +103,7 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
     let (edited, ok) = runner
         .call_toon(
             "edit",
-            "uri: src/main.rs\nchanges[1]{anchor,replacement}:\n  a1,    println!(\"changed\");\n",
+            "uri: src/main.rs\nchanges[1]{anchor,content}:\n  line:1,    println!(\"changed\");\n",
         )
         .await
         .unwrap();

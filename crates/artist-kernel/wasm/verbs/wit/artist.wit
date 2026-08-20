@@ -191,6 +191,41 @@ interface signal {
     signal: func(requests: list<request>) -> list<result<_, error>>;
 }
 
+/// Generic opaque tool ABI used by the model-facing component registry.
+interface tool {
+    use types.{error};
+    invoke: func(request: list<u8>) -> result<list<u8>, error>;
+}
+
+interface resource-api {
+    enum kind {
+        file,
+        directory,
+    }
+
+    record entry {
+        name: string,
+        kind: kind,
+        size: u64,
+    }
+
+    enum error {
+        invalid-argument,
+        not-found,
+        permission-denied,
+        unsupported,
+        conflict,
+        io,
+    }
+
+    read: func(uri: string, offset: u64, size: u32) -> result<list<u8>, error>;
+    readdir: func(uri: string) -> result<list<entry>, error>;
+    truncate: func(uri: string, size: u64) -> result<_, error>;
+    write: func(uri: string, offset: u64, data: list<u8>) -> result<u32, error>;
+    move-resource: func(source: string, destination: string) -> result<_, error>;
+    delete: func(uri: string) -> result<_, error>;
+}
+
 /// Generic dynamic invocation for extensions that want to consume another
 /// registered verb. The payload is opaque to the kernel and is interpreted by
 /// the caller and target verb according to their shared contract.
@@ -225,4 +260,10 @@ world verbs-extension {
     /// operations; URI-to-resource routing remains host policy.
     import wasi:filesystem/types@0.3.0;
     import wasi:filesystem/preopens@0.3.0;
+}
+
+world tool-extension {
+    import types;
+    import resource-api;
+    export tool;
 }

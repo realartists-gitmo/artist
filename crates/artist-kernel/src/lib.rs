@@ -1,6 +1,6 @@
 //! The platform-neutral Artist resource kernel.
 //!
-//! The kernel owns the four native namespace roots, canonical URI routing, and
+//! The kernel owns the `url://` namespace-registration root, canonical URI routing, and
 //! the VFS projection. Provider implementations own the behavior and source of
 //! truth of the resources they serve.
 
@@ -23,7 +23,7 @@ pub use provider::{
     LayeredResourceProvider, ProviderAttrs, ProviderEntry, ResourceError, ResourceErrorCode,
     ResourceProvider,
 };
-pub use resources::Resources;
+pub use resources::UrlNamespace;
 pub use uri::{ResourceUri, UriError};
-pub use verbs::{VerbHandler, VerbInvocationError, VerbRegistry};
+pub use verbs::{VerbHandler, VerbInvocationError};
 pub use vfs::{Attrs, DirEntry, Ino, NodeKind, Vfs, VfsError};

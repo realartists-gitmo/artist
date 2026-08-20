@@ -145,7 +145,7 @@ fn parse_search_root(value: &str) -> Result<ResourceUri, FindError> {
     let uri = value
         .parse::<ResourceUri>()
         .map_err(|error| FindError::InvalidUri(error.to_string()))?;
-    if uri.scheme() != "files" || !uri.authority().is_empty() {
+    if uri.scheme() != "file" || !uri.authority().is_empty() {
         return Err(FindError::UnsupportedNamespace(value.into()));
     }
     if uri.query().is_some() || uri.fragment().is_some() {
@@ -404,7 +404,7 @@ mod tests {
         let root = ResourceUri::from_path("src").unwrap();
         assert_eq!(
             uri_for_relative(&root, "src/lib.rs", "src").unwrap(),
-            "files:///src/lib.rs"
+            "file:///src/lib.rs"
         );
     }
 
@@ -421,7 +421,7 @@ mod tests {
         fs::write(host_root.join("README.md"), "readme\n").unwrap();
 
         let index =
-            FffFindIndex::start(&host_root, ResourceUri::root("files").unwrap(), vec![]).unwrap();
+            FffFindIndex::start(&host_root, ResourceUri::root("file").unwrap(), vec![]).unwrap();
         assert!(index.wait_for_scan(Duration::from_secs(10)));
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let page = runtime
@@ -429,22 +429,22 @@ mod tests {
             .unwrap();
 
         assert!(page.results.iter().any(|result| {
-            result.uri == "files:///src/main.rs" && result.kind == FindKind::File
+            result.uri == "file:///src/main.rs" && result.kind == FindKind::File
         }));
         assert!(page.results.iter().any(|result| {
-            result.uri == "files:///src/nested/lib.rs" && result.kind == FindKind::File
+            result.uri == "file:///src/nested/lib.rs" && result.kind == FindKind::File
         }));
         assert!(
             !page
                 .results
                 .iter()
-                .any(|result| result.uri == "files:///README.md")
+                .any(|result| result.uri == "file:///README.md")
         );
         let directories = runtime
             .block_on(index.find(&ResourceUri::from_path("src").unwrap(), "nested", 0, 20))
             .unwrap();
         assert!(directories.results.iter().any(|result| {
-            result.uri == "files:///src/nested" && result.kind == FindKind::Directory
+            result.uri == "file:///src/nested" && result.kind == FindKind::Directory
         }));
 
         drop(index);

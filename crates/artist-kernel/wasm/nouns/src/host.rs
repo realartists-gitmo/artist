@@ -1,245 +1,348 @@
-//! Host glue for the noun contract.
+//! Host adapter for the URI-aware noun provider contract.
 //!
-//! The kernel speaks inos; the wasm contract speaks paths. [`WasmNamespace`]
-//! implements the kernel [`artist_kernel::Namespace`] surface, translating inos
-//! to canonical paths and delegating metadata to a [`NamespaceGuest`].
-//!
-//! The guest side is deliberately a trait rather than the concrete bindgen
-//! types: the bindgen adapter (which wraps a real instantiated component) is
-//! written in the vertical slice, while tests here drive [`WasmNamespace`]
-//! against a Rust fake implementing [`NamespaceGuest`].
+//! A noun is not mounted at a URI prefix. The guest receives the complete
+//! canonical URI and decides whether it handles that URI. This permits routes
+//! such as `file:///nuke.rs/symbols`, derived resources, decorators, and
+//! overlays.
 
-use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
-use artist_kernel::namespace::Namespace;
 use artist_kernel::provider::{
     ProviderAttrs, ProviderEntry, ResourceError, ResourceErrorCode, ResourceProvider,
 };
 use artist_kernel::uri::ResourceUri;
-use artist_kernel::vfs::{Attrs, DirEntry, Ino, NodeKind, VfsError};
+use artist_kernel::{Kernel, NodeKind};
+use artist_wasm::{GenerationHandle, RuntimeStore};
 use async_trait::async_trait;
+use wasmtime::component::{HasData, Linker};
 
-use crate::bindings::ns;
+use crate::bindings::{resource_host, types};
 
-/// The guest side of the noun contract: path-based, store-free.
-///
-/// A real component implementing `artist:nouns/namespace` satisfies this via
-/// the bindgen adapter. Tests implement it directly.
+/// The guest-side noun behavior. A real component adapter implements this
+/// trait around the generated Wasmtime bindings; tests and host-native nouns
+/// can implement it directly.
 #[async_trait]
-pub trait NamespaceGuest: Send + Sync {
-    async fn getattr(&self, path: &[String]) -> Result<ns::Attrs, ns::Error>;
-    async fn readdir(&self, path: &[String]) -> Result<Vec<ns::Entry>, ns::Error>;
-    async fn read(&self, path: &[String], offset: u64, size: u32) -> Result<Vec<u8>, ns::Error>;
+pub trait RoutedNounGuest: Send + Sync {
+    async fn matches(&self, uri: &str) -> bool;
+    async fn getattr(&self, uri: &str) -> Result<types::Attrs, types::Error>;
+    async fn readdir(&self, uri: &str) -> Result<Vec<types::Entry>, types::Error>;
+    async fn read(&self, uri: &str, offset: u64, size: u32) -> Result<Vec<u8>, types::Error>;
 }
 
-#[derive(Debug)]
-struct Node {
-    /// Canonical path components from the namespace root.
-    path: Vec<String>,
-    parent: Option<Ino>,
-    name: Option<String>,
+/// Host-side resource capability exposed to a noun so it can derive or
+/// decorate another provider's resource.
+#[async_trait]
+pub trait ResourceHost: Send + Sync {
+    async fn get_attrs(&self, uri: &str) -> Result<types::Attrs, types::Error>;
+    async fn readdir(&self, uri: &str) -> Result<Vec<types::Entry>, types::Error>;
+    async fn read(&self, uri: &str, offset: u64, size: u32) -> Result<Vec<u8>, types::Error>;
 }
 
-#[derive(Debug, Default)]
-struct PathTable {
-    by_ino: HashMap<Ino, Node>,
-    next: u64,
+/// The standard host implementation. It delegates through the kernel's URI
+/// router, so a noun can derive from any currently visible resource without
+/// learning which provider supplies that resource.
+pub struct KernelResourceHost {
+    kernel: Arc<Kernel>,
 }
 
-impl PathTable {
-    fn path_of(&self, ino: Ino) -> Option<&Vec<String>> {
-        self.by_ino.get(&ino).map(|n| &n.path)
+impl KernelResourceHost {
+    pub fn new(kernel: Arc<Kernel>) -> Self {
+        Self { kernel }
+    }
+}
+
+fn system_time_parts(time: std::time::SystemTime) -> (u64, u32) {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| (duration.as_secs(), duration.subsec_nanos()))
+        .unwrap_or((0, 0))
+}
+
+fn kernel_error(error: ResourceError) -> types::Error {
+    match error.code {
+        ResourceErrorCode::NotFound => types::Error::NotFound,
+        ResourceErrorCode::NotDir => types::Error::NotDir,
+        ResourceErrorCode::IsDir => types::Error::IsDir,
+        ResourceErrorCode::PermissionDenied => types::Error::PermissionDenied,
+        ResourceErrorCode::Unsupported => types::Error::Unsupported,
+        ResourceErrorCode::InvalidAddress
+        | ResourceErrorCode::Unavailable
+        | ResourceErrorCode::Io
+        | ResourceErrorCode::Component
+        | ResourceErrorCode::Cancelled
+        | ResourceErrorCode::Timeout
+        | ResourceErrorCode::Conflict => types::Error::Io,
+    }
+}
+
+fn kernel_attrs(attrs: ProviderAttrs) -> types::Attrs {
+    let (mtime_secs, mtime_nsecs) = system_time_parts(attrs.mtime);
+    types::Attrs {
+        kind: match attrs.kind {
+            NodeKind::Directory => types::Kind::Directory,
+            NodeKind::File => types::Kind::File,
+        },
+        size: attrs.size,
+        mtime_secs,
+        mtime_nsecs,
+    }
+}
+
+fn kernel_entry(entry: ProviderEntry) -> types::Entry {
+    types::Entry {
+        name: entry.name,
+        kind: match entry.attrs.kind {
+            NodeKind::Directory => types::Kind::Directory,
+            NodeKind::File => types::Kind::File,
+        },
+        size: entry.attrs.size,
+    }
+}
+
+#[async_trait]
+impl ResourceHost for KernelResourceHost {
+    async fn get_attrs(&self, uri: &str) -> Result<types::Attrs, types::Error> {
+        let uri: ResourceUri = uri.parse().map_err(|_| types::Error::Io)?;
+        self.kernel
+            .attrs_uri(&uri)
+            .await
+            .map(kernel_attrs)
+            .map_err(kernel_error)
     }
 
-    fn parent_of(&self, ino: Ino) -> Option<Ino> {
-        self.by_ino.get(&ino).and_then(|n| n.parent)
+    async fn readdir(&self, uri: &str) -> Result<Vec<types::Entry>, types::Error> {
+        let uri: ResourceUri = uri.parse().map_err(|_| types::Error::Io)?;
+        self.kernel
+            .readdir_uri(&uri)
+            .await
+            .map(|entries| entries.into_iter().map(kernel_entry).collect())
+            .map_err(kernel_error)
     }
 
-    fn contains(&self, ino: Ino) -> bool {
-        self.by_ino.contains_key(&ino)
+    async fn read(&self, uri: &str, offset: u64, size: u32) -> Result<Vec<u8>, types::Error> {
+        let uri: ResourceUri = uri.parse().map_err(|_| types::Error::Io)?;
+        self.kernel
+            .read_uri(&uri, offset, size)
+            .await
+            .map_err(kernel_error)
     }
+}
 
-    /// Find the ino of an existing child of `parent` named `name`.
-    fn child(&self, parent: Ino, name: &str) -> Option<Ino> {
-        self.by_ino.iter().find_map(|(ino, node)| {
-            if node.parent == Some(parent) && node.name.as_deref() == Some(name) {
-                Some(*ino)
-            } else {
-                None
-            }
-        })
-    }
+pub struct ResourceHostContext<'a> {
+    pub resource_host: Arc<dyn ResourceHost>,
+    pub _borrow: std::marker::PhantomData<&'a mut ()>,
+}
 
-    /// Allocate an ino for a node, or return the existing one.
-    fn allocate(&mut self, parent: Option<Ino>, name: String) -> Ino {
-        if let Some(parent) = parent {
-            if let Some(ino) = self.child(parent, &name) {
-                return ino;
-            }
-            let path = {
-                let parent_path = self.path_of(parent);
-                let mut path = parent_path.cloned().unwrap_or_default();
-                path.push(name.clone());
-                path
-            };
-            let ino = Ino(self.next);
-            self.next += 1;
-            self.by_ino.insert(
-                ino,
-                Node {
-                    path,
-                    parent: Some(parent),
-                    name: Some(name),
-                },
-            );
-            ino
-        } else {
-            let ino = Ino(self.next);
-            self.next += 1;
-            self.by_ino.insert(
-                ino,
-                Node {
-                    path: vec![name.clone()],
-                    parent: None,
-                    name: Some(name),
-                },
-            );
-            ino
+impl<'a> ResourceHostContext<'a> {
+    pub fn new(resource_host: Arc<dyn ResourceHost>) -> Self {
+        Self {
+            resource_host,
+            _borrow: std::marker::PhantomData,
         }
     }
 }
 
-/// A kernel namespace backed by a wasm noun extension.
-pub struct WasmNamespace {
-    name: String,
-    root_ino: Ino,
-    table: Mutex<PathTable>,
-    guest: Box<dyn NamespaceGuest>,
+pub trait ResourceHostView: Send {
+    fn resource_host(&mut self) -> ResourceHostContext<'_>;
 }
 
-impl WasmNamespace {
-    pub fn new(name: impl Into<String>, guest: Box<dyn NamespaceGuest>) -> Self {
-        let table = PathTable {
-            next: Ino::ROOT.0 + 1,
-            by_ino: HashMap::from([(
-                Ino::ROOT,
-                Node {
-                    path: Vec::new(),
-                    parent: None,
-                    name: None,
-                },
-            )]),
-        };
+pub struct ResourceHostMarker;
+
+impl HasData for ResourceHostMarker {
+    type Data<'a> = ResourceHostContext<'a>;
+}
+
+impl resource_host::Host for ResourceHostContext<'_> {
+    async fn get_attrs(
+        &mut self,
+        uri: String,
+    ) -> wasmtime::Result<Result<types::Attrs, types::Error>> {
+        Ok(self.resource_host.get_attrs(&uri).await)
+    }
+
+    async fn readdir(
+        &mut self,
+        uri: String,
+    ) -> wasmtime::Result<Result<Vec<types::Entry>, types::Error>> {
+        Ok(self.resource_host.readdir(&uri).await)
+    }
+
+    async fn read(
+        &mut self,
+        uri: String,
+        offset: u64,
+        size: u32,
+    ) -> wasmtime::Result<Result<Vec<u8>, types::Error>> {
+        Ok(self.resource_host.read(&uri, offset, size).await)
+    }
+}
+
+pub fn add_resource_host_to_linker<T>(linker: &mut Linker<T>) -> wasmtime::Result<()>
+where
+    T: ResourceHostView + 'static,
+{
+    resource_host::add_to_linker::<_, ResourceHostMarker>(linker, T::resource_host)
+}
+
+impl ResourceHostView for RuntimeStore {
+    fn resource_host(&mut self) -> ResourceHostContext<'_> {
+        ResourceHostContext::new(Arc::new(KernelResourceHost::new(self.host.kernel())))
+    }
+}
+
+/// Adapter for a live noun extension generation.
+///
+/// Each operation pins the generation, creates a fresh component instance,
+/// and releases the pin when the call finishes. Replacing an extension can
+/// therefore retire old instances without racing an in-flight kernel request.
+pub struct WasmRoutedNoun {
+    generation: GenerationHandle,
+}
+
+impl WasmRoutedNoun {
+    pub fn new(generation: GenerationHandle) -> Self {
+        Self { generation }
+    }
+
+    async fn call<R, F>(&self, f: F) -> anyhow::Result<R>
+    where
+        F: for<'a> FnOnce(
+                &'a crate::bindings::ns::Guest,
+                &'a mut wasmtime::Store<RuntimeStore>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = wasmtime::Result<R>> + Send + 'a>>
+            + Send,
+        R: Send + 'static,
+    {
+        let lease = self
+            .generation
+            .pin()
+            .ok_or_else(|| anyhow::anyhow!("noun generation is retiring"))?;
+        let mut store = lease.store()?;
+        let mut linker = Linker::new(lease.component().engine());
+        add_resource_host_to_linker(&mut linker)?;
+        let pre = linker.instantiate_pre(lease.component())?;
+        let indices = crate::bindings::ns::GuestIndices::new(&pre)?;
+        let instance = pre.instantiate_async(&mut store).await?;
+        let guest = indices.load(&mut store, &instance)?;
+        Ok(f(&guest, &mut store).await?)
+    }
+}
+
+#[async_trait]
+impl RoutedNounGuest for WasmRoutedNoun {
+    async fn matches(&self, uri: &str) -> bool {
+        let uri = uri.to_owned();
+        self.call(move |guest, store| Box::pin(async move { guest.call_matches(store, &uri).await }))
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn getattr(&self, uri: &str) -> Result<types::Attrs, types::Error> {
+        let uri = uri.to_owned();
+        self.call(move |guest, store| Box::pin(async move { guest.call_getattr(store, &uri).await }))
+            .await
+            .map_err(|_| types::Error::Io)?
+    }
+
+    async fn readdir(&self, uri: &str) -> Result<Vec<types::Entry>, types::Error> {
+        let uri = uri.to_owned();
+        self.call(move |guest, store| Box::pin(async move { guest.call_readdir(store, &uri).await }))
+            .await
+            .map_err(|_| types::Error::Io)?
+    }
+
+    async fn read(
+        &self,
+        uri: &str,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>, types::Error> {
+        let uri = uri.to_owned();
+        self.call(move |guest, store| Box::pin(async move {
+            guest.call_read(store, &uri, offset, size).await
+        }))
+            .await
+            .map_err(|_| types::Error::Io)?
+    }
+}
+
+/// A URI-aware noun provider. `eligible` is intentionally broad only because
+/// the guest's `matches` method is the actual routing authority.
+pub struct RoutedNoun {
+    name: String,
+    guest: Arc<dyn RoutedNounGuest>,
+}
+
+impl RoutedNoun {
+    pub fn new(name: impl Into<String>, guest: Arc<dyn RoutedNounGuest>) -> Self {
         Self {
             name: name.into(),
-            root_ino: Ino(0),
-            table: Mutex::new(table),
             guest,
         }
     }
-
-    fn root(&self) -> Ino {
-        let table = self.table.lock().unwrap();
-        table
-            .by_ino
-            .iter()
-            .find(|(_, n)| n.parent.is_none())
-            .map(|(ino, _)| *ino)
-            .unwrap_or(Ino::ROOT)
-    }
 }
 
-fn guest_attrs_to_kernel(ino: Ino, attrs: &ns::Attrs) -> Attrs {
+fn attrs_to_provider(attrs: &types::Attrs) -> ProviderAttrs {
     let mtime = UNIX_EPOCH + std::time::Duration::new(attrs.mtime_secs, attrs.mtime_nsecs);
-    Attrs {
-        ino,
-        kind: match attrs.kind {
-            ns::Kind::Directory => NodeKind::Directory,
-            ns::Kind::File => NodeKind::File,
-        },
-        size: attrs.size,
-        perm: 0o555,
-        nlink: 1,
-        uid: 0,
-        gid: 0,
-        atime: SystemTime::now(),
-        mtime,
-        ctime: mtime,
+    match attrs.kind {
+        types::Kind::Directory => ProviderAttrs::directory(),
+        types::Kind::File => ProviderAttrs::file(attrs.size, mtime),
     }
 }
 
-fn guest_error_to_kernel(err: ns::Error) -> VfsError {
-    match err {
-        ns::Error::NotFound => VfsError::NotFound,
-        ns::Error::NotDir => VfsError::NotDir,
-        ns::Error::IsDir => VfsError::IsDir,
-        ns::Error::Io => VfsError::Io,
-    }
-}
-
-fn guest_error_to_resource(err: ns::Error) -> ResourceError {
-    let (code, message) = match err {
-        ns::Error::NotFound => (ResourceErrorCode::NotFound, "resource not found"),
-        ns::Error::NotDir => (ResourceErrorCode::NotDir, "resource is not a directory"),
-        ns::Error::IsDir => (ResourceErrorCode::IsDir, "resource is a directory"),
-        ns::Error::Io => (ResourceErrorCode::Io, "guest I/O failure"),
+fn error_to_resource(uri: &ResourceUri, error: types::Error) -> ResourceError {
+    let (code, message) = match error {
+        types::Error::NotFound => (ResourceErrorCode::NotFound, "noun route not found"),
+        types::Error::NotDir => (ResourceErrorCode::NotDir, "noun route is not a directory"),
+        types::Error::IsDir => (ResourceErrorCode::IsDir, "noun route is a directory"),
+        types::Error::Io => (ResourceErrorCode::Io, "noun route I/O failure"),
+        types::Error::PermissionDenied => (
+            ResourceErrorCode::PermissionDenied,
+            "noun route access denied",
+        ),
+        types::Error::Unsupported => (ResourceErrorCode::Unsupported, "noun route unsupported"),
     };
-    ResourceError::new(code, message)
-}
-
-fn guest_attrs_to_provider(attrs: &ns::Attrs) -> ProviderAttrs {
-    let mtime = UNIX_EPOCH + std::time::Duration::new(attrs.mtime_secs, attrs.mtime_nsecs);
-    let mut result = match attrs.kind {
-        ns::Kind::Directory => ProviderAttrs::directory(),
-        ns::Kind::File => ProviderAttrs::file(attrs.size, mtime),
-    };
-    result.mtime = mtime;
-    result.ctime = mtime;
-    result.atime = mtime;
-    result
-}
-
-fn uri_path(uri: &ResourceUri) -> Vec<String> {
-    uri.segments().map(str::to_owned).collect()
+    ResourceError::new(code, format!("{message}: {uri}"))
 }
 
 #[async_trait]
-impl ResourceProvider for WasmNamespace {
+impl ResourceProvider for RoutedNoun {
     fn provider_name(&self) -> &str {
         &self.name
     }
 
-    fn claims(&self, uri: &ResourceUri) -> bool {
-        uri.scheme() == self.name && uri.authority().is_empty()
+    /// This is only a cheap eligibility gate. The actual route decision is
+    /// made by `matches`, which receives the complete URI asynchronously.
+    fn eligible(&self, _uri: &ResourceUri) -> bool {
+        true
+    }
+
+    fn priority(&self) -> u32 {
+        1_000
+    }
+
+    async fn matches(&self, uri: &ResourceUri) -> bool {
+        self.guest.matches(&uri.to_string()).await
     }
 
     async fn attrs(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
-        if !self.claims(uri) {
-            return Err(ResourceError::not_found(uri));
-        }
         self.guest
-            .getattr(&uri_path(uri))
+            .getattr(&uri.to_string())
             .await
-            .map(|attrs| guest_attrs_to_provider(&attrs))
-            .map_err(guest_error_to_resource)
+            .map(|attrs| attrs_to_provider(&attrs))
+            .map_err(|error| error_to_resource(uri, error))
     }
 
     async fn readdir(&self, uri: &ResourceUri) -> Result<Vec<ProviderEntry>, ResourceError> {
-        if !self.claims(uri) {
-            return Err(ResourceError::not_found(uri));
-        }
         self.guest
-            .readdir(&uri_path(uri))
+            .readdir(&uri.to_string())
             .await
             .map(|entries| {
                 entries
                     .into_iter()
                     .map(|entry| ProviderEntry {
                         name: entry.name,
-                        attrs: guest_attrs_to_provider(&ns::Attrs {
+                        attrs: attrs_to_provider(&types::Attrs {
                             kind: entry.kind,
                             size: entry.size,
                             mtime_secs: 0,
@@ -248,7 +351,7 @@ impl ResourceProvider for WasmNamespace {
                     })
                     .collect()
             })
-            .map_err(guest_error_to_resource)
+            .map_err(|error| error_to_resource(uri, error))
     }
 
     async fn read(
@@ -257,240 +360,62 @@ impl ResourceProvider for WasmNamespace {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, ResourceError> {
-        if !self.claims(uri) {
-            return Err(ResourceError::not_found(uri));
-        }
         self.guest
-            .read(&uri_path(uri), offset, size)
+            .read(&uri.to_string(), offset, size)
             .await
-            .map_err(guest_error_to_resource)
-    }
-}
-
-#[async_trait]
-impl Namespace for WasmNamespace {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn set_root_ino(&mut self, ino: Ino) {
-        self.root_ino = ino;
-        let mut table = self.table.lock().unwrap();
-        table.next = ino.0 + 1;
-        if let Some(node) = table.by_ino.remove(&Ino::ROOT) {
-            table.by_ino.insert(ino, node);
-        }
-    }
-
-    fn root_ino(&self) -> Ino {
-        if self.root_ino.0 != 0 {
-            self.root_ino
-        } else {
-            self.root()
-        }
-    }
-
-    fn owns(&self, ino: Ino) -> bool {
-        ino == self.root_ino() || self.table.lock().unwrap().contains(ino)
-    }
-
-    async fn lookup(&self, parent: Ino, name: &OsStr) -> Result<Attrs, VfsError> {
-        let name = name.to_str().ok_or(VfsError::NotFound)?;
-        let path = {
-            let table = self.table.lock().unwrap();
-            table.path_of(parent).cloned().ok_or(VfsError::NotFound)?
-        };
-        let child_path = {
-            let mut p = path.clone();
-            p.push(name.to_string());
-            p
-        };
-        let attrs = self
-            .guest
-            .getattr(&child_path)
-            .await
-            .map_err(guest_error_to_kernel)?;
-        let ino = {
-            let mut table = self.table.lock().unwrap();
-            table.allocate(Some(parent), name.to_string())
-        };
-        Ok(guest_attrs_to_kernel(ino, &attrs))
-    }
-
-    async fn getattr(&self, ino: Ino) -> Result<Attrs, VfsError> {
-        let path = {
-            let table = self.table.lock().unwrap();
-            table.path_of(ino).cloned().ok_or(VfsError::NotFound)?
-        };
-        let attrs = self
-            .guest
-            .getattr(&path)
-            .await
-            .map_err(guest_error_to_kernel)?;
-        Ok(guest_attrs_to_kernel(ino, &attrs))
-    }
-
-    async fn readdir(&self, ino: Ino) -> Result<Vec<DirEntry>, VfsError> {
-        let path = {
-            let table = self.table.lock().unwrap();
-            table.path_of(ino).cloned().ok_or(VfsError::NotFound)?
-        };
-        let entries = self
-            .guest
-            .readdir(&path)
-            .await
-            .map_err(guest_error_to_kernel)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let kind = match entry.kind {
-                ns::Kind::Directory => NodeKind::Directory,
-                ns::Kind::File => NodeKind::File,
-            };
-            let child_ino = {
-                let mut table = self.table.lock().unwrap();
-                table.allocate(Some(ino), entry.name.clone())
-            };
-            out.push(DirEntry {
-                ino: child_ino,
-                kind,
-                name: entry.name.into(),
-            });
-        }
-        Ok(out)
-    }
-
-    async fn read(&self, ino: Ino, offset: u64, size: u32) -> Result<Vec<u8>, VfsError> {
-        let path = {
-            let table = self.table.lock().unwrap();
-            table.path_of(ino).cloned().ok_or(VfsError::NotFound)?
-        };
-        self.guest
-            .read(&path, offset, size)
-            .await
-            .map_err(guest_error_to_kernel)
-    }
-
-    async fn parent(&self, ino: Ino) -> Option<Ino> {
-        if ino == self.root_ino() {
-            return Some(Ino::ROOT);
-        }
-        let table = self.table.lock().unwrap();
-        table.parent_of(ino)
+            .map_err(|error| error_to_resource(uri, error))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artist_kernel::vfs::Vfs;
+    use artist_kernel::Kernel;
 
-    struct FakeGuest {
-        attrs: HashMap<Vec<String>, ns::Attrs>,
-        entries: HashMap<Vec<String>, Vec<ns::Entry>>,
-        contents: HashMap<Vec<String>, Vec<u8>>,
-    }
+    struct Symbols;
 
     #[async_trait]
-    impl NamespaceGuest for FakeGuest {
-        async fn getattr(&self, path: &[String]) -> Result<ns::Attrs, ns::Error> {
-            self.attrs.get(path).cloned().ok_or(ns::Error::NotFound)
+    impl RoutedNounGuest for Symbols {
+        async fn matches(&self, uri: &str) -> bool {
+            uri.ends_with("/nuke.rs/symbols")
         }
 
-        async fn readdir(&self, path: &[String]) -> Result<Vec<ns::Entry>, ns::Error> {
-            self.entries.get(path).cloned().ok_or(ns::Error::NotFound)
+        async fn getattr(&self, _uri: &str) -> Result<types::Attrs, types::Error> {
+            Ok(types::Attrs {
+                kind: types::Kind::File,
+                size: 7,
+                mtime_secs: 0,
+                mtime_nsecs: 0,
+            })
         }
 
-        async fn read(
-            &self,
-            path: &[String],
-            _offset: u64,
-            _size: u32,
-        ) -> Result<Vec<u8>, ns::Error> {
-            self.contents.get(path).cloned().ok_or(ns::Error::NotFound)
+        async fn readdir(&self, _uri: &str) -> Result<Vec<types::Entry>, types::Error> {
+            Err(types::Error::NotDir)
         }
-    }
 
-    fn p(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
-
-    fn ns_attrs(kind: ns::Kind, size: u64) -> ns::Attrs {
-        ns::Attrs {
-            kind,
-            size,
-            mtime_secs: 0,
-            mtime_nsecs: 0,
+        async fn read(&self, _uri: &str, offset: u64, size: u32) -> Result<Vec<u8>, types::Error> {
+            Ok(b"Symbol"[offset as usize..]
+                .iter()
+                .copied()
+                .take(size as usize)
+                .collect())
         }
     }
 
     #[tokio::test]
-    async fn mount_lookup_readdir_read() {
-        let mut attrs = HashMap::new();
-        attrs.insert(p(&[]), ns_attrs(ns::Kind::Directory, 0));
-        attrs.insert(p(&["version"]), ns_attrs(ns::Kind::File, 7));
-        attrs.insert(p(&["sub"]), ns_attrs(ns::Kind::Directory, 0));
+    async fn routes_a_file_suffix_without_treating_it_as_a_prefix_mount() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("nuke.rs"), b"fn nuke() {}").unwrap();
+        let kernel = Kernel::with_files_root(temp.path());
+        kernel.register_resource_provider(RoutedNoun::new("ast-symbols", Arc::new(Symbols)));
 
-        let mut entries = HashMap::new();
-        entries.insert(
-            p(&[]),
-            vec![
-                ns::Entry {
-                    name: "version".into(),
-                    kind: ns::Kind::File,
-                    size: 7,
-                },
-                ns::Entry {
-                    name: "sub".into(),
-                    kind: ns::Kind::Directory,
-                    size: 0,
-                },
-            ],
+        let base: ResourceUri = "file:///nuke.rs".parse().unwrap();
+        assert_eq!(
+            kernel.read_uri(&base, 0, 64).await.unwrap(),
+            b"fn nuke() {}"
         );
-        entries.insert(p(&["sub"]), vec![]);
 
-        let mut contents = HashMap::new();
-        contents.insert(p(&["version"]), b"0.1.0\n".to_vec());
-
-        let guest = Box::new(FakeGuest {
-            attrs,
-            entries,
-            contents,
-        });
-        let ns = WasmNamespace::new("demo", guest);
-
-        let kernel = artist_kernel::Kernel::new();
-        let root = kernel.register(ns);
-
-        let v = kernel.getattr(root).await.unwrap();
-        assert_eq!(v.kind, NodeKind::Directory);
-
-        let children = kernel.readdir(root).await.unwrap();
-        assert_eq!(children.len(), 2);
-
-        let version = kernel.lookup(root, OsStr::new("version")).await.unwrap();
-        assert_eq!(version.kind, NodeKind::File);
-        assert_eq!(version.size, 7);
-
-        let data = kernel.read(version.ino, 0, 8).await.unwrap();
-        assert_eq!(data, b"0.1.0\n");
-
-        assert_eq!(kernel.parent(version.ino).await, Some(root));
-    }
-
-    #[tokio::test]
-    async fn missing_lookup_is_not_found() {
-        let mut attrs = HashMap::new();
-        attrs.insert(p(&[]), ns_attrs(ns::Kind::Directory, 0));
-        let guest = Box::new(FakeGuest {
-            attrs,
-            entries: HashMap::new(),
-            contents: HashMap::new(),
-        });
-        let ns = WasmNamespace::new("demo", guest);
-        let kernel = artist_kernel::Kernel::new();
-        let root = kernel.register(ns);
-
-        let err = kernel.lookup(root, OsStr::new("nope")).await.unwrap_err();
-        assert_eq!(err, VfsError::NotFound);
+        let derived: ResourceUri = "file:///nuke.rs/symbols".parse().unwrap();
+        assert_eq!(kernel.read_uri(&derived, 0, 64).await.unwrap(), b"Symbol");
     }
 }

@@ -1,0 +1,49 @@
+package artist:component@1.0.0;
+
+/// Values shared by the generic component host contract.
+interface types {
+    record dependency {
+        name: string,
+        version: string,
+    }
+
+    record descriptor {
+        name: string,
+        version: string,
+        dependencies: list<dependency>,
+    }
+
+    enum error {
+        invalid-argument,
+        not-found,
+        conflict,
+        unavailable,
+        failed,
+    }
+
+    /// A loaded component definition. The host owns the underlying Wasmtime
+    /// component and exposes only this opaque identity to guests.
+    resource component;
+
+    /// A reversible contribution to the live component tree.
+    resource registration;
+}
+
+/// The only generic host capability required by the component master.
+/// Namespace-specific contracts define what a component does after it has
+/// been loaded and given a registration handle.
+interface host {
+    use types.{component, descriptor, error, registration};
+
+    load: func(locator: string) -> result<component, error>;
+    describe: func(value: component) -> result<descriptor, error>;
+    activate: func(value: component) -> result<component, error>;
+    retire: func(value: component) -> result<_, error>;
+    register: func(value: component, uri: string) -> result<registration, error>;
+    unregister: func(value: registration) -> result<_, error>;
+}
+
+world component-root {
+    import types;
+    import host;
+}

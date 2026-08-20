@@ -5,6 +5,7 @@
 //! base package currently provides `read`, `write`, `move`, `edit`, `find`, and `grep`.
 
 pub mod bindings;
+pub mod component;
 pub mod edit;
 pub mod find;
 pub mod grep;

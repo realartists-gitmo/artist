@@ -63,12 +63,12 @@ impl ResourceProvider for EmptyNamespace {
         &self.name
     }
 
-    fn claims(&self, uri: &ResourceUri) -> bool {
+    fn eligible(&self, uri: &ResourceUri) -> bool {
         uri.scheme() == self.name && uri.is_root() && uri.authority().is_empty()
     }
 
     async fn attrs(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
-        if self.claims(uri) {
+        if self.eligible(uri) {
             Ok(ProviderAttrs::directory())
         } else {
             Err(ResourceError::not_found(uri))
@@ -76,7 +76,7 @@ impl ResourceProvider for EmptyNamespace {
     }
 
     async fn readdir(&self, uri: &ResourceUri) -> Result<Vec<ProviderEntry>, ResourceError> {
-        if self.claims(uri) {
+        if self.eligible(uri) {
             Ok(Vec::new())
         } else {
             Err(ResourceError::not_found(uri))
@@ -89,7 +89,7 @@ impl ResourceProvider for EmptyNamespace {
         _offset: u64,
         _size: u32,
     ) -> Result<Vec<u8>, ResourceError> {
-        if self.claims(uri) {
+        if self.eligible(uri) {
             Err(ResourceError::new(
                 ResourceErrorCode::IsDir,
                 "cannot read a namespace directory",
@@ -144,7 +144,7 @@ impl Namespace for EmptyNamespace {
     }
 }
 
-/// The native `files://` provider. The URI root maps to `root` on the host.
+/// The native `file://` provider. The URI root maps to `root` on the host.
 pub struct FilesNamespace {
     root: PathBuf,
     exclusions: Arc<RwLock<Vec<PathBuf>>>,
@@ -172,7 +172,7 @@ impl FilesNamespace {
         &self.root
     }
 
-    /// Exclude a host path and its descendants from the `files://` namespace.
+    /// Exclude a host path and its descendants from the `file://` namespace.
     /// Relative paths are relative to this namespace's configured root.
     /// Providers that own a resource backed by this path can therefore keep
     /// their backing files private from the ordinary filesystem view.
@@ -219,14 +219,19 @@ impl FilesNamespace {
     }
 
     fn host_path(&self, uri: &ResourceUri) -> Result<PathBuf, ResourceError> {
-        if uri.scheme() != "files" || !uri.authority().is_empty() {
+        if uri.scheme() != "file" || !uri.authority().is_empty() {
             return Err(ResourceError::new(
                 ResourceErrorCode::InvalidAddress,
                 format!("not a files URI: {uri}"),
             ));
         }
         let mut path = self.root.clone();
-        for segment in uri.segments() {
+        for segment in uri.decoded_segments().map_err(|_| {
+            ResourceError::new(
+                ResourceErrorCode::InvalidAddress,
+                format!("invalid URI: {uri}"),
+            )
+        })? {
             path.push(segment);
         }
         if self.is_excluded(&path) {
@@ -328,10 +333,10 @@ fn validate_child_name(name: &OsStr) -> Result<&str, VfsError> {
 #[async_trait]
 impl ResourceProvider for FilesNamespace {
     fn provider_name(&self) -> &str {
-        "files"
+        "file"
     }
-    fn claims(&self, uri: &ResourceUri) -> bool {
-        uri.scheme() == "files" && uri.authority().is_empty() && self.host_path(uri).is_ok()
+    fn eligible(&self, uri: &ResourceUri) -> bool {
+        uri.scheme() == "file" && uri.authority().is_empty() && self.host_path(uri).is_ok()
     }
 
     async fn attrs(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
@@ -525,7 +530,7 @@ fn reject_mutation_query(uri: &ResourceUri) -> Result<(), ResourceError> {
 #[async_trait]
 impl Namespace for FilesNamespace {
     fn name(&self) -> &str {
-        "files"
+        "file"
     }
     fn set_root_ino(&mut self, ino: Ino) {
         self.set_root(ino);
@@ -595,7 +600,7 @@ impl Namespace for FilesNamespace {
         if metadata.is_dir() {
             return Err(VfsError::IsDir);
         }
-        let uri = ResourceUri::root("files").map_err(|_| VfsError::Io)?;
+        let uri = ResourceUri::root("file").map_err(|_| VfsError::Io)?;
         let mut current = uri;
         let relative = path.strip_prefix(&self.root).map_err(|_| VfsError::Io)?;
         for component in relative.components() {

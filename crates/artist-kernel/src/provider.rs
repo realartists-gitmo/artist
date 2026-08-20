@@ -108,10 +108,19 @@ pub trait ResourceProvider: Send + Sync {
     /// Stable provider identity used for diagnostics and registration.
     fn provider_name(&self) -> &str;
 
-    /// Whether this provider owns the addressed resource.
-    fn claims(&self, uri: &ResourceUri) -> bool;
+    /// Cheap synchronous eligibility check used before dynamic routing.
+    /// This is not a URI mount or ownership declaration.
+    fn eligible(&self, uri: &ResourceUri) -> bool;
 
-    /// More-specific claims win over less-specific claims.
+    /// Decide whether this provider handles this URI. Unlike [`eligible`], this
+    /// decision may be dynamic and may inspect the complete URI, including
+    /// path suffixes, queries, and fragments. This is the routing hook for
+    /// derived/decorating noun providers.
+    async fn matches(&self, uri: &ResourceUri) -> bool {
+        self.eligible(uri)
+    }
+
+    /// Higher-priority matching providers win when several routes handle a URI.
     fn priority(&self) -> u32 {
         0
     }
@@ -263,8 +272,8 @@ impl ResourceProvider for LayeredResourceProvider {
         &self.name
     }
 
-    fn claims(&self, uri: &ResourceUri) -> bool {
-        self.local.claims(uri) || self.global.claims(uri)
+    fn eligible(&self, uri: &ResourceUri) -> bool {
+        self.local.eligible(uri) || self.global.eligible(uri)
     }
 
     fn priority(&self) -> u32 {
@@ -408,7 +417,7 @@ mod tests {
             "memory"
         }
 
-        fn claims(&self, uri: &ResourceUri) -> bool {
+        fn eligible(&self, uri: &ResourceUri) -> bool {
             uri.scheme() == "overlay" && uri.authority().is_empty()
         }
 

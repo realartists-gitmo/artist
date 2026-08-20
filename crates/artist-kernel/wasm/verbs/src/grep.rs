@@ -133,7 +133,7 @@ fn parse_root(value: &str) -> Result<ResourceUri, GrepError> {
     let uri = value
         .parse::<ResourceUri>()
         .map_err(|error| GrepError::InvalidUri(error.to_string()))?;
-    if uri.scheme() != "files" || !uri.authority().is_empty() {
+    if uri.scheme() != "file" || !uri.authority().is_empty() {
         return Err(GrepError::InvalidUri(value.into()));
     }
     if uri.query().is_some() || uri.fragment().is_some() {

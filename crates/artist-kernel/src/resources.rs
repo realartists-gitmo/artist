@@ -10,34 +10,35 @@ use crate::provider::{
 use crate::uri::ResourceUri;
 use crate::vfs::{Attrs, DirEntry, Ino, VfsError};
 
-pub struct Resources {
+/// The kernel-owned namespace-registration root at `url://`.
+pub struct UrlNamespace {
     root_ino: Ino,
 }
 
-impl Resources {
+impl UrlNamespace {
     pub fn new() -> Self {
         Self { root_ino: Ino(0) }
     }
 }
 
-impl Default for Resources {
+impl Default for UrlNamespace {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl ResourceProvider for Resources {
+impl ResourceProvider for UrlNamespace {
     fn provider_name(&self) -> &str {
-        "resources"
+        "url"
     }
 
-    fn claims(&self, uri: &ResourceUri) -> bool {
-        uri.scheme() == "resources" && uri.authority().is_empty() && uri.is_root()
+    fn eligible(&self, uri: &ResourceUri) -> bool {
+        uri.scheme() == "url" && uri.authority().is_empty() && uri.is_root()
     }
 
     async fn attrs(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
-        if self.claims(uri) {
+        if self.eligible(uri) {
             Ok(ProviderAttrs::directory())
         } else {
             Err(ResourceError::not_found(uri))
@@ -45,7 +46,7 @@ impl ResourceProvider for Resources {
     }
 
     async fn readdir(&self, uri: &ResourceUri) -> Result<Vec<ProviderEntry>, ResourceError> {
-        if self.claims(uri) {
+        if self.eligible(uri) {
             Ok(Vec::new())
         } else {
             Err(ResourceError::not_found(uri))
@@ -58,7 +59,7 @@ impl ResourceProvider for Resources {
         _offset: u64,
         _size: u32,
     ) -> Result<Vec<u8>, ResourceError> {
-        if self.claims(uri) {
+        if self.eligible(uri) {
             Err(ResourceError::new(
                 ResourceErrorCode::IsDir,
                 "cannot read a namespace directory",
@@ -70,9 +71,9 @@ impl ResourceProvider for Resources {
 }
 
 #[async_trait]
-impl Namespace for Resources {
+impl Namespace for UrlNamespace {
     fn name(&self) -> &str {
-        "resources"
+        "url"
     }
     fn set_root_ino(&mut self, ino: Ino) {
         self.root_ino = ino;

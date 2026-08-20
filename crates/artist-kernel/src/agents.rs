@@ -1,4 +1,4 @@
-//! The kernel-owned `agents://` transcript namespace.
+//! The optional `agent://` transcript provider.
 //!
 //! Storage remains supplied by the caller. The kernel owns addressing,
 //! resource shape, and append/close routing; it does not know the transcript
@@ -14,7 +14,7 @@ use crate::provider::{
 };
 use crate::uri::ResourceUri;
 
-const SCHEME: &str = "agents";
+const SCHEME: &str = "agent";
 const TRANSCRIPT: &str = "transcript";
 const STDIN: &str = "stdin";
 const STDOUT: &str = "stdout";
@@ -109,7 +109,7 @@ impl AgentsProvider {
     }
 
     fn kind(&self, uri: &ResourceUri) -> Result<ResourceKind, ResourceError> {
-        if !self.claims(uri) {
+        if !self.eligible(uri) {
             return Err(ResourceError::not_found(uri));
         }
         let segments: Vec<_> = uri.segments().collect();
@@ -165,7 +165,7 @@ impl ResourceProvider for AgentsProvider {
         SCHEME
     }
 
-    fn claims(&self, uri: &ResourceUri) -> bool {
+    fn eligible(&self, uri: &ResourceUri) -> bool {
         uri.scheme() == SCHEME
     }
 
@@ -390,7 +390,7 @@ mod tests {
 
     #[tokio::test]
     async fn exposes_live_and_closed_transcripts_as_resources() {
-        let kernel = crate::Kernel::empty();
+        let kernel = crate::Kernel::with_agents();
         kernel
             .register_agent_transcript(
                 "agent-1",
@@ -400,7 +400,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let uri: ResourceUri = "agents://agent-1/transcript".parse().unwrap();
+        let uri: ResourceUri = "agent://agent-1/transcript".parse().unwrap();
 
         kernel
             .append_agent_event(&uri, "agent.user_message", serde_json::json!({"text":"hi"}))
@@ -424,7 +424,7 @@ mod tests {
 
     #[tokio::test]
     async fn exposes_live_process_io_without_a_process_namespace() {
-        let kernel = crate::Kernel::empty();
+        let kernel = crate::Kernel::with_agents();
         kernel
             .register_agent_process(
                 "agent-1",
@@ -434,7 +434,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let agent: ResourceUri = "agents://agent-1".parse().unwrap();
+        let agent: ResourceUri = "agent://agent-1".parse().unwrap();
         let names = kernel.readdir_uri(&agent).await.unwrap();
         assert_eq!(
             names
@@ -444,9 +444,9 @@ mod tests {
             vec!["stdin", "stdout"]
         );
 
-        let stdin: ResourceUri = "agents://agent-1/stdin".parse().unwrap();
+        let stdin: ResourceUri = "agent://agent-1/stdin".parse().unwrap();
         assert_eq!(kernel.write_uri(&stdin, 0, b"steer\n").await.unwrap(), 6);
-        let stdout: ResourceUri = "agents://agent-1/stdout".parse().unwrap();
+        let stdout: ResourceUri = "agent://agent-1/stdout".parse().unwrap();
         assert_eq!(
             kernel.read_uri(&stdout, 0, 4096).await.unwrap(),
             b"model output\n"

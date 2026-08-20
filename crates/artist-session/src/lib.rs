@@ -351,7 +351,7 @@ impl EventLog {
 }
 
 /// Kernel resource adapter for an existing durable event log. The log remains
-/// the source of truth; this adapter only gives it `agents://` addressing.
+/// the source of truth; this adapter only gives it `agent://` addressing.
 pub struct EventLogTranscript {
     log: std::sync::Arc<EventLog>,
     closed_marker: PathBuf,

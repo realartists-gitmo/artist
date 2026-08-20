@@ -23,6 +23,7 @@ pub enum UriError {
     MissingScheme,
     InvalidScheme,
     InvalidPath,
+    InvalidUri,
 }
 
 impl fmt::Display for UriError {
@@ -31,6 +32,7 @@ impl fmt::Display for UriError {
             Self::MissingScheme => write!(f, "resource URI is missing a scheme"),
             Self::InvalidScheme => write!(f, "resource URI has an invalid scheme"),
             Self::InvalidPath => write!(f, "resource URI contains an invalid path component"),
+            Self::InvalidUri => write!(f, "resource URI is not a hierarchical URL"),
         }
     }
 }
@@ -38,7 +40,7 @@ impl fmt::Display for UriError {
 impl std::error::Error for UriError {}
 
 impl ResourceUri {
-    /// Construct a `files://` URI from an OS-style path. Relative paths are
+    /// Construct a `file://` URI from an OS-style path. Relative paths are
     /// rooted at the files namespace root; `.` is normalized and traversal
     /// above that root is rejected.
     pub fn from_path(path: impl AsRef<str>) -> Result<Self, UriError> {
@@ -48,7 +50,7 @@ impl ResourceUri {
         } else {
             format!("/{path}")
         };
-        Self::new("files", "", path)
+        Self::new("file", "", path)
     }
 
     pub fn new(
@@ -57,12 +59,18 @@ impl ResourceUri {
         path: impl AsRef<str>,
     ) -> Result<Self, UriError> {
         let scheme = scheme.into().to_ascii_lowercase();
+        let authority = authority.into();
         validate_scheme(&scheme)?;
         let path = normalize_path(path.as_ref())?;
+        let candidate = format!("{scheme}://{authority}{path}");
+        let parsed = url::Url::parse(&candidate).map_err(|_| UriError::InvalidUri)?;
+        if parsed.cannot_be_a_base() {
+            return Err(UriError::InvalidUri);
+        }
         Ok(Self {
             scheme,
-            authority: authority.into(),
-            path,
+            authority: authority_from_url(&parsed),
+            path: canonical_url_path(&parsed),
             query: None,
             fragment: None,
         })
@@ -112,6 +120,25 @@ impl ResourceUri {
 
     pub fn segments(&self) -> impl Iterator<Item = &str> {
         self.path.split('/').filter(|segment| !segment.is_empty())
+    }
+
+    /// Return path segments decoded according to URL percent-encoding.
+    /// Providers that map URI paths to host paths should use this accessor;
+    /// [`Self::path`] remains the canonical serialized path.
+    pub fn decoded_segments(&self) -> Result<Vec<String>, UriError> {
+        let parsed = url::Url::parse(&self.to_string()).map_err(|_| UriError::InvalidUri)?;
+        Ok(parsed
+            .path_segments()
+            .map(|segments| {
+                segments
+                    .map(|segment| {
+                        percent_encoding::percent_decode_str(segment)
+                            .decode_utf8_lossy()
+                            .into_owned()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     pub fn is_root(&self) -> bool {
@@ -167,32 +194,41 @@ impl FromStr for ResourceUri {
     type Err = UriError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (base, fragment) = match value.split_once('#') {
-            Some((base, fragment)) => (base, Some(fragment.to_string())),
-            None => (value, None),
-        };
-        let (base, query) = match base.split_once('?') {
-            Some((base, query)) => (base, Some(query.to_string())),
-            None => (base, None),
+        let has_explicit_scheme = value
+            .split_once("://")
+            .map(|(scheme, _)| !scheme.is_empty())
+            .unwrap_or(false);
+
+        let (candidate, raw_path) = if has_explicit_scheme {
+            (value.to_string(), raw_url_path(value))
+        } else {
+            let base = value.split(['?', '#']).next().unwrap_or(value);
+            let candidate = if base.starts_with('/') {
+                format!("file://{value}")
+            } else {
+                format!("file:///{value}")
+            };
+            (candidate, base)
         };
 
-        let Some((scheme, rest)) = base.split_once("://") else {
-            let mut uri = Self::from_path(base)?;
-            uri.query = query;
-            uri.fragment = fragment;
-            return Ok(uri);
-        };
-        let uri = if rest.starts_with('/') {
-            Self::new(scheme, "", rest)?
-        } else if let Some((authority, suffix)) = rest.split_once('/') {
-            Self::new(scheme, authority, format!("/{suffix}"))?
-        } else {
-            Self::new(scheme, rest, "/")?
-        };
+        reject_parent_segments(raw_path)?;
+        let parsed = url::Url::parse(&candidate).map_err(|error| {
+            if error == url::ParseError::RelativeUrlWithoutBase {
+                UriError::MissingScheme
+            } else {
+                UriError::InvalidUri
+            }
+        })?;
+        if parsed.cannot_be_a_base() || parsed.scheme().is_empty() {
+            return Err(UriError::InvalidUri);
+        }
+        validate_scheme(parsed.scheme())?;
         Ok(Self {
-            query,
-            fragment,
-            ..uri
+            scheme: parsed.scheme().to_ascii_lowercase(),
+            authority: authority_from_url(&parsed),
+            path: canonical_url_path(&parsed),
+            query: parsed.query().map(str::to_string),
+            fragment: parsed.fragment().map(str::to_string),
         })
     }
 }
@@ -223,6 +259,44 @@ fn validate_scheme(scheme: &str) -> Result<(), UriError> {
     Ok(())
 }
 
+fn authority_from_url(url: &url::Url) -> String {
+    let value = url.as_str();
+    let Some(start) = value.find("://").map(|index| index + 3) else {
+        return String::new();
+    };
+    let rest = &value[start..];
+    rest.split('/').next().unwrap_or_default().to_string()
+}
+
+fn canonical_url_path(url: &url::Url) -> String {
+    if url.path().is_empty() {
+        "/".to_string()
+    } else {
+        url.path().to_string()
+    }
+}
+
+fn raw_url_path(value: &str) -> &str {
+    let base = value.split(['?', '#']).next().unwrap_or(value);
+    let Some((_, rest)) = base.split_once("://") else {
+        return base;
+    };
+    rest.find('/').map(|index| &rest[index..]).unwrap_or("/")
+}
+
+fn reject_parent_segments(path: &str) -> Result<(), UriError> {
+    if path.split('/').any(|segment| {
+        segment == ".."
+            || segment.eq_ignore_ascii_case("%2e%2e")
+            || segment.eq_ignore_ascii_case(".%2e")
+            || segment.eq_ignore_ascii_case("%2e.")
+    }) {
+        Err(UriError::InvalidPath)
+    } else {
+        Ok(())
+    }
+}
+
 fn normalize_path(path: &str) -> Result<String, UriError> {
     if path.is_empty() {
         return Ok("/".to_string());
@@ -251,11 +325,11 @@ mod tests {
 
     #[test]
     fn parses_and_normalizes() {
-        let uri: ResourceUri = "FILES:///src/main.rs".parse().unwrap();
-        assert_eq!(uri.scheme(), "files");
+        let uri: ResourceUri = "FILE:///src/main.rs".parse().unwrap();
+        assert_eq!(uri.scheme(), "file");
         assert_eq!(uri.path(), "/src/main.rs");
-        assert_eq!(uri.to_string(), "files:///src/main.rs");
-        assert_eq!(uri.parent().unwrap().to_string(), "files:///src");
+        assert_eq!(uri.to_string(), "file:///src/main.rs");
+        assert_eq!(uri.parent().unwrap().to_string(), "file:///src");
     }
 
     #[test]
@@ -266,38 +340,48 @@ mod tests {
     }
 
     #[test]
-    fn bare_paths_default_to_files_namespace() {
+    fn bare_paths_default_to_file_namespace() {
         let relative: ResourceUri = "src/./main.rs?kind#body".parse().unwrap();
-        assert_eq!(relative.to_string(), "files:///src/main.rs?kind#body");
+        assert_eq!(relative.to_string(), "file:///src/main.rs?kind#body");
 
         let absolute: ResourceUri = "/workspace/main.rs".parse().unwrap();
-        assert_eq!(absolute.to_string(), "files:///workspace/main.rs");
+        assert_eq!(absolute.to_string(), "file:///workspace/main.rs");
         assert!("../secret".parse::<ResourceUri>().is_err());
     }
 
     #[test]
     fn queries_and_fragments_are_preserved() {
-        let uri: ResourceUri = "files:///src/main.rs?kind#body".parse().unwrap();
+        let uri: ResourceUri = "file:///src/main.rs?kind#body".parse().unwrap();
         assert_eq!(uri.path(), "/src/main.rs");
         assert_eq!(uri.query(), Some("kind"));
         assert_eq!(uri.fragment(), Some("body"));
-        assert_eq!(uri.to_string(), "files:///src/main.rs?kind#body");
+        assert_eq!(uri.to_string(), "file:///src/main.rs?kind#body");
+    }
+
+    #[test]
+    fn url_encoding_is_canonical_but_provider_segments_are_decoded() {
+        let uri: ResourceUri = "file:///hello%20world.txt?kind#body".parse().unwrap();
+        assert_eq!(uri.to_string(), "file:///hello%20world.txt?kind#body");
+        assert_eq!(uri.decoded_segments().unwrap(), vec!["hello world.txt"]);
+
+        let from_path = ResourceUri::from_path("hello world.txt").unwrap();
+        assert_eq!(from_path.to_string(), "file:///hello%20world.txt");
     }
 
     #[test]
     fn path_operations_do_not_turn_selectors_into_path_components() {
-        let uri: ResourceUri = "files:///src/main.rs?kind#body".parse().unwrap();
+        let uri: ResourceUri = "file:///src/main.rs?kind#body".parse().unwrap();
         assert_eq!(uri.segments().collect::<Vec<_>>(), vec!["src", "main.rs"]);
-        assert_eq!(uri.parent().unwrap().to_string(), "files:///src");
+        assert_eq!(uri.parent().unwrap().to_string(), "file:///src");
         assert_eq!(
             uri.child("next.rs").unwrap().to_string(),
-            "files:///src/main.rs/next.rs"
+            "file:///src/main.rs/next.rs"
         );
     }
 
     #[test]
     fn traversal_is_rejected() {
-        assert!("files:///../secret".parse::<ResourceUri>().is_err());
-        assert!("files:///a/../../secret".parse::<ResourceUri>().is_err());
+        assert!("file:///../secret".parse::<ResourceUri>().is_err());
+        assert!("file:///a/../../secret".parse::<ResourceUri>().is_err());
     }
 }

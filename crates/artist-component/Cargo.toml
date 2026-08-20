@@ -8,6 +8,9 @@ rust-version.workspace = true
 [dependencies]
 artist-kernel = { path = "../artist-kernel" }
 artist-wasm = { path = "../artist-kernel/wasm" }
+artist-wasm-nouns = { path = "../artist-kernel/wasm/nouns" }
+artist-wasm-url = { path = "../artist-kernel/wasm/url" }
+artist-wasm-verbs = { path = "../artist-kernel/wasm/verbs" }
 anyhow = "1"
 async-trait = "0.1"
 sha2 = "0.10"
@@ -20,6 +23,7 @@ thiserror = "2"
 cap-std = "4"
 gray_matter = "0.2"
 serde_yaml = "0.9"
+toml = "1.1"
 cargo_metadata = "0.19"
 escargot = "0.5"
 futures = "0.3"

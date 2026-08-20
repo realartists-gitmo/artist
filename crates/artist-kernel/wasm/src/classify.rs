@@ -3,7 +3,7 @@
 //! A component's class is determined purely by inspecting its exported WIT
 //! interface names — no manifest. An extension exports one or more of:
 //!
-//! * `artist:nouns/namespace` → noun (addressable, filesystem-shaped resource)
+//! * `artist:nouns/provider` → noun (addressable, URI-aware resource)
 //! * `artist:verbs/*` → verb (typed operations over resources; batch-native)
 //! * `artist:events/subscriber` → event (long-lived, reactive service)
 //!
@@ -14,8 +14,8 @@ use wasmtime::component::Component;
 
 /// The contract interface names that classify a component.
 pub mod names {
-    /// A noun exports the namespace interface.
-    pub const NOUN: &str = "artist:nouns/namespace";
+    /// A noun exports the URI-aware provider interface.
+    pub const NOUN: &str = "artist:nouns/provider";
     /// An event service exports the subscriber interface.
     pub const EVENT: &str = "artist:events/subscriber";
     /// All verb interfaces live under this prefix (specific verbs are defined
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn export_names_classify() {
         assert_eq!(
-            classify_export("artist:nouns/namespace@1.0.0"),
+            classify_export("artist:nouns/provider@2.0.0"),
             Some(ExtensionClass {
                 noun: true,
                 ..Default::default()
