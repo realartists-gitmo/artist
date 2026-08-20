@@ -51,7 +51,8 @@ pub struct Found {
 /// shortest path from any `froms` qn to any `tos` qn, or `None` when the
 /// target is unreachable within `max_depth` hops.
 /// Public so a host can render the path itself. `render_trace` bakes in this
-/// crate's `file:line` output; artist addresses lines by semantic occurrence anchor.
+/// crate's `file:line` output; hosts that need another address representation
+/// should render the returned structure themselves.
 pub fn find_path(calls: &CallGraph, froms: &[Qn], tos: &[Qn], max_depth: usize) -> Option<Found> {
     use std::collections::HashSet;
     let to_set: HashSet<&Qn> = tos.iter().collect();

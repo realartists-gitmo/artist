@@ -10,6 +10,10 @@ use std::sync::Arc;
 use artist_agent::daemon::{Daemon, DaemonRpcHandler};
 use artist_agent::rpc::serve_ndjson;
 
+pub mod tools;
+
+pub use tools::{ToolRunner, validate_root};
+
 pub fn default_state_root() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from(".artist"))

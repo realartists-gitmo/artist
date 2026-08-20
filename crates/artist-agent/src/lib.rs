@@ -8,7 +8,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use artist_session::{EventLog, LogError};
+use artist_kernel::{Kernel, ResourceError};
+use artist_session::{EventLog, EventLogTranscript, LogError};
 use futures::StreamExt;
 use llm_provider::{
     Message, ModelEvent, ModelProvider, ModelRequest, ModelResponse, Role, ToolCall,
@@ -168,6 +169,16 @@ where
 
     pub fn metrics(&self) -> Arc<AgentMetrics> {
         Arc::clone(&self.metrics)
+    }
+
+    /// Publish this engine's existing durable event log through the kernel's
+    /// `agents://<agent>/transcript` resource.
+    pub fn register_transcript(
+        &self,
+        kernel: &Kernel,
+        agent: impl Into<String>,
+    ) -> Result<(), ResourceError> {
+        kernel.register_agent_transcript(agent, EventLogTranscript::new(Arc::clone(&self.log)))
     }
 
     /// Reconstruct the canonical agent event stream without invoking a model

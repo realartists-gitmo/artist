@@ -8,13 +8,20 @@ pub struct ResourceUri {
     scheme: String,
     authority: String,
     path: String,
+    query: Option<String>,
+    // Fragments are preserved verbatim at the kernel boundary. Their position
+    // grammar is intentionally not implemented here yet.
+    //
+    // TODO(teca): add the smallest adapter that attempts a canonical Teca
+    // address first, with decimal line numbers as the explicitly temporary
+    // compatibility fallback. Do not introduce an Artist-owned anchor format.
+    fragment: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UriError {
     MissingScheme,
     InvalidScheme,
-    QueryOrFragment,
     InvalidPath,
 }
 
@@ -23,7 +30,6 @@ impl fmt::Display for UriError {
         match self {
             Self::MissingScheme => write!(f, "resource URI is missing a scheme"),
             Self::InvalidScheme => write!(f, "resource URI has an invalid scheme"),
-            Self::QueryOrFragment => write!(f, "resource URI cannot contain a query or fragment"),
             Self::InvalidPath => write!(f, "resource URI contains an invalid path component"),
         }
     }
@@ -32,6 +38,19 @@ impl fmt::Display for UriError {
 impl std::error::Error for UriError {}
 
 impl ResourceUri {
+    /// Construct a `files://` URI from an OS-style path. Relative paths are
+    /// rooted at the files namespace root; `.` is normalized and traversal
+    /// above that root is rejected.
+    pub fn from_path(path: impl AsRef<str>) -> Result<Self, UriError> {
+        let path = path.as_ref();
+        let path = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        };
+        Self::new("files", "", path)
+    }
+
     pub fn new(
         scheme: impl Into<String>,
         authority: impl Into<String>,
@@ -44,7 +63,31 @@ impl ResourceUri {
             scheme,
             authority: authority.into(),
             path,
+            query: None,
+            fragment: None,
         })
+    }
+
+    pub fn with_query(mut self, query: impl Into<String>) -> Self {
+        self.query = Some(query.into());
+        self
+    }
+
+    pub fn with_fragment(mut self, fragment: impl Into<String>) -> Self {
+        self.fragment = Some(fragment.into());
+        self
+    }
+
+    /// Return the resource address without its position fragment.
+    ///
+    /// Fragments identify a position within a resource and are not part of
+    /// provider routing or storage lookup. The future Teca adapter will parse
+    /// them at the verb boundary; until then, the raw fragment is preserved
+    /// by this type and ignored by resource operations.
+    pub fn without_fragment(&self) -> Self {
+        let mut uri = self.clone();
+        uri.fragment = None;
+        uri
     }
 
     pub fn root(scheme: impl Into<String>) -> Result<Self, UriError> {
@@ -59,6 +102,12 @@ impl ResourceUri {
     }
     pub fn path(&self) -> &str {
         &self.path
+    }
+    pub fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+    pub fn fragment(&self) -> Option<&str> {
+        self.fragment.as_deref()
     }
 
     pub fn segments(&self) -> impl Iterator<Item = &str> {
@@ -118,23 +167,46 @@ impl FromStr for ResourceUri {
     type Err = UriError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (scheme, rest) = value.split_once("://").ok_or(UriError::MissingScheme)?;
-        if rest.contains('?') || rest.contains('#') {
-            return Err(UriError::QueryOrFragment);
-        }
-        if rest.starts_with('/') {
-            return Self::new(scheme, "", rest);
-        }
-        if let Some((authority, suffix)) = rest.split_once('/') {
-            return Self::new(scheme, authority, format!("/{suffix}"));
-        }
-        Self::new(scheme, rest, "/")
+        let (base, fragment) = match value.split_once('#') {
+            Some((base, fragment)) => (base, Some(fragment.to_string())),
+            None => (value, None),
+        };
+        let (base, query) = match base.split_once('?') {
+            Some((base, query)) => (base, Some(query.to_string())),
+            None => (base, None),
+        };
+
+        let Some((scheme, rest)) = base.split_once("://") else {
+            let mut uri = Self::from_path(base)?;
+            uri.query = query;
+            uri.fragment = fragment;
+            return Ok(uri);
+        };
+        let uri = if rest.starts_with('/') {
+            Self::new(scheme, "", rest)?
+        } else if let Some((authority, suffix)) = rest.split_once('/') {
+            Self::new(scheme, authority, format!("/{suffix}"))?
+        } else {
+            Self::new(scheme, rest, "/")?
+        };
+        Ok(Self {
+            query,
+            fragment,
+            ..uri
+        })
     }
 }
 
 impl fmt::Display for ResourceUri {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}://{}{}", self.scheme, self.authority, self.path)
+        write!(f, "{}://{}{}", self.scheme, self.authority, self.path)?;
+        if let Some(query) = &self.query {
+            write!(f, "?{query}")?;
+        }
+        if let Some(fragment) = &self.fragment {
+            write!(f, "#{fragment}")?;
+        }
+        Ok(())
     }
 }
 
@@ -191,6 +263,36 @@ mod tests {
         let uri: ResourceUri = "repo://owner/pr/1".parse().unwrap();
         assert_eq!(uri.authority(), "owner");
         assert_eq!(uri.path(), "/pr/1");
+    }
+
+    #[test]
+    fn bare_paths_default_to_files_namespace() {
+        let relative: ResourceUri = "src/./main.rs?kind#body".parse().unwrap();
+        assert_eq!(relative.to_string(), "files:///src/main.rs?kind#body");
+
+        let absolute: ResourceUri = "/workspace/main.rs".parse().unwrap();
+        assert_eq!(absolute.to_string(), "files:///workspace/main.rs");
+        assert!("../secret".parse::<ResourceUri>().is_err());
+    }
+
+    #[test]
+    fn queries_and_fragments_are_preserved() {
+        let uri: ResourceUri = "files:///src/main.rs?kind#body".parse().unwrap();
+        assert_eq!(uri.path(), "/src/main.rs");
+        assert_eq!(uri.query(), Some("kind"));
+        assert_eq!(uri.fragment(), Some("body"));
+        assert_eq!(uri.to_string(), "files:///src/main.rs?kind#body");
+    }
+
+    #[test]
+    fn path_operations_do_not_turn_selectors_into_path_components() {
+        let uri: ResourceUri = "files:///src/main.rs?kind#body".parse().unwrap();
+        assert_eq!(uri.segments().collect::<Vec<_>>(), vec!["src", "main.rs"]);
+        assert_eq!(uri.parent().unwrap().to_string(), "files:///src");
+        assert_eq!(
+            uri.child("next.rs").unwrap().to_string(),
+            "files:///src/main.rs/next.rs"
+        );
     }
 
     #[test]

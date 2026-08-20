@@ -10,13 +10,10 @@
 //! [`ParseResult`] and [`core::Declaration`] and decide for themselves how to
 //! render them.
 //!
-//! That last part matters here specifically. Upstream renders every result
-//! against line numbers; artist addresses lines by semantic occurrence
-//! anchor, so the renderers are deliberately not part of this crate's contract.
-//! Analysis in, structured data out.
+//! That last part matters here specifically. Renderers are deliberately not
+//! part of this crate's contract. Analysis in, structured data out.
 
 pub mod adapters;
-pub mod anchors;
 pub mod core;
 pub mod file_filter;
 pub mod main_helpers;

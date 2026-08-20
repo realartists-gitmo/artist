@@ -9,6 +9,7 @@ rust-version.workspace = true
 anyhow = "1"
 async-trait = "0.1"
 artist-kernel = { path = ".." }
+semver = "1"
 tokio = { version = "1", features = ["sync"] }
 wasmtime = { version = "47.0.3", default-features = false, features = ["std", "runtime", "component-model", "component-model-async", "async", "cranelift", "wat", "anyhow"] }
 

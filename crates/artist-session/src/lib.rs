@@ -10,6 +10,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use artist_kernel::{AgentTranscript, ResourceError, ResourceErrorCode};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -255,6 +256,10 @@ impl EventLog {
             .map_or(1, |record| record.sequence + 1))
     }
 
+    pub fn bytes(&self) -> Result<Vec<u8>, LogError> {
+        std::fs::read(&self.path).map_err(|source| io_error(&self.path, source))
+    }
+
     fn open_rw(&self) -> Result<File, LogError> {
         OpenOptions::new()
             .create(true)
@@ -345,6 +350,66 @@ impl EventLog {
     }
 }
 
+/// Kernel resource adapter for an existing durable event log. The log remains
+/// the source of truth; this adapter only gives it `agents://` addressing.
+pub struct EventLogTranscript {
+    log: std::sync::Arc<EventLog>,
+    closed_marker: PathBuf,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl EventLogTranscript {
+    pub fn new(log: std::sync::Arc<EventLog>) -> Self {
+        let closed_marker = log.path().with_extension("closed");
+        let closed = closed_marker.exists();
+        Self {
+            log,
+            closed_marker,
+            closed: std::sync::atomic::AtomicBool::new(closed),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentTranscript for EventLogTranscript {
+    async fn read(&self) -> Result<Vec<u8>, ResourceError> {
+        self.log.bytes().map_err(log_resource_error)
+    }
+
+    async fn append(
+        &self,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), ResourceError> {
+        if self.is_closed() {
+            return Err(ResourceError::new(
+                ResourceErrorCode::Conflict,
+                "historical transcript is immutable",
+            ));
+        }
+        self.log
+            .append(event_type, payload)
+            .map(|_| ())
+            .map_err(log_resource_error)
+    }
+
+    async fn close(&self) -> Result<(), ResourceError> {
+        std::fs::write(&self.closed_marker, b"closed")
+            .map_err(|error| ResourceError::new(ResourceErrorCode::Io, error.to_string()))?;
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+fn log_resource_error(error: LogError) -> ResourceError {
+    ResourceError::new(ResourceErrorCode::Io, error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +472,27 @@ mod tests {
                 .join("workspaces/repo-a/sessions/session-1.jsonl")
         );
         assert_eq!(log.records().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn transcript_close_survives_reopen() {
+        let dir = tempdir().unwrap();
+        let log = std::sync::Arc::new(
+            EventLog::open(dir.path().join("session.jsonl"), "session-1").unwrap(),
+        );
+        let transcript = EventLogTranscript::new(std::sync::Arc::clone(&log));
+        transcript.close().await.unwrap();
+        assert!(transcript.is_closed());
+
+        let reopened = EventLogTranscript::new(log);
+        assert!(reopened.is_closed());
+        assert!(matches!(
+            reopened.append("late", serde_json::json!({})).await,
+            Err(ResourceError {
+                code: ResourceErrorCode::Conflict,
+                ..
+            })
+        ));
     }
 
     #[test]

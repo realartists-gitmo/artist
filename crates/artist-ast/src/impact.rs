@@ -93,9 +93,8 @@ pub struct ImpactReport {
 /// The structured reports, for a host that renders them itself.
 ///
 /// `report_text` and `run_impact` both bake in this crate's `file:line`
-/// rendering. Artist addresses lines by semantic occurrence anchor instead, so it needs
-/// the `ImpactEntry` values — which already carry `file`, `line`, `kind` and
-/// `confidence` — rather than a finished string.
+/// rendering, so hosts that need another address representation should use the
+/// structured `ImpactEntry` values rather than a finished string.
 pub fn report(
     target: &str,
     root: &Path,

@@ -5,14 +5,16 @@
 //! `list<result<response, error>>`. The model surface stays scalar; the
 //! harness batches scalar tool calls into one component call.
 //!
-//! Specific verbs are not defined yet, so [`VerbDispatcher`] is parameterized
-//! by the request/response types: each concrete verb family brings its own
-//! typed records and a [`VerbTool`] implementation (built on its bindings),
-//! then registers with a dispatcher.
+//! Each concrete verb family brings its own typed records and a [`VerbTool`]
+//! implementation (built on its bindings), then registers with a dispatcher.
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
+use artist_kernel::{VerbHandler, VerbInvocationError};
 use async_trait::async_trait;
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value;
 
 /// The verb error algebra, mirroring `artist:verbs/types.error`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +38,75 @@ pub trait VerbTool<Req, Res>: Send + Sync {
     fn name(&self) -> &str;
 
     async fn call(&self, requests: Vec<Req>) -> Vec<Result<Res, VerbError>>;
+}
+
+/// Adapts one typed verb to the kernel's opaque TOON invocation boundary.
+/// The dynamic boundary is scalar; typed implementations may still use their
+/// batch-native ABI internally.
+pub struct ToonVerbHandler<T, Req, Res> {
+    name: String,
+    tool: T,
+    marker: PhantomData<fn(Req) -> Res>,
+}
+
+impl<T, Req, Res> ToonVerbHandler<T, Req, Res> {
+    pub fn new(name: impl Into<String>, tool: T) -> Self {
+        Self {
+            name: name.into(),
+            tool,
+            marker: PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<T, Req, Res> VerbHandler for ToonVerbHandler<T, Req, Res>
+where
+    T: VerbTool<Req, Res> + 'static,
+    Req: DeserializeOwned + Send + 'static,
+    Res: Serialize + Send + 'static,
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn invoke(&self, request: &[u8]) -> Result<Vec<u8>, VerbInvocationError> {
+        let request = std::str::from_utf8(request).map_err(|error| {
+            VerbInvocationError::InvalidArgument(format!("TOON request is not UTF-8: {error}"))
+        })?;
+        let value: Value = toon_format::decode_default(request).map_err(|error| {
+            VerbInvocationError::InvalidArgument(format!("invalid TOON request: {error}"))
+        })?;
+        let request: Req = serde_json::from_value(value).map_err(|error| {
+            VerbInvocationError::InvalidArgument(format!("invalid verb request: {error}"))
+        })?;
+        let result = self
+            .tool
+            .call(vec![request])
+            .await
+            .into_iter()
+            .next()
+            .ok_or_else(|| VerbInvocationError::Internal("verb returned no result".into()))?
+            .map_err(|error| map_verb_error(error, &self.name))?;
+        toon_format::encode_default(&serde_json::to_value(result).map_err(|error| {
+            VerbInvocationError::Internal(format!("serialize verb response: {error}"))
+        })?)
+        .map(|value| value.into_bytes())
+        .map_err(|error| VerbInvocationError::Internal(format!("encode TOON response: {error}")))
+    }
+}
+
+fn map_verb_error(error: VerbError, verb: &str) -> VerbInvocationError {
+    let message = format!("{verb} failed");
+    match error {
+        VerbError::InvalidArgument => VerbInvocationError::InvalidArgument(message),
+        VerbError::NotFound => VerbInvocationError::NotFound(message),
+        VerbError::Unsupported => VerbInvocationError::Unsupported(message),
+        VerbError::PermissionDenied => VerbInvocationError::PermissionDenied(message),
+        VerbError::Conflict => VerbInvocationError::Conflict(message),
+        VerbError::Aborted => VerbInvocationError::Aborted(message),
+        VerbError::Internal => VerbInvocationError::Internal(message),
+    }
 }
 
 /// Routes batches to the registered tool implementing a verb family.

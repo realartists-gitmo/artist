@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, File, ReadDir};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -147,6 +147,7 @@ impl Namespace for EmptyNamespace {
 /// The native `files://` provider. The URI root maps to `root` on the host.
 pub struct FilesNamespace {
     root: PathBuf,
+    exclusions: Arc<RwLock<Vec<PathBuf>>>,
     root_ino: Ino,
     nodes: Mutex<HashMap<Ino, PathBuf>>,
     reverse: Mutex<HashMap<PathBuf, Ino>>,
@@ -155,8 +156,11 @@ pub struct FilesNamespace {
 
 impl FilesNamespace {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let root = fs::canonicalize(&root).unwrap_or(root);
         Self {
-            root: root.into(),
+            root,
+            exclusions: Arc::new(RwLock::new(Vec::new())),
             root_ino: Ino(0),
             nodes: Mutex::new(HashMap::new()),
             reverse: Mutex::new(HashMap::new()),
@@ -166,6 +170,52 @@ impl FilesNamespace {
 
     pub fn root_path(&self) -> &Path {
         &self.root
+    }
+
+    /// Exclude a host path and its descendants from the `files://` namespace.
+    /// Relative paths are relative to this namespace's configured root.
+    /// Providers that own a resource backed by this path can therefore keep
+    /// their backing files private from the ordinary filesystem view.
+    pub fn exclude_path(&self, path: impl AsRef<Path>) -> Result<(), ResourceError> {
+        let path = path.as_ref();
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+        if !path.starts_with(&self.root) {
+            return Err(ResourceError::new(
+                ResourceErrorCode::InvalidAddress,
+                format!(
+                    "files exclusion is outside namespace root: {}",
+                    path.display()
+                ),
+            ));
+        }
+        let mut exclusions = self.exclusions.write().unwrap();
+        if !exclusions.iter().any(|existing| existing == &path) {
+            exclusions.push(path);
+        }
+        Ok(())
+    }
+
+    pub fn excluded_paths(&self) -> Vec<PathBuf> {
+        self.exclusions.read().unwrap().clone()
+    }
+
+    fn is_excluded(&self, path: &Path) -> bool {
+        let is_artist_private = path.strip_prefix(&self.root).ok().is_some_and(|relative| {
+            relative.components().any(|component| {
+                    matches!(component, Component::Normal(name) if name == OsStr::new(".artist"))
+                })
+        });
+        is_artist_private
+            || self
+                .exclusions
+                .read()
+                .unwrap()
+                .iter()
+                .any(|excluded| path == excluded || path.starts_with(excluded))
     }
 
     fn host_path(&self, uri: &ResourceUri) -> Result<PathBuf, ResourceError> {
@@ -178,6 +228,9 @@ impl FilesNamespace {
         let mut path = self.root.clone();
         for segment in uri.segments() {
             path.push(segment);
+        }
+        if self.is_excluded(&path) {
+            return Err(ResourceError::not_found(uri));
         }
         Ok(path)
     }
@@ -219,7 +272,8 @@ impl FilesNamespace {
     }
 
     fn path_for_ino(&self, ino: Ino) -> Option<PathBuf> {
-        self.nodes.lock().unwrap().get(&ino).cloned()
+        let path = self.nodes.lock().unwrap().get(&ino).cloned()?;
+        (!self.is_excluded(&path)).then_some(path)
     }
 
     fn set_root(&mut self, ino: Ino) {
@@ -230,6 +284,24 @@ impl FilesNamespace {
             .unwrap()
             .insert(self.root.clone(), ino);
         *self.next_ino.get_mut().unwrap() = ino.0 + 1;
+    }
+
+    fn update_cached_paths(&self, old_path: &Path, new_path: &Path) -> Result<(), VfsError> {
+        let mut nodes = self.nodes.lock().unwrap();
+        let mut reverse = self.reverse.lock().unwrap();
+        let moved: Vec<(Ino, PathBuf)> = nodes
+            .iter()
+            .filter(|(_, path)| *path == old_path || path.starts_with(old_path))
+            .map(|(ino, path)| (*ino, path.clone()))
+            .collect();
+        for (ino, path) in moved {
+            let suffix = path.strip_prefix(old_path).map_err(|_| VfsError::Io)?;
+            let replacement = new_path.join(suffix);
+            nodes.insert(ino, replacement.clone());
+            reverse.remove(&path);
+            reverse.insert(replacement, ino);
+        }
+        Ok(())
     }
 }
 
@@ -259,7 +331,7 @@ impl ResourceProvider for FilesNamespace {
         "files"
     }
     fn claims(&self, uri: &ResourceUri) -> bool {
-        uri.scheme() == "files" && uri.authority().is_empty()
+        uri.scheme() == "files" && uri.authority().is_empty() && self.host_path(uri).is_ok()
     }
 
     async fn attrs(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
@@ -279,6 +351,9 @@ impl ResourceProvider for FilesNamespace {
         for item in fs::read_dir(&path).map_err(|e| io_error(e, &path))? {
             let item = item.map_err(|e| io_error(e, &path))?;
             let item_path = item.path();
+            if self.is_excluded(&item_path) {
+                continue;
+            }
             out.push(ProviderEntry {
                 name: item.file_name().to_string_lossy().into_owned(),
                 attrs: Self::attrs_for_path(&item_path)?,
@@ -294,7 +369,27 @@ impl ResourceProvider for FilesNamespace {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, ResourceError> {
+        if matches!(uri.query(), Some(query) if query != "kind") {
+            return Err(ResourceError::new(
+                ResourceErrorCode::Unsupported,
+                format!("files provider does not support URI selector: {uri}"),
+            ));
+        }
         let path = self.host_path(uri)?;
+        if uri.query() == Some("kind") {
+            let kind = Self::attrs_for_path(&path)?.kind;
+            let value = match kind {
+                NodeKind::Directory => "directory",
+                NodeKind::File => "file",
+            };
+            let bytes = value.as_bytes();
+            return Ok(bytes
+                .iter()
+                .skip(offset as usize)
+                .take(size as usize)
+                .copied()
+                .collect());
+        }
         let mut file = File::open(&path).map_err(|e| io_error(e, &path))?;
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| io_error(e, &path))?;
@@ -303,6 +398,128 @@ impl ResourceProvider for FilesNamespace {
         buffer.truncate(count);
         Ok(buffer)
     }
+
+    async fn write(
+        &self,
+        uri: &ResourceUri,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<u32, ResourceError> {
+        reject_mutation_query(uri)?;
+        let path = self.host_path(uri)?;
+        let metadata = fs::metadata(&path).map_err(|e| io_error(e, &path))?;
+        if metadata.is_dir() {
+            return Err(ResourceError::new(
+                ResourceErrorCode::IsDir,
+                "cannot write a directory",
+            ));
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .map_err(|e| io_error(e, &path))?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| io_error(e, &path))?;
+        file.write_all(data).map_err(|e| io_error(e, &path))?;
+        u32::try_from(data.len()).map_err(|_| {
+            ResourceError::new(
+                ResourceErrorCode::Io,
+                "write length exceeds the URI write result capacity",
+            )
+        })
+    }
+
+    async fn set_size(&self, uri: &ResourceUri, size: u64) -> Result<(), ResourceError> {
+        reject_mutation_query(uri)?;
+        let path = self.host_path(uri)?;
+        let metadata = fs::metadata(&path).map_err(|e| io_error(e, &path))?;
+        if metadata.is_dir() {
+            return Err(ResourceError::new(
+                ResourceErrorCode::IsDir,
+                "cannot resize a directory",
+            ));
+        }
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .map_err(|e| io_error(e, &path))?;
+        file.set_len(size).map_err(|e| io_error(e, &path))
+    }
+
+    async fn create_file(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
+        reject_mutation_query(uri)?;
+        let path = self.host_path(uri)?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| io_error(e, &path))?;
+        drop(file);
+        Self::attrs_for_path(&path)
+    }
+
+    async fn create_directory(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
+        reject_mutation_query(uri)?;
+        let path = self.host_path(uri)?;
+        fs::create_dir(&path).map_err(|e| io_error(e, &path))?;
+        Self::attrs_for_path(&path)
+    }
+
+    async fn move_resource(
+        &self,
+        source: &ResourceUri,
+        destination: &ResourceUri,
+    ) -> Result<(), ResourceError> {
+        reject_mutation_query(source)?;
+        reject_mutation_query(destination)?;
+        let source_path = self.host_path(source)?;
+        let destination_path = self.host_path(destination)?;
+        let target = match fs::metadata(&destination_path) {
+            Ok(metadata) if metadata.is_dir() => {
+                destination_path.join(source_path.file_name().ok_or_else(|| {
+                    ResourceError::new(
+                        ResourceErrorCode::InvalidAddress,
+                        "cannot move the files namespace root",
+                    )
+                })?)
+            }
+            Ok(_) => destination_path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => destination_path,
+            Err(error) => return Err(io_error(error, &destination_path)),
+        };
+        if self.is_excluded(&target) {
+            return Err(ResourceError::not_found(destination));
+        }
+        fs::rename(&source_path, &target).map_err(|e| io_error(e, &target))?;
+        self.update_cached_paths(&source_path, &target)
+            .map_err(|_| {
+                ResourceError::new(
+                    ResourceErrorCode::Io,
+                    "move succeeded but inode cache update failed",
+                )
+            })
+    }
+
+    async fn delete(&self, uri: &ResourceUri) -> Result<(), ResourceError> {
+        reject_mutation_query(uri)?;
+        let path = self.host_path(uri)?;
+        let metadata = fs::metadata(&path).map_err(|e| io_error(e, &path))?;
+        if metadata.is_dir() {
+            fs::remove_dir(&path).map_err(|e| io_error(e, &path))
+        } else {
+            fs::remove_file(&path).map_err(|e| io_error(e, &path))
+        }
+    }
+}
+
+fn reject_mutation_query(uri: &ResourceUri) -> Result<(), ResourceError> {
+    if uri.query().is_some() {
+        return Err(ResourceError::new(
+            ResourceErrorCode::Unsupported,
+            format!("files mutations do not support URI query selectors: {uri}"),
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -332,6 +549,9 @@ impl Namespace for FilesNamespace {
             return Err(VfsError::NotFound);
         }
         let path = parent_path.join(name);
+        if self.is_excluded(&path) {
+            return Err(VfsError::NotFound);
+        }
         let attrs = Self::attrs_for_path(&path).map_err(to_vfs_error)?;
         let ino = self.allocate(path);
         Ok(to_vfs(ino, attrs))
@@ -354,6 +574,9 @@ impl Namespace for FilesNamespace {
         for item in fs::read_dir(&path).map_err(|e| to_vfs_error(io_error(e, &path)))? {
             let item = item.map_err(|e| to_vfs_error(io_error(e, &path)))?;
             let child_path = item.path();
+            if self.is_excluded(&child_path) {
+                continue;
+            }
             let child_ino = self.allocate(child_path.clone());
             let attrs = Self::attrs_for_path(&child_path).map_err(to_vfs_error)?;
             out.push(DirEntry {
@@ -419,6 +642,9 @@ impl Namespace for FilesNamespace {
         let parent_path = self.path_for_ino(parent).ok_or(VfsError::NotFound)?;
         let name = validate_child_name(name)?;
         let path = parent_path.join(name);
+        if self.is_excluded(&path) {
+            return Err(VfsError::NotFound);
+        }
         let file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -435,6 +661,9 @@ impl Namespace for FilesNamespace {
         let parent_path = self.path_for_ino(parent).ok_or(VfsError::NotFound)?;
         let name = validate_child_name(name)?;
         let path = parent_path.join(name);
+        if self.is_excluded(&path) {
+            return Err(VfsError::NotFound);
+        }
         fs::create_dir(&path).map_err(|e| to_vfs_error(io_error(e, &path)))?;
         let ino = self.allocate(path.clone());
         Self::attrs_for_path(&path)
@@ -455,31 +684,23 @@ impl Namespace for FilesNamespace {
         let new_name = validate_child_name(new_name)?;
         let old_path = old_parent.join(old_name);
         let new_path = new_parent.join(new_name);
+        if self.is_excluded(&old_path) || self.is_excluded(&new_path) {
+            return Err(VfsError::NotFound);
+        }
         fs::rename(&old_path, &new_path).map_err(|e| to_vfs_error(io_error(e, &new_path)))?;
 
         // Inodes are runtime-local. Update cached paths so open descriptors and
         // subsequent lookups continue to address the moved subtree.
-        let mut nodes = self.nodes.lock().unwrap();
-        let mut reverse = self.reverse.lock().unwrap();
-        let moved: Vec<(Ino, PathBuf)> = nodes
-            .iter()
-            .filter(|(_, path)| *path == &old_path || path.starts_with(&old_path))
-            .map(|(ino, path)| (*ino, path.clone()))
-            .collect();
-        for (ino, path) in moved {
-            let suffix = path.strip_prefix(&old_path).map_err(|_| VfsError::Io)?;
-            let replacement = new_path.join(suffix);
-            nodes.insert(ino, replacement.clone());
-            reverse.remove(&path);
-            reverse.insert(replacement, ino);
-        }
-        Ok(())
+        self.update_cached_paths(&old_path, &new_path)
     }
 
     async fn unlink(&self, parent: Ino, name: &OsStr, directory: bool) -> Result<(), VfsError> {
         let parent_path = self.path_for_ino(parent).ok_or(VfsError::NotFound)?;
         let name = validate_child_name(name)?;
         let path = parent_path.join(name);
+        if self.is_excluded(&path) {
+            return Err(VfsError::NotFound);
+        }
         let metadata = fs::metadata(&path).map_err(|e| to_vfs_error(io_error(e, &path)))?;
         if metadata.is_dir() != directory {
             return if metadata.is_dir() {

@@ -5,13 +5,17 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 
+use crate::agents::{AgentProcess, AgentTranscript, AgentsProvider};
+use crate::contracts::{ContractRegistry, ExtensionContract};
 use crate::namespace::Namespace;
 use crate::native::{EmptyNamespace, FilesNamespace};
 use crate::provider::{
-    ProviderAttrs, ProviderEntry, ResourceError, ResourceErrorCode, ResourceProvider,
+    LayeredResourceProvider, ProviderAttrs, ProviderEntry, ResourceError, ResourceErrorCode,
+    ResourceProvider,
 };
 use crate::resources::Resources;
 use crate::uri::{ResourceUri, UriError};
+use crate::verbs::{VerbHandler, VerbInvocationError, VerbRegistry};
 use crate::vfs::{Attrs, DirEntry, Ino, NodeKind, Vfs, VfsError};
 
 #[derive(Clone)]
@@ -69,6 +73,61 @@ impl ProviderSlot {
             Self::Resource(provider) => provider.parent(uri).await,
         }
     }
+
+    async fn write(
+        &self,
+        uri: &ResourceUri,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<u32, ResourceError> {
+        match self {
+            Self::Namespace(provider) => {
+                ResourceProvider::write(&**provider, uri, offset, data).await
+            }
+            Self::Resource(provider) => provider.write(uri, offset, data).await,
+        }
+    }
+
+    async fn set_size(&self, uri: &ResourceUri, size: u64) -> Result<(), ResourceError> {
+        match self {
+            Self::Namespace(provider) => ResourceProvider::set_size(&**provider, uri, size).await,
+            Self::Resource(provider) => provider.set_size(uri, size).await,
+        }
+    }
+
+    async fn create_file(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
+        match self {
+            Self::Namespace(provider) => ResourceProvider::create_file(&**provider, uri).await,
+            Self::Resource(provider) => provider.create_file(uri).await,
+        }
+    }
+
+    async fn create_directory(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
+        match self {
+            Self::Namespace(provider) => ResourceProvider::create_directory(&**provider, uri).await,
+            Self::Resource(provider) => provider.create_directory(uri).await,
+        }
+    }
+
+    async fn move_resource(
+        &self,
+        source: &ResourceUri,
+        destination: &ResourceUri,
+    ) -> Result<(), ResourceError> {
+        match self {
+            Self::Namespace(provider) => {
+                ResourceProvider::move_resource(&**provider, source, destination).await
+            }
+            Self::Resource(provider) => provider.move_resource(source, destination).await,
+        }
+    }
+
+    async fn delete(&self, uri: &ResourceUri) -> Result<(), ResourceError> {
+        match self {
+            Self::Namespace(provider) => ResourceProvider::delete(&**provider, uri).await,
+            Self::Resource(provider) => provider.delete(uri).await,
+        }
+    }
 }
 
 struct Registry {
@@ -83,13 +142,17 @@ struct Registry {
 pub struct Kernel {
     registry: RwLock<Registry>,
     next_ino: AtomicU64,
+    verbs: Arc<VerbRegistry>,
+    agents: Arc<AgentsProvider>,
+    contracts: Arc<ContractRegistry>,
 }
 
 impl Kernel {
     /// Construct the complete native bootstrap surface.
     ///
-    /// `files://` mirrors the current working directory by default. Embedders
-    /// that need a different host root should use [`Self::with_files_root`].
+    /// `files://` mirrors the current working directory by default, excluding
+    /// every `.artist` directory and its descendants. Embedders that need a
+    /// different host root should use [`Self::with_files_root`].
     pub fn new() -> Self {
         let root = std::env::current_dir().unwrap_or_else(|_| ".".into());
         Self::with_files_root(root)
@@ -100,18 +163,43 @@ impl Kernel {
         kernel.register(Resources::new());
         kernel.register(EmptyNamespace::new("tools"));
         kernel.register(EmptyNamespace::new("events"));
+        kernel.register(EmptyNamespace::new("prompts"));
         kernel.register(FilesNamespace::new(root));
         kernel
     }
 
+    /// Construct a kernel with selected host paths hidden from `files://` in
+    /// addition to the universal `.artist` exclusion.
+    pub fn with_files_root_excluding(
+        root: impl Into<std::path::PathBuf>,
+        exclusions: impl IntoIterator<Item = std::path::PathBuf>,
+    ) -> Result<Self, ResourceError> {
+        let kernel = Self::empty();
+        kernel.register(Resources::new());
+        kernel.register(EmptyNamespace::new("tools"));
+        kernel.register(EmptyNamespace::new("events"));
+        kernel.register(EmptyNamespace::new("prompts"));
+        let files = FilesNamespace::new(root);
+        for exclusion in exclusions {
+            files.exclude_path(exclusion)?;
+        }
+        kernel.register(files);
+        Ok(kernel)
+    }
+
     /// Construct a kernel without native registrations.
     pub fn empty() -> Self {
+        let agents = Arc::new(AgentsProvider::new());
+        let contracts = Arc::new(ContractRegistry::new());
         Self {
             registry: RwLock::new(Registry {
                 namespaces: Vec::new(),
-                providers: Vec::new(),
+                providers: vec![ProviderSlot::Resource(agents.clone())],
             }),
             next_ino: AtomicU64::new(Ino::ROOT.0 + 1),
+            verbs: Arc::new(VerbRegistry::new()),
+            agents,
+            contracts,
         }
     }
 
@@ -137,6 +225,105 @@ impl Kernel {
             .unwrap()
             .providers
             .push(ProviderSlot::Resource(Arc::new(provider)));
+    }
+
+    /// Register one logical namespace backed by a local-over-global provider
+    /// pair. The child providers are kept private behind the flattened view.
+    pub fn register_layered_resource_provider<L, G>(
+        &self,
+        name: impl Into<String>,
+        local: L,
+        global: G,
+    ) where
+        L: ResourceProvider + 'static,
+        G: ResourceProvider + 'static,
+    {
+        self.register_resource_provider(LayeredResourceProvider::new(name, local, global));
+    }
+
+    /// Publish an append-only transcript at
+    /// `agents://<agent>/transcript`.
+    pub fn register_agent_transcript<T: AgentTranscript + 'static>(
+        &self,
+        agent: impl Into<String>,
+        transcript: T,
+    ) -> Result<(), ResourceError> {
+        self.agents.register(agent, transcript)
+    }
+
+    pub async fn append_agent_event(
+        &self,
+        uri: &ResourceUri,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), ResourceError> {
+        self.agents.append(uri, event_type, payload).await
+    }
+
+    pub async fn close_agent_transcript(&self, uri: &ResourceUri) -> Result<(), ResourceError> {
+        self.agents.close(uri).await
+    }
+
+    /// Publish the live process channels at `agents://<agent>/stdin` and
+    /// `agents://<agent>/stdout`.
+    pub fn register_agent_process<T: AgentProcess + 'static>(
+        &self,
+        agent: impl Into<String>,
+        process: T,
+    ) -> Result<(), ResourceError> {
+        self.agents.register_process(agent, process)
+    }
+
+    pub async fn write_agent_stdin(
+        &self,
+        uri: &ResourceUri,
+        data: &[u8],
+    ) -> Result<u32, ResourceError> {
+        self.agents.write_stdin(uri, data).await
+    }
+
+    /// Register an opaque extension-defined contract. The kernel does not
+    /// interpret its operation names or payloads.
+    pub fn register_extension_contract<C: ExtensionContract + 'static>(
+        &self,
+        name: impl Into<String>,
+        version: impl Into<String>,
+        contract: C,
+    ) -> Result<(), ResourceError> {
+        self.contracts.register(name, version, contract)
+    }
+
+    pub async fn invoke_extension_contract(
+        &self,
+        name: &str,
+        version: &str,
+        operation: &str,
+        input: &[u8],
+    ) -> Result<Vec<u8>, ResourceError> {
+        self.contracts.invoke(name, version, operation, input).await
+    }
+
+    /// Register a model-facing verb for use by the harness and extensions.
+    pub fn register_verb<H: VerbHandler + 'static>(&self, handler: H) {
+        self.verbs.register(handler);
+    }
+
+    /// Obtain the shared verb registry for host adapters and extension
+    /// runtimes. The registry is independent of resource-provider routing.
+    pub fn verb_registry(&self) -> Arc<VerbRegistry> {
+        Arc::clone(&self.verbs)
+    }
+
+    pub fn verb_names(&self) -> Vec<String> {
+        self.verbs.names()
+    }
+
+    pub async fn invoke_verb(
+        &self,
+        name: &str,
+        request: &[u8],
+    ) -> Result<Vec<u8>, VerbInvocationError> {
+        self.verbs.invoke(name, request).await
     }
 
     pub fn namespace_names(&self) -> Vec<String> {
@@ -180,14 +367,16 @@ impl Kernel {
     }
 
     pub async fn attrs_uri(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
-        self.provider_for_uri(uri)?.attrs(uri).await
+        let base = uri.without_fragment();
+        self.provider_for_uri(&base)?.attrs(&base).await
     }
 
     pub async fn readdir_uri(
         &self,
         uri: &ResourceUri,
     ) -> Result<Vec<ProviderEntry>, ResourceError> {
-        self.provider_for_uri(uri)?.readdir(uri).await
+        let base = uri.without_fragment();
+        self.provider_for_uri(&base)?.readdir(&base).await
     }
 
     pub async fn read_uri(
@@ -196,11 +385,62 @@ impl Kernel {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, ResourceError> {
-        self.provider_for_uri(uri)?.read(uri, offset, size).await
+        let base = uri.without_fragment();
+        self.provider_for_uri(&base)?
+            .read(&base, offset, size)
+            .await
     }
 
     pub async fn parent_uri(&self, uri: &ResourceUri) -> Option<ResourceUri> {
-        self.find_uri(uri)?.parent(uri).await
+        let base = uri.without_fragment();
+        self.find_uri(&base)?.parent(&base).await
+    }
+
+    pub async fn write_uri(
+        &self,
+        uri: &ResourceUri,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<u32, ResourceError> {
+        let base = uri.without_fragment();
+        self.provider_for_uri(&base)?
+            .write(&base, offset, data)
+            .await
+    }
+
+    pub async fn set_size_uri(&self, uri: &ResourceUri, size: u64) -> Result<(), ResourceError> {
+        let base = uri.without_fragment();
+        self.provider_for_uri(&base)?.set_size(&base, size).await
+    }
+
+    pub async fn create_file_uri(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
+        let base = uri.without_fragment();
+        self.provider_for_uri(&base)?.create_file(&base).await
+    }
+
+    pub async fn create_directory_uri(
+        &self,
+        uri: &ResourceUri,
+    ) -> Result<ProviderAttrs, ResourceError> {
+        let base = uri.without_fragment();
+        self.provider_for_uri(&base)?.create_directory(&base).await
+    }
+
+    pub async fn move_uri(
+        &self,
+        source: &ResourceUri,
+        destination: &ResourceUri,
+    ) -> Result<(), ResourceError> {
+        let source = source.without_fragment();
+        let destination = destination.without_fragment();
+        self.provider_for_uri(&source)?
+            .move_resource(&source, &destination)
+            .await
+    }
+
+    pub async fn delete_uri(&self, uri: &ResourceUri) -> Result<(), ResourceError> {
+        let base = uri.without_fragment();
+        self.provider_for_uri(&base)?.delete(&base).await
     }
 
     pub async fn attrs_str(&self, uri: &str) -> Result<ProviderAttrs, ResourceError> {
@@ -445,7 +685,7 @@ mod tests {
         let kernel = Kernel::with_files_root(std::env::temp_dir());
         assert_eq!(
             kernel.namespace_names(),
-            vec!["resources", "tools", "events", "files"]
+            vec!["resources", "tools", "events", "prompts", "files"]
         );
         let roots = kernel.readdir(Ino::ROOT).await.unwrap();
         assert_eq!(
@@ -453,7 +693,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.name.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
-            vec!["resources", "tools", "events", "files"]
+            vec!["resources", "tools", "events", "prompts", "files"]
         );
     }
 
@@ -468,6 +708,126 @@ mod tests {
         assert_eq!(kernel.read_uri(&uri, 1, 3).await.unwrap(), b"ell");
         std::fs::write(temp.path().join("hello.txt"), b"changed").unwrap();
         assert_eq!(kernel.read_uri(&uri, 0, 7).await.unwrap(), b"changed");
+    }
+
+    #[tokio::test]
+    async fn files_uri_reads_kind_projection_without_using_selector_as_path() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("hello.txt"), b"hello").unwrap();
+        let kernel = Kernel::with_files_root(temp.path());
+        let uri: ResourceUri = "files:///hello.txt?kind#content".parse().unwrap();
+
+        // The kernel strips the position fragment before provider I/O. The
+        // provider still owns the meaning of the query projection.
+        assert_eq!(kernel.read_uri(&uri, 0, 32).await.unwrap(), b"file");
+
+        let kind: ResourceUri = "files:///hello.txt?kind".parse().unwrap();
+        assert_eq!(kernel.read_uri(&kind, 0, 32).await.unwrap(), b"file");
+    }
+
+    #[tokio::test]
+    async fn files_uri_mutations_use_resource_addresses() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("hello.txt"), b"hello").unwrap();
+        std::fs::create_dir(temp.path().join("destination")).unwrap();
+        let kernel = Kernel::with_files_root(temp.path());
+
+        let hello: ResourceUri = "files:///hello.txt#position".parse().unwrap();
+        assert_eq!(kernel.write_uri(&hello, 5, b"!").await.unwrap(), 1);
+        kernel.set_size_uri(&hello, 4).await.unwrap();
+        assert_eq!(kernel.read_uri(&hello, 0, 16).await.unwrap(), b"hell");
+
+        let created: ResourceUri = "files:///created.txt#position".parse().unwrap();
+        kernel.create_file_uri(&created).await.unwrap();
+        assert_eq!(kernel.read_uri(&created, 0, 16).await.unwrap(), b"");
+
+        let created_dir: ResourceUri = "files:///created-dir#position".parse().unwrap();
+        assert_eq!(
+            kernel
+                .create_directory_uri(&created_dir)
+                .await
+                .unwrap()
+                .kind,
+            NodeKind::Directory
+        );
+
+        let destination: ResourceUri = "files:///destination".parse().unwrap();
+
+        kernel.move_uri(&hello, &destination).await.unwrap();
+        let moved: ResourceUri = "files:///destination/hello.txt".parse().unwrap();
+        assert_eq!(kernel.read_uri(&moved, 0, 16).await.unwrap(), b"hell");
+
+        kernel.delete_uri(&created).await.unwrap();
+        assert_eq!(
+            kernel.attrs_uri(&created).await.unwrap_err().code,
+            ResourceErrorCode::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn files_namespace_exclusions_hide_host_backing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("visible.txt"), b"visible").unwrap();
+        std::fs::create_dir(temp.path().join("private")).unwrap();
+        std::fs::write(temp.path().join("private/secret.txt"), b"secret").unwrap();
+        let kernel = Kernel::with_files_root_excluding(
+            temp.path(),
+            vec![std::path::PathBuf::from("private")],
+        )
+        .unwrap();
+
+        assert_eq!(
+            kernel.attrs_str("visible.txt").await.unwrap().kind,
+            NodeKind::File
+        );
+        assert_eq!(
+            kernel
+                .attrs_str("files:///private/secret.txt")
+                .await
+                .unwrap_err()
+                .code,
+            ResourceErrorCode::NotFound
+        );
+        let files = kernel.lookup(Ino::ROOT, OsStr::new("files")).await.unwrap();
+        let entries = kernel.readdir(files.ino).await.unwrap();
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.name != OsStr::new("private"))
+        );
+    }
+
+    #[tokio::test]
+    async fn files_namespace_hides_every_artist_directory_automatically() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("visible.txt"), b"visible").unwrap();
+        std::fs::create_dir(temp.path().join(".artist")).unwrap();
+        std::fs::write(temp.path().join(".artist/private.txt"), b"private").unwrap();
+        std::fs::create_dir_all(temp.path().join("nested/.artist/deeper")).unwrap();
+        std::fs::write(
+            temp.path().join("nested/.artist/deeper/private.txt"),
+            b"private",
+        )
+        .unwrap();
+        let kernel = Kernel::with_files_root(temp.path());
+
+        assert!(kernel.attrs_str("visible.txt").await.is_ok());
+        for uri in [
+            "files:///.artist/private.txt",
+            "files:///nested/.artist/deeper/private.txt",
+        ] {
+            assert_eq!(
+                kernel.attrs_str(uri).await.unwrap_err().code,
+                ResourceErrorCode::NotFound
+            );
+        }
+        let root = kernel.attrs_str("files:///").await.unwrap();
+        assert_eq!(root.kind, NodeKind::Directory);
+        let entries = kernel
+            .readdir_uri(&"files:///".parse().unwrap())
+            .await
+            .unwrap();
+        assert!(entries.iter().all(|entry| entry.name != ".artist"));
     }
 
     #[tokio::test]

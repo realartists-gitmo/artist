@@ -1,8 +1,7 @@
 //! Generated bindings for the verb contract (`artist:verbs@1`).
 //!
-//! Specific verb interfaces are not defined yet. This crate provides the
-//! shared `types` interface (the `error` algebra) and the batch-native family
-//! shape that future verb interfaces must follow.
+//! Generated bindings for the shared verb types and the first concrete `read`
+//! verb interface.
 
 mod generated {
     wasmtime::component::bindgen!({
@@ -12,4 +11,9 @@ mod generated {
     });
 }
 
+pub use generated::artist::verbs::registry;
 pub use generated::artist::verbs::types as ty;
+pub use generated::exports::artist::verbs::find as find_bindings;
+pub use generated::exports::artist::verbs::move_ as move_bindings;
+pub use generated::exports::artist::verbs::read;
+pub use generated::exports::artist::verbs::write as write_bindings;

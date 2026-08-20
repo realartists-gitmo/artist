@@ -13,6 +13,7 @@ use wasmtime::{
 
 use crate::classify::ExtensionClass;
 use crate::loader::Extension;
+use crate::verb_registry::VerbRegistryView;
 
 /// The trusted host environment shared by active components.
 ///
@@ -38,6 +39,20 @@ pub trait HostEnvironment: Send + Sync {
         size: u32,
     ) -> Result<Vec<u8>, ResourceError> {
         self.kernel().read_uri(uri, offset, size).await
+    }
+
+    /// Invoke a contract registered by an extension-defined noun. The runtime
+    /// forwards opaque bytes and never interprets the contract's vocabulary.
+    async fn invoke_contract(
+        &self,
+        name: &str,
+        version: &str,
+        operation: &str,
+        input: &[u8],
+    ) -> Result<Vec<u8>, ResourceError> {
+        self.kernel()
+            .invoke_extension_contract(name, version, operation, input)
+            .await
     }
 }
 
@@ -130,6 +145,18 @@ impl HostEnvironment for ScopedHostEnvironment {
         self.authorize(uri)?;
         self.kernel.read_uri(uri, offset, size).await
     }
+
+    async fn invoke_contract(
+        &self,
+        name: &str,
+        version: &str,
+        operation: &str,
+        input: &[u8],
+    ) -> Result<Vec<u8>, ResourceError> {
+        self.kernel
+            .invoke_extension_contract(name, version, operation, input)
+            .await
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -138,15 +165,39 @@ pub struct ExtensionMetadata {
     pub version: String,
     /// Canonical URI prefixes claimed by this component.
     pub claims: Vec<String>,
+    /// Other active extensions required by this component.
+    pub dependencies: Vec<ExtensionDependency>,
+}
+
+/// A required extension and the compatible versions it accepts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionDependency {
+    pub name: String,
+    pub version: String,
+}
+
+impl ExtensionDependency {
+    fn validate(&self) -> anyhow::Result<semver::VersionReq> {
+        if self.name.trim().is_empty() {
+            return Err(anyhow!("extension dependency name is empty"));
+        }
+        semver::VersionReq::parse(&self.version)
+            .with_context(|| format!("invalid version requirement for {}", self.name))
+    }
 }
 
 impl ExtensionMetadata {
-    fn validate(&self) -> anyhow::Result<Vec<ResourceUri>> {
+    pub fn validate(&self) -> anyhow::Result<Vec<ResourceUri>> {
         if self.name.trim().is_empty() {
             return Err(anyhow!("component metadata name is empty"));
         }
         if self.version.trim().is_empty() {
             return Err(anyhow!("component metadata version is empty"));
+        }
+        semver::Version::parse(&self.version)
+            .with_context(|| format!("invalid semantic version {}", self.version))?;
+        for dependency in &self.dependencies {
+            dependency.validate()?;
         }
         self.claims
             .iter()
@@ -163,6 +214,12 @@ impl ExtensionMetadata {
 /// WIT host implementations to a `Linker<RuntimeStore>` before instantiation.
 pub struct RuntimeStore {
     pub host: Arc<dyn HostEnvironment>,
+}
+
+impl VerbRegistryView for RuntimeStore {
+    fn verb_registry(&mut self) -> crate::verb_registry::VerbRegistryContext<'_> {
+        crate::verb_registry::VerbRegistryContext::new(self.host.kernel().verb_registry())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -384,6 +441,135 @@ pub struct Runtime {
     active: RwLock<BTreeMap<String, Arc<GenerationInner>>>,
 }
 
+/// Runtime control surface for extensions. This deliberately contains no
+/// persistent configuration: callers may activate, retire, or replace an
+/// extension while the process remains alive.
+#[derive(Clone)]
+pub struct ExtensionManager {
+    runtime: Arc<Runtime>,
+}
+
+impl ExtensionManager {
+    pub fn new(runtime: Arc<Runtime>) -> Self {
+        Self { runtime }
+    }
+
+    pub async fn activate_bytes(
+        &self,
+        bytes: &[u8],
+        metadata: ExtensionMetadata,
+    ) -> anyhow::Result<GenerationHandle> {
+        let prepared = self.runtime.prepare(bytes, metadata)?;
+        self.runtime.activate(prepared).await
+    }
+
+    pub async fn activate_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        metadata: ExtensionMetadata,
+    ) -> anyhow::Result<GenerationHandle> {
+        let bytes = tokio::fs::read(path).await?;
+        self.activate_bytes(&bytes, metadata).await
+    }
+
+    /// Replace an active generation or activate the extension if it is absent.
+    pub async fn replace_bytes(
+        &self,
+        bytes: &[u8],
+        metadata: ExtensionMetadata,
+    ) -> anyhow::Result<GenerationHandle> {
+        self.activate_bytes(bytes, metadata).await
+    }
+
+    pub async fn replace_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        metadata: ExtensionMetadata,
+    ) -> anyhow::Result<GenerationHandle> {
+        self.activate_file(path, metadata).await
+    }
+
+    pub async fn retire(&self, name: &str) -> bool {
+        self.runtime.retire(name).await
+    }
+
+    pub fn active_names(&self) -> Vec<String> {
+        self.runtime.active_names()
+    }
+
+    /// Activate a set of artifacts in dependency order. Dependencies may be
+    /// supplied in any order; already-active compatible dependencies are
+    /// reused. Missing dependencies and cycles are rejected before activation.
+    pub async fn activate_bundle(
+        &self,
+        extensions: Vec<(Vec<u8>, ExtensionMetadata)>,
+    ) -> anyhow::Result<Vec<GenerationHandle>> {
+        let mut pending = BTreeMap::new();
+        for (bytes, metadata) in extensions {
+            metadata.validate()?;
+            if pending
+                .insert(metadata.name.clone(), (bytes, metadata))
+                .is_some()
+            {
+                return Err(anyhow!("duplicate extension in bundle"));
+            }
+        }
+        for (_, metadata) in pending.values() {
+            for dependency in &metadata.dependencies {
+                let requirement = dependency.validate()?;
+                if let Some((_, candidate)) = pending.get(&dependency.name) {
+                    let version = semver::Version::parse(&candidate.version)?;
+                    if !requirement.matches(&version) {
+                        return Err(anyhow!(
+                            "extension {} requires {} {}, bundle provides {}",
+                            metadata.name,
+                            dependency.name,
+                            dependency.version,
+                            version
+                        ));
+                    }
+                } else if !self.runtime.dependency_is_active(dependency)? {
+                    return Err(anyhow!(
+                        "extension {} requires unavailable dependency {} ({})",
+                        metadata.name,
+                        dependency.name,
+                        dependency.version
+                    ));
+                }
+            }
+        }
+
+        let mut ordered = Vec::new();
+        let mut resolved = std::collections::BTreeSet::new();
+        while !pending.is_empty() {
+            let candidate = pending.iter().find_map(|(name, (_, metadata))| {
+                metadata
+                    .dependencies
+                    .iter()
+                    .all(|dependency| {
+                        resolved.contains(&dependency.name)
+                            || self
+                                .runtime
+                                .dependency_is_active(dependency)
+                                .unwrap_or(false)
+                    })
+                    .then_some(name.clone())
+            });
+            let name = candidate.ok_or_else(|| {
+                anyhow!("extension bundle contains a missing dependency or cycle")
+            })?;
+            let (bytes, metadata) = pending.remove(&name).unwrap();
+            resolved.insert(name);
+            ordered.push((bytes, metadata));
+        }
+        let prepared = ordered
+            .into_iter()
+            .map(|(bytes, metadata)| self.runtime.prepare_unchecked(&bytes, metadata))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.runtime.activate_batch(prepared).await
+    }
+}
+
 impl Runtime {
     pub fn new(engine: Engine, host: Arc<dyn HostEnvironment>) -> Self {
         Self::with_limits(engine, host, RuntimeLimits::default())
@@ -412,6 +598,16 @@ impl Runtime {
         bytes: &[u8],
         metadata: ExtensionMetadata,
     ) -> anyhow::Result<PreparedGeneration> {
+        metadata.validate()?;
+        self.require_dependencies(&metadata)?;
+        self.prepare_unchecked(bytes, metadata)
+    }
+
+    fn prepare_unchecked(
+        &self,
+        bytes: &[u8],
+        metadata: ExtensionMetadata,
+    ) -> anyhow::Result<PreparedGeneration> {
         let claims = metadata.validate()?;
         let extension = Arc::new(
             Extension::load(&self.engine, bytes).context("compile and classify component")?,
@@ -429,59 +625,131 @@ impl Runtime {
         })
     }
 
-    fn conflicts(&self, prepared: &PreparedGeneration) -> Option<String> {
+    fn require_dependencies(&self, metadata: &ExtensionMetadata) -> anyhow::Result<()> {
         let active = self.active.read().unwrap();
-        active.values().find_map(|generation| {
-            if generation.metadata.name == prepared.metadata.name {
-                return None;
+        for dependency in &metadata.dependencies {
+            let requirement = dependency.validate()?;
+            let generation = active.get(&dependency.name).ok_or_else(|| {
+                anyhow!(
+                    "extension {} requires active dependency {} ({})",
+                    metadata.name,
+                    dependency.name,
+                    dependency.version
+                )
+            })?;
+            let version =
+                semver::Version::parse(&generation.metadata.version).with_context(|| {
+                    format!("active dependency {} has invalid version", dependency.name)
+                })?;
+            if !requirement.matches(&version) {
+                return Err(anyhow!(
+                    "extension {} requires {} {}, active version is {}",
+                    metadata.name,
+                    dependency.name,
+                    dependency.version,
+                    version
+                ));
             }
-            prepared
-                .claims
-                .iter()
-                .any(|claim| {
-                    generation
-                        .claims
-                        .iter()
-                        .any(|other| claim.starts_with(other) || other.starts_with(claim))
+        }
+        Ok(())
+    }
+
+    fn dependency_is_active(&self, dependency: &ExtensionDependency) -> anyhow::Result<bool> {
+        let requirement = dependency.validate()?;
+        let active = self.active.read().unwrap();
+        let Some(generation) = active.get(&dependency.name) else {
+            return Ok(false);
+        };
+        let version = semver::Version::parse(&generation.metadata.version)?;
+        Ok(requirement.matches(&version))
+    }
+
+    fn conflicts(&self, prepared: &[PreparedGeneration]) -> Option<String> {
+        let active = self.active.read().unwrap();
+        for (index, candidate) in prepared.iter().enumerate() {
+            if let Some(conflict) = active.values().find_map(|generation| {
+                if generation.metadata.name == candidate.metadata.name {
+                    return None;
+                }
+                candidate
+                    .claims
+                    .iter()
+                    .any(|claim| {
+                        generation
+                            .claims
+                            .iter()
+                            .any(|other| claim.starts_with(other) || other.starts_with(claim))
+                    })
+                    .then(|| generation.metadata.name.clone())
+            }) {
+                return Some(conflict);
+            }
+            if prepared[index + 1..].iter().any(|other| {
+                candidate.claims.iter().any(|claim| {
+                    other.claims.iter().any(|other_claim| {
+                        claim.starts_with(other_claim) || other_claim.starts_with(claim)
+                    })
                 })
-                .then(|| generation.metadata.name.clone())
-        })
+            }) {
+                return Some(candidate.metadata.name.clone());
+            }
+        }
+        None
     }
 
     /// Atomically publish a prepared generation, then retire the replaced
     /// generation after no pinned calls remain.
     pub async fn activate(&self, prepared: PreparedGeneration) -> anyhow::Result<GenerationHandle> {
+        let mut handles = self.activate_batch(vec![prepared]).await?;
+        Ok(handles.remove(0))
+    }
+
+    async fn activate_batch(
+        &self,
+        prepared: Vec<PreparedGeneration>,
+    ) -> anyhow::Result<Vec<GenerationHandle>> {
         if let Some(conflict) = self.conflicts(&prepared) {
             return Err(anyhow!(
                 "resource claims conflict with active component {conflict}"
             ));
         }
-        let generation = Arc::new(GenerationInner {
-            id: prepared.id,
-            engine: self.engine.clone(),
-            metadata: prepared.metadata,
-            claims: prepared.claims,
-            extension: prepared.extension,
-            host: prepared.host,
-            limits: self.limits,
-            state: AtomicU8::new(ACTIVE),
-            in_flight: AtomicUsize::new(0),
-            drained: Notify::new(),
-            cleanup: Mutex::new(Vec::new()),
-        });
-        let old = {
+        let generations: Vec<_> = prepared
+            .into_iter()
+            .map(|prepared| {
+                Arc::new(GenerationInner {
+                    id: prepared.id,
+                    engine: self.engine.clone(),
+                    metadata: prepared.metadata,
+                    claims: prepared.claims,
+                    extension: prepared.extension,
+                    host: prepared.host,
+                    limits: self.limits,
+                    state: AtomicU8::new(ACTIVE),
+                    in_flight: AtomicUsize::new(0),
+                    drained: Notify::new(),
+                    cleanup: Mutex::new(Vec::new()),
+                })
+            })
+            .collect();
+        let olds = {
             let mut active = self.active.write().unwrap();
-            let old = active.remove(&generation.metadata.name);
-            if let Some(old) = &old {
-                old.begin_retirement();
+            let mut olds = Vec::new();
+            for generation in &generations {
+                if let Some(old) = active.remove(&generation.metadata.name) {
+                    old.begin_retirement();
+                    olds.push(old);
+                }
+                active.insert(generation.metadata.name.clone(), Arc::clone(generation));
             }
-            active.insert(generation.metadata.name.clone(), Arc::clone(&generation));
-            old
+            olds
         };
-        if let Some(old) = old {
+        for old in olds {
             old.retire().await;
         }
-        Ok(GenerationHandle { inner: generation })
+        Ok(generations
+            .into_iter()
+            .map(|generation| GenerationHandle { inner: generation })
+            .collect())
     }
 
     pub fn get(&self, name: &str) -> Option<GenerationHandle> {
@@ -538,8 +806,9 @@ mod tests {
         )"#;
         let metadata = ExtensionMetadata {
             name: "demo".into(),
-            version: "1".into(),
+            version: "1.0.0".into(),
             claims: vec!["demo:///".into()],
+            dependencies: Vec::new(),
         };
         let prepared = runtime.prepare(wat.as_bytes(), metadata).unwrap();
         let handle = runtime.activate(prepared).await.unwrap();
@@ -567,6 +836,126 @@ mod tests {
         assert_eq!(
             error.code,
             artist_kernel::ResourceErrorCode::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_manager_replaces_and_retires_live_generations() {
+        let kernel = Arc::new(Kernel::empty());
+        let runtime = Arc::new(Runtime::new(
+            build_engine().unwrap(),
+            Arc::new(KernelHostEnvironment::new(kernel)),
+        ));
+        let manager = ExtensionManager::new(runtime);
+        let wat = r#"(component
+            (core module $m (func (export "f")))
+            (export "artist:nouns/namespace@1.0.0" (core module $m))
+        )"#;
+        let metadata = || ExtensionMetadata {
+            name: "read".into(),
+            version: "1.0.0".into(),
+            claims: Vec::new(),
+            dependencies: Vec::new(),
+        };
+
+        let first = manager
+            .activate_bytes(wat.as_bytes(), metadata())
+            .await
+            .unwrap();
+        let second = manager
+            .replace_bytes(wat.as_bytes(), metadata())
+            .await
+            .unwrap();
+        assert!(second.id() > first.id());
+        assert_eq!(manager.active_names(), vec!["read"]);
+        assert!(manager.retire("read").await);
+        assert!(manager.active_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dependencies_must_be_active_and_version_compatible() {
+        let kernel = Arc::new(Kernel::empty());
+        let runtime = Arc::new(Runtime::new(
+            build_engine().unwrap(),
+            Arc::new(KernelHostEnvironment::new(kernel)),
+        ));
+        let manager = ExtensionManager::new(Arc::clone(&runtime));
+        let wat = r#"(component
+            (core module $m (func (export "f")))
+            (export "artist:nouns/namespace@1.0.0" (core module $m))
+        )"#;
+
+        let child = ExtensionMetadata {
+            name: "child".into(),
+            version: "1.0.0".into(),
+            claims: Vec::new(),
+            dependencies: vec![ExtensionDependency {
+                name: "base".into(),
+                version: ">=1.0.0, <2.0.0".into(),
+            }],
+        };
+        assert!(
+            manager
+                .activate_bytes(wat.as_bytes(), child.clone())
+                .await
+                .is_err()
+        );
+
+        manager
+            .activate_bytes(
+                wat.as_bytes(),
+                ExtensionMetadata {
+                    name: "base".into(),
+                    version: "1.4.0".into(),
+                    claims: Vec::new(),
+                    dependencies: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(manager.activate_bytes(wat.as_bytes(), child).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn bundles_activate_dependencies_before_dependents() {
+        let kernel = Arc::new(Kernel::empty());
+        let runtime = Arc::new(Runtime::new(
+            build_engine().unwrap(),
+            Arc::new(KernelHostEnvironment::new(kernel)),
+        ));
+        let manager = ExtensionManager::new(runtime);
+        let wat = r#"(component
+            (core module $m (func (export "f")))
+            (export "artist:nouns/namespace@1.0.0" (core module $m))
+        )"#;
+        let base = ExtensionMetadata {
+            name: "base".into(),
+            version: "1.0.0".into(),
+            claims: Vec::new(),
+            dependencies: Vec::new(),
+        };
+        let child = ExtensionMetadata {
+            name: "child".into(),
+            version: "1.0.0".into(),
+            claims: Vec::new(),
+            dependencies: vec![ExtensionDependency {
+                name: "base".into(),
+                version: "^1".into(),
+            }],
+        };
+        let handles = manager
+            .activate_bundle(vec![
+                (wat.as_bytes().to_vec(), child),
+                (wat.as_bytes().to_vec(), base),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(
+            handles
+                .iter()
+                .map(GenerationHandle::name)
+                .collect::<Vec<_>>(),
+            ["base", "child"]
         );
     }
 }

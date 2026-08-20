@@ -7,6 +7,8 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
+artist-kernel = { path = "../artist-kernel" }
+async-trait = "0.1"
 base64 = "0.23"
 fs2 = "0.4"
 rig-core = "0.41.0"

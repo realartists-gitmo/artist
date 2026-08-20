@@ -14,8 +14,8 @@ package artist:verbs@1.0.0;
 ///     things" arguments.
 ///   * "Boring" shapes are closer to model training. No clever encodings.
 ///
-/// No specific verbs are defined yet. Specific verbs will be added as
-/// interfaces in this package or in tool extensions' own packages.
+/// The base package currently defines `read`, `write`, `move`, `edit`, `find`, and `grep`. Further verbs may be
+/// added here or in tool extensions' own packages.
 interface types {
     enum error {
         invalid-argument,
@@ -28,8 +28,198 @@ interface types {
     }
 }
 
+interface read {
+    use types.{error};
+
+    record request {
+        uri: string,
+        range: option<string>,
+    }
+
+    record line {
+        anchor: string,
+        content: string,
+    }
+
+    record response {
+        uri: string,
+        position: option<string>,
+        range: string,
+        lines: list<line>,
+    }
+
+    read: func(requests: list<request>) -> list<result<response, error>>;
+}
+
+interface write {
+    use types.{error};
+
+    record request {
+        uri: string,
+        content: string,
+    }
+
+    write: func(requests: list<request>) -> list<result<_, error>>;
+}
+
+interface move {
+    use types.{error};
+
+    record request {
+        source: string,
+        destination: option<string>,
+    }
+
+    execute: func(requests: list<request>) -> list<result<_, error>>;
+}
+
+interface edit {
+    use types.{error};
+
+    record change {
+        anchor: string,
+        replacement: string,
+    }
+
+    record request {
+        uri: string,
+        changes: list<change>,
+    }
+
+    edit: func(requests: list<request>) -> list<result<_, error>>;
+}
+
+interface find {
+    use types.{error};
+
+    enum result-kind {
+        file,
+        directory,
+    }
+
+    record request {
+        uri: string,
+        query: string,
+        limit: option<u32>,
+        cursor: option<string>,
+    }
+
+    record match {
+        uri: string,
+        kind: result-kind,
+    }
+
+    record response {
+        results: list<match>,
+        next-cursor: option<string>,
+    }
+
+    execute: func(requests: list<request>) -> list<result<response, error>>;
+}
+
+interface grep {
+    use types.{error};
+
+    record request {
+        uri: string,
+        query: string,
+        limit: option<u32>,
+        cursor: option<string>,
+    }
+
+    record match {
+        uri: string,
+        content: string,
+    }
+
+    record response {
+        matches: list<match>,
+        next-cursor: option<string>,
+    }
+
+    execute: func(requests: list<request>) -> list<result<response, error>>;
+}
+
+interface run {
+    use types.{error};
+
+    record request {
+        executable: option<string>,
+        target: option<string>,
+        arguments: list<string>,
+        working-directory: option<string>,
+    }
+
+    record response {
+        process: string,
+        stdin: string,
+        stdout: string,
+        stderr: string,
+        status: string,
+    }
+
+    execute: func(requests: list<request>) -> list<result<response, error>>;
+}
+
+interface poll {
+    use types.{error};
+
+    record request {
+        target: string,
+        match: option<string>,
+        timeout-ms: u64,
+    }
+
+    record response {
+        target: string,
+        event: string,
+        matched: bool,
+        content: option<string>,
+    }
+
+    execute: func(requests: list<request>) -> list<result<response, error>>;
+}
+
+interface signal {
+    use types.{error};
+
+    record request {
+        process: string,
+        signal: string,
+    }
+
+    signal: func(requests: list<request>) -> list<result<_, error>>;
+}
+
+/// Generic dynamic invocation for extensions that want to consume another
+/// registered verb. The payload is opaque to the kernel and is interpreted by
+/// the caller and target verb according to their shared contract.
+interface registry {
+    enum error {
+        invalid-argument,
+        not-found,
+        unsupported,
+        permission-denied,
+        conflict,
+        aborted,
+        internal,
+    }
+
+    invoke: func(name: string, request: list<u8>) -> result<list<u8>, error>;
+}
+
 world verbs-extension {
     import types;
+    import registry;
+    export read;
+    export write;
+    export move;
+    export edit;
+    export find;
+    export grep;
+    export run;
+    export poll;
+    export signal;
     /// Each verb component receives capability-scoped WASI filesystem
     /// preopens. The component uses ordinary open/read/write/rename/unlink
     /// operations; URI-to-resource routing remains host policy.

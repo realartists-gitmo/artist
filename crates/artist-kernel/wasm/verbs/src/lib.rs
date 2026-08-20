@@ -1,14 +1,20 @@
 //! artist-wasm-verbs — the verb contract host side.
 //!
 //! A component exporting verb interfaces is a tool. Verbs are typed operations
-//! over resources, batch-native at the ABI, scalar at the model surface. No
-//! specific verbs are defined yet; this crate pins the family shape and the
-//! dispatch path.
+//! over resources, batch-native at the ABI, scalar at the model surface. The
+//! base package currently provides `read`, `write`, `move`, `edit`, `find`, and `grep`.
 
 pub mod bindings;
+pub mod edit;
+pub mod find;
+pub mod grep;
 pub mod host;
+pub mod move_;
+pub mod process;
+pub mod read;
+pub mod write;
 
-pub use host::{VerbDispatcher, VerbError, VerbTool};
+pub use host::{ToonVerbHandler, VerbDispatcher, VerbError, VerbTool};
 
 /// Link the capability-scoped WASI filesystem imports required by verb
 /// components. The embedder supplies the store projection and preopens.

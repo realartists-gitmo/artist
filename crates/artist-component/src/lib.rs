@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use artist_kernel::ResourceUri;
-use artist_wasm::{Extension, ExtensionClass, ExtensionMetadata, PreparedGeneration, Runtime};
+use artist_wasm::{
+    Extension, ExtensionClass, ExtensionDependency, ExtensionMetadata, PreparedGeneration, Runtime,
+};
 use sha2::{Digest, Sha256};
 use wasmtime::Engine;
 
@@ -155,6 +157,7 @@ pub struct ArtifactMetadata {
     pub name: String,
     pub version: String,
     pub claims: Vec<String>,
+    pub dependencies: Vec<ExtensionDependency>,
 }
 
 impl ArtifactMetadata {
@@ -170,6 +173,13 @@ impl ArtifactMetadata {
                 .parse::<ResourceUri>()
                 .with_context(|| format!("invalid component claim {claim}"))?;
         }
+        ExtensionMetadata {
+            name: self.name.clone(),
+            version: self.version.clone(),
+            claims: self.claims.clone(),
+            dependencies: self.dependencies.clone(),
+        }
+        .validate()?;
         Ok(())
     }
 
@@ -178,6 +188,7 @@ impl ArtifactMetadata {
             name: self.name.clone(),
             version: self.version.clone(),
             claims: self.claims.clone(),
+            dependencies: self.dependencies.clone(),
         }
     }
 }
@@ -270,8 +281,9 @@ mod tests {
                 &runtime,
                 ArtifactMetadata {
                     name: "demo".into(),
-                    version: "1".into(),
+                    version: "1.0.0".into(),
                     claims: vec!["demo:///".into()],
+                    dependencies: Vec::new(),
                 },
             )
             .unwrap();
@@ -293,8 +305,9 @@ mod tests {
                     &runtime,
                     ArtifactMetadata {
                         name: "demo".into(),
-                        version: "1".into(),
-                        claims: vec!["not a uri".into()]
+                        version: "1.0.0".into(),
+                        claims: vec!["files:///../bad".into()],
+                        dependencies: Vec::new(),
                     }
                 )
                 .is_err()
@@ -310,8 +323,9 @@ mod tests {
             artifact_path: "/workspace/out/component.wasm".into(),
             metadata: ArtifactMetadata {
                 name: "demo".into(),
-                version: "1".into(),
+                version: "1.0.0".into(),
                 claims: vec!["demo:///".into()],
+                dependencies: Vec::new(),
             },
         };
         assert!(request.validate().is_ok());

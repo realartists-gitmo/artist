@@ -16,12 +16,14 @@ pub mod classify;
 pub mod engine;
 pub mod loader;
 pub mod runtime;
+pub mod verb_registry;
 
 pub use classify::{ExtensionClass, names};
 pub use engine::build_engine;
 pub use loader::{Extension, Extension as LoadedExtension};
 pub use runtime::{
-    ComponentRuntime, ExtensionMetadata, GenerationHandle, GenerationLease, HostEnvironment,
-    KernelHostEnvironment, PreparedGeneration, ResourceCapabilities, Runtime, RuntimeStore,
-    ScopedHostEnvironment,
+    ComponentRuntime, ExtensionDependency, ExtensionManager, ExtensionMetadata, GenerationHandle,
+    GenerationLease, HostEnvironment, KernelHostEnvironment, PreparedGeneration,
+    ResourceCapabilities, Runtime, RuntimeStore, ScopedHostEnvironment,
 };
+pub use verb_registry::{VerbRegistryView, add_to_linker as add_verb_registry_to_linker};
