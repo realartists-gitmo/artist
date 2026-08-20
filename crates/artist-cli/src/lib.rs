@@ -1,10 +1,24 @@
-//! WIPED STUB — artist-cli.
+//! Shared command-line process wiring for Artist.
 //!
-//! The previous CLI was wiped on 2026-08-17 because the refactor ignored
-//! substantial prior art and needs to be rebuilt from the ground up. Nothing in
-//! `src/` survives; this crate is an empty skeleton.
-//!
-//! `Cargo.toml` is intentionally left intact (deps + workspace wiring) so the
-//! rebuild has its original dependency picture available.
-//!
-//! TODO(rebuild): design the new CLI surface against prior art before writing code.
+//! Domain behavior remains in `artist-agent`; this crate owns executable
+//! defaults and transport setup so binaries and embedding callers use the
+//! same daemon lifecycle.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use artist_agent::daemon::{Daemon, DaemonRpcHandler};
+use artist_agent::rpc::serve_ndjson;
+
+pub fn default_state_root() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from(".artist"))
+        .join("artist")
+}
+
+pub async fn run_daemon(state_root: PathBuf) -> anyhow::Result<()> {
+    let daemon = Arc::new(Daemon::open(state_root)?);
+    let handler = DaemonRpcHandler::new(daemon);
+    serve_ndjson(tokio::io::stdin(), tokio::io::stdout(), &handler).await?;
+    Ok(())
+}

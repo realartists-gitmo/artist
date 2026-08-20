@@ -1,0 +1,38 @@
+package artist:verbs@1.0.0;
+
+/// The verb contract. A component exporting one or more verb interfaces is a
+/// tool: typed operations over resources, file-shaped in, file-shaped out.
+///
+/// Family shape (locked in `kernel-wasm-scaffold.md`):
+///
+///   * Every verb exports ONE function taking `list<request>` and returning
+///     `list<result<response, error>>` — batch in, batch out.
+///   * The model surface stays scalar: the harness batches scalar tool calls
+///     into one component call. Batching is never the model's job.
+///   * Flat scalar arguments over nested structures.
+///   * Homogeneous operations over unions / optional modes / "do one of several
+///     things" arguments.
+///   * "Boring" shapes are closer to model training. No clever encodings.
+///
+/// No specific verbs are defined yet. Specific verbs will be added as
+/// interfaces in this package or in tool extensions' own packages.
+interface types {
+    enum error {
+        invalid-argument,
+        not-found,
+        unsupported,
+        permission-denied,
+        conflict,
+        aborted,
+        internal,
+    }
+}
+
+world verbs-extension {
+    import types;
+    /// Each verb component receives capability-scoped WASI filesystem
+    /// preopens. The component uses ordinary open/read/write/rename/unlink
+    /// operations; URI-to-resource routing remains host policy.
+    import wasi:filesystem/types@0.3.0;
+    import wasi:filesystem/preopens@0.3.0;
+}

@@ -1,0 +1,29 @@
+[package]
+name = "artist-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+artist-agent = { path = "../crates/artist-agent" }
+artist-kernel = { path = "../crates/artist-kernel" }
+
+[[bin]]
+name = "rpc_frame"
+path = "fuzz_targets/rpc_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resource_uri"
+path = "fuzz_targets/resource_uri.rs"
+test = false
+doc = false
+bench = false

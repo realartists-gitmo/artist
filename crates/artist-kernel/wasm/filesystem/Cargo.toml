@@ -1,0 +1,15 @@
+[package]
+name = "artist-wasm-filesystem"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+artist-kernel = { path = "../.." }
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync"] }
+wasmtime = { version = "47.0.3", default-features = false, features = ["std", "runtime", "component-model", "component-model-async", "async", "cranelift", "wat", "anyhow"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }

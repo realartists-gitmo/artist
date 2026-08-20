@@ -1,0 +1,12 @@
+package artist:kernelfs@0.1.0;
+
+/// Host world for the kernel's `wasi:filesystem` implementation over `Vfs`.
+///
+/// Only the filesystem interfaces are imported here. `filesystem.wit`
+/// depends on `wasi:clocks/system-clock` for its `instant` type, which is
+/// resolved from the deps directory but never imported into this world, so
+/// no clocks host implementation is required.
+world kernel-filesystem {
+    import wasi:filesystem/types@0.3.0;
+    import wasi:filesystem/preopens@0.3.0;
+}

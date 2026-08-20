@@ -1,0 +1,53 @@
+package artist:nouns@1.0.0;
+
+/// The noun contract. A component exporting this interface is an addressable,
+/// filesystem-shaped resource: the kernel mounts it as a namespace root and
+/// maps FUSE inos to paths internally, so wasm never sees FUSE internals.
+interface namespace {
+    /// The kind of a node.
+    enum kind {
+        directory,
+        file,
+    }
+
+    /// Attributes of a node. Flat, scalar, boring.
+    record attrs {
+        kind: kind,
+        size: u64,
+        /// Modification time as seconds since the unix epoch.
+        mtime-secs: u64,
+        /// Modification time sub-second nanos.
+        mtime-nsecs: u32,
+    }
+
+    /// A directory entry.
+    record entry {
+        name: string,
+        kind: kind,
+        size: u64,
+    }
+
+    enum error {
+        not-found,
+        not-dir,
+        is-dir,
+        io,
+    }
+
+    /// A canonical path, relative to the namespace root. Never contains "." or
+    /// ".." or empty components; the kernel guarantees this before calling.
+    type path = list<string>;
+
+    /// Resolve attributes for the node at `path`.
+    getattr: func(path: path) -> result<attrs, error>;
+
+    /// List the children of the directory at `path`.
+    readdir: func(path: path) -> result<list<entry>, error>;
+
+    /// Read `size` bytes at `offset` from the file at `path`.
+    read: func(path: path, offset: u64, size: u32) -> result<list<u8>, error>;
+}
+
+world nouns-extension {
+    export namespace;
+}
