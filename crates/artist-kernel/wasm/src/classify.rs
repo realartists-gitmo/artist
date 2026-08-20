@@ -18,6 +18,8 @@ pub mod names {
     pub const NOUN: &str = "artist:nouns/provider";
     /// An event service exports the subscriber interface.
     pub const EVENT: &str = "artist:events/subscriber";
+    /// A composition service exports the model-context composition interface.
+    pub const COMPOSITION: &str = "artist:composition/extension";
     /// All verb interfaces live under this prefix (specific verbs are defined
     /// in tool extensions' own packages).
     pub const VERB_PREFIX: &str = "artist:verbs/";
@@ -29,17 +31,19 @@ pub struct ExtensionClass {
     pub noun: bool,
     pub verb: bool,
     pub event: bool,
+    pub composition: bool,
 }
 
 impl ExtensionClass {
     pub fn is_empty(&self) -> bool {
-        !self.noun && !self.verb && !self.event
+        !self.noun && !self.verb && !self.event && !self.composition
     }
 
     pub fn contains(&self, other: &ExtensionClass) -> bool {
         (other.noun && self.noun || !other.noun)
             && (other.verb && self.verb || !other.verb)
             && (other.event && self.event || !other.event)
+            && (other.composition && self.composition || !other.composition)
     }
 }
 
@@ -54,6 +58,9 @@ impl std::fmt::Display for ExtensionClass {
         }
         if self.event {
             parts.push("event");
+        }
+        if self.composition {
+            parts.push("composition");
         }
         if parts.is_empty() {
             write!(f, "unknown")
@@ -82,6 +89,11 @@ fn classify_export(name: &str) -> Option<ExtensionClass> {
             event: true,
             ..Default::default()
         })
+    } else if name.starts_with(names::COMPOSITION) {
+        Some(ExtensionClass {
+            composition: true,
+            ..Default::default()
+        })
     } else if name.starts_with(names::VERB_PREFIX) {
         Some(ExtensionClass {
             verb: true,
@@ -101,6 +113,7 @@ pub fn classify(engine: &Engine, component: &Component) -> ExtensionClass {
             class.noun |= c.noun;
             class.verb |= c.verb;
             class.event |= c.event;
+            class.composition |= c.composition;
         }
     }
     class
@@ -123,6 +136,13 @@ mod tests {
             classify_export("artist:events/subscriber@1.0.0"),
             Some(ExtensionClass {
                 event: true,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            classify_export("artist:composition/extension@1.0.0"),
+            Some(ExtensionClass {
+                composition: true,
                 ..Default::default()
             })
         );

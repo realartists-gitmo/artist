@@ -1,11 +1,35 @@
 //! Reusable session projection contracts.
 
-use llm_provider::Message;
+use artist_session::Snapshot;
+use llm_provider::{Message, Role};
 
 use crate::AgentEvent;
 
 pub trait ContextProjector: Send + Sync {
     fn project(&self, events: &[AgentEvent]) -> Vec<Message>;
+}
+
+/// Projects provider-neutral composition state into ordinary model messages.
+/// Provenance, revisions, and source URIs are intentionally omitted.
+pub trait SnapshotProjector: Send + Sync {
+    fn project_snapshot(&self, snapshot: &Snapshot) -> Vec<Message>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SlotSnapshotProjector;
+
+impl SnapshotProjector for SlotSnapshotProjector {
+    fn project_snapshot(&self, snapshot: &Snapshot) -> Vec<Message> {
+        snapshot
+            .contributions
+            .iter()
+            .map(|contribution| Message::text(Role::System, contribution.content.clone()))
+            .collect()
+    }
+}
+
+pub fn project_snapshot(snapshot: &Snapshot) -> Vec<Message> {
+    SlotSnapshotProjector.project_snapshot(snapshot)
 }
 
 pub trait Compactor: Send + Sync {

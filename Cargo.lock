@@ -271,7 +271,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "artist-kernel",
+ "artist-session",
  "artist-wasm",
+ "artist-wasm-composition",
  "artist-wasm-nouns",
  "artist-wasm-url",
  "artist-wasm-verbs",
@@ -299,6 +301,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "artist-default-prompt"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.60.0",
+]
+
+[[package]]
 name = "artist-default-tools"
 version = "0.1.0"
 dependencies = [
@@ -318,6 +327,13 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "artist-root"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.60.0",
 ]
 
 [[package]]
@@ -370,6 +386,13 @@ dependencies = [
  "tokio",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "artist-wasm-composition"
+version = "0.1.0"
+dependencies = [
+ "wasmtime",
 ]
 
 [[package]]

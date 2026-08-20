@@ -4,46 +4,51 @@
 //! growing one bespoke Rust command implementation per verb. The typed verb
 //! implementations remain the source of operation semantics.
 
+use anyhow::{Context, anyhow};
+use artist_component::{
+    ComponentHost, UrlCompositionSource, install_profile_view, install_prompt_view,
+};
+use artist_component::{ComponentToolRegistry, ToolError};
+use artist_kernel::Kernel;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use anyhow::{Context, anyhow};
-use artist_component::{ExtensionCatalog, UrlComposition, UrlCompositionSource};
-use artist_kernel::Kernel;
-use artist_component::{ComponentToolRegistry, ToolError};
-use artist_wasm::{ExtensionManager, KernelHostEnvironment, Runtime, build_engine};
-use serde_json::Value;
 
 pub struct ToolRunner {
+    host: ComponentHost,
     tools: ComponentToolRegistry,
+}
+
+impl ToolRunner {
+    pub fn component_host(&self) -> &ComponentHost {
+        &self.host
+    }
 }
 
 impl ToolRunner {
     pub async fn new(root: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let root = root.into();
         let kernel = Arc::new(Kernel::with_files_root(root.clone()));
-        let tools = ComponentToolRegistry::new();
-        let engine = build_engine()?;
-        let catalog = ExtensionCatalog::default();
-        catalog.install_into(&kernel);
-        let runtime = Arc::new(Runtime::new(
-            engine.clone(),
-            Arc::new(KernelHostEnvironment::new(kernel)),
-        ));
-        let manager = ExtensionManager::new(runtime);
         let global = extension_root()?;
+        install_prompt_view(
+            &kernel,
+            global.join(".artist/prompt"),
+            root.join(".artist/prompt"),
+        );
+        install_profile_view(
+            &kernel,
+            global.join(".artist/profile"),
+            root.join(".artist/profile"),
+        );
         let local = root.join(".artist/url");
-        let composition = UrlComposition::new(
-            UrlCompositionSource::new(global, local),
-            engine,
-            manager,
-            catalog,
-        )
-        .with_tools(tools.clone());
-        composition.reload().await.context("load URL composition")?;
+        let host = ComponentHost::start(kernel, UrlCompositionSource::new(global, local))
+            .await
+            .context("start component host")?;
+        let tools = host.tools();
         if tools.names().is_empty() {
             return Err(anyhow!("URL composition registered no model-facing tools"));
         }
-        Ok(Self { tools })
+        Ok(Self { host, tools })
     }
 
     /// Decode one scalar request or a list of requests and return the same
@@ -114,6 +119,7 @@ fn format_invocation_error(error: ToolError) -> &'static str {
         ToolError::PermissionDenied(_) => "permission_denied",
         ToolError::Conflict(_) => "conflict",
         ToolError::Aborted(_) => "aborted",
+        ToolError::Unavailable(_) => "unavailable",
         ToolError::Internal(_) => "internal",
     }
 }

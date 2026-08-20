@@ -184,6 +184,19 @@ pub type ModelEventStream<'a> =
 pub trait ModelProvider: Send + Sync {
     fn provider_name(&self) -> &str;
     fn capabilities(&self, model: &str) -> ModelCapabilities;
+
+    /// Register the session's formal/static tool set when the provider has a
+    /// persistent registration API (for example a Rig-backed adapter). APIs
+    /// whose tool declarations are request-scoped may leave the default no-op;
+    /// the same set is still carried by [`ModelRequest::tools`].
+    fn register_formal_tools(
+        &self,
+        _model: &str,
+        _tools: &[ToolDefinition],
+    ) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
     fn stream<'a>(&'a self, request: ModelRequest) -> ModelEventStream<'a>;
 }
 

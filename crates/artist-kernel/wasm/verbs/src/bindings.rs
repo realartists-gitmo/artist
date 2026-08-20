@@ -26,5 +26,5 @@ pub use generated::exports::artist::verbs::find as find_bindings;
 pub use generated::exports::artist::verbs::move_ as move_bindings;
 pub use generated::exports::artist::verbs::read;
 pub use generated::exports::artist::verbs::write as write_bindings;
-pub use tool_generated::exports::artist::verbs::tool as tool;
 pub use tool_generated::artist::verbs::resource_api as resource;
+pub use tool_generated::exports::artist::verbs::tool;

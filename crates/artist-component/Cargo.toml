@@ -11,6 +11,8 @@ artist-wasm = { path = "../artist-kernel/wasm" }
 artist-wasm-nouns = { path = "../artist-kernel/wasm/nouns" }
 artist-wasm-url = { path = "../artist-kernel/wasm/url" }
 artist-wasm-verbs = { path = "../artist-kernel/wasm/verbs" }
+artist-wasm-composition = { path = "../artist-kernel/wasm/composition" }
+artist-session = { path = "../artist-session" }
 anyhow = "1"
 async-trait = "0.1"
 sha2 = "0.10"

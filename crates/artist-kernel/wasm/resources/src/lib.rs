@@ -10,8 +10,8 @@ use wasmtime::component::Linker;
 
 pub mod bindings;
 
-pub use bindings::exports::artist::resources::provider::Guest as ResourceGuest;
 pub use bindings::artist::resources::types;
+pub use bindings::exports::artist::resources::provider::Guest as ResourceGuest;
 
 #[async_trait]
 pub trait ResourceGuestAdapter: Send + Sync {
@@ -66,45 +66,57 @@ impl WasmResource {
 impl ResourceGuestAdapter for WasmResource {
     async fn matches(&self, uri: &str) -> bool {
         let uri = uri.to_owned();
-        self.call(move |guest, store| Box::pin(async move { guest.call_matches(store, &uri).await }))
-            .await
-            .unwrap_or(false)
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_matches(store, &uri).await })
+        })
+        .await
+        .unwrap_or(false)
     }
 
     async fn attrs(&self, uri: &str) -> Result<types::Attrs, types::Error> {
         let uri = uri.to_owned();
-        self.call(move |guest, store| Box::pin(async move { guest.call_get_attrs(store, &uri).await }))
-            .await
-            .map_err(|_| types::Error::Io)?
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_get_attrs(store, &uri).await })
+        })
+        .await
+        .map_err(|_| types::Error::Io)?
     }
 
     async fn readdir(&self, uri: &str) -> Result<Vec<types::Entry>, types::Error> {
         let uri = uri.to_owned();
-        self.call(move |guest, store| Box::pin(async move { guest.call_readdir(store, &uri).await }))
-            .await
-            .map_err(|_| types::Error::Io)?
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_readdir(store, &uri).await })
+        })
+        .await
+        .map_err(|_| types::Error::Io)?
     }
 
     async fn read(&self, uri: &str, offset: u64, size: u32) -> Result<Vec<u8>, types::Error> {
         let uri = uri.to_owned();
-        self.call(move |guest, store| Box::pin(async move { guest.call_read(store, &uri, offset, size).await }))
-            .await
-            .map_err(|_| types::Error::Io)?
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_read(store, &uri, offset, size).await })
+        })
+        .await
+        .map_err(|_| types::Error::Io)?
     }
 
     async fn write(&self, uri: &str, offset: u64, data: Vec<u8>) -> Result<u32, types::Error> {
         let uri = uri.to_owned();
-        self.call(move |guest, store| Box::pin(async move { guest.call_write(store, &uri, offset, &data).await }))
-            .await
-            .map_err(|_| types::Error::Io)?
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_write(store, &uri, offset, &data).await })
+        })
+        .await
+        .map_err(|_| types::Error::Io)?
     }
 
     async fn move_resource(&self, source: &str, destination: &str) -> Result<(), types::Error> {
         let source = source.to_owned();
         let destination = destination.to_owned();
-        self.call(move |guest, store| Box::pin(async move { guest.call_move_resource(store, &source, &destination).await }))
-            .await
-            .map_err(|_| types::Error::Io)?
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_move_resource(store, &source, &destination).await })
+        })
+        .await
+        .map_err(|_| types::Error::Io)?
     }
 
     async fn delete(&self, uri: &str) -> Result<(), types::Error> {
@@ -125,7 +137,10 @@ pub struct RoutedResource {
 
 impl RoutedResource {
     pub fn new(name: impl Into<String>, guest: Arc<dyn ResourceGuestAdapter>) -> Self {
-        Self { name: name.into(), guest }
+        Self {
+            name: name.into(),
+            guest,
+        }
     }
 }
 
@@ -144,8 +159,8 @@ fn resource_error(uri: &ResourceUri, error: types::Error) -> ResourceError {
 }
 
 fn provider_attrs(attrs: types::Attrs) -> ProviderAttrs {
-    let mtime = std::time::UNIX_EPOCH
-        + std::time::Duration::new(attrs.mtime_secs, attrs.mtime_nsecs);
+    let mtime =
+        std::time::UNIX_EPOCH + std::time::Duration::new(attrs.mtime_secs, attrs.mtime_nsecs);
     ProviderAttrs {
         kind: match attrs.kind {
             types::Kind::Directory => NodeKind::Directory,
@@ -164,29 +179,87 @@ fn provider_attrs(attrs: types::Attrs) -> ProviderAttrs {
 
 #[async_trait]
 impl artist_kernel::ResourceProvider for RoutedResource {
-    fn provider_name(&self) -> &str { &self.name }
-    fn eligible(&self, _uri: &ResourceUri) -> bool { true }
-    async fn matches(&self, uri: &ResourceUri) -> bool { self.guest.matches(&uri.to_string()).await }
+    fn provider_name(&self) -> &str {
+        &self.name
+    }
+    fn eligible(&self, _uri: &ResourceUri) -> bool {
+        true
+    }
+    async fn matches(&self, uri: &ResourceUri) -> bool {
+        self.guest.matches(&uri.to_string()).await
+    }
     async fn attrs(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
-        self.guest.attrs(&uri.to_string()).await.map(provider_attrs).map_err(|error| resource_error(uri, error))
+        self.guest
+            .attrs(&uri.to_string())
+            .await
+            .map(provider_attrs)
+            .map_err(|error| resource_error(uri, error))
     }
     async fn readdir(&self, uri: &ResourceUri) -> Result<Vec<ProviderEntry>, ResourceError> {
-        self.guest.readdir(&uri.to_string()).await.map(|entries| entries.into_iter().map(|entry| ProviderEntry {
-            name: entry.name,
-            attrs: ProviderAttrs { kind: match entry.kind { types::Kind::Directory => NodeKind::Directory, types::Kind::File => NodeKind::File }, size: entry.size, perm: 0o444, nlink: 1, uid: 0, gid: 0, atime: std::time::SystemTime::UNIX_EPOCH, mtime: std::time::SystemTime::UNIX_EPOCH, ctime: std::time::SystemTime::UNIX_EPOCH },
-        }).collect()).map_err(|error| resource_error(uri, error))
+        self.guest
+            .readdir(&uri.to_string())
+            .await
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| ProviderEntry {
+                        name: entry.name,
+                        attrs: ProviderAttrs {
+                            kind: match entry.kind {
+                                types::Kind::Directory => NodeKind::Directory,
+                                types::Kind::File => NodeKind::File,
+                            },
+                            size: entry.size,
+                            perm: 0o444,
+                            nlink: 1,
+                            uid: 0,
+                            gid: 0,
+                            atime: std::time::SystemTime::UNIX_EPOCH,
+                            mtime: std::time::SystemTime::UNIX_EPOCH,
+                            ctime: std::time::SystemTime::UNIX_EPOCH,
+                        },
+                    })
+                    .collect()
+            })
+            .map_err(|error| resource_error(uri, error))
     }
-    async fn read(&self, uri: &ResourceUri, offset: u64, size: u32) -> Result<Vec<u8>, ResourceError> {
-        self.guest.read(&uri.to_string(), offset, size).await.map_err(|error| resource_error(uri, error))
+    async fn read(
+        &self,
+        uri: &ResourceUri,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>, ResourceError> {
+        self.guest
+            .read(&uri.to_string(), offset, size)
+            .await
+            .map_err(|error| resource_error(uri, error))
     }
-    async fn write(&self, uri: &ResourceUri, offset: u64, data: &[u8]) -> Result<u32, ResourceError> {
-        self.guest.write(&uri.to_string(), offset, data.to_vec()).await.map_err(|error| resource_error(uri, error))
+    async fn write(
+        &self,
+        uri: &ResourceUri,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<u32, ResourceError> {
+        self.guest
+            .write(&uri.to_string(), offset, data.to_vec())
+            .await
+            .map_err(|error| resource_error(uri, error))
     }
-    async fn move_resource(&self, source: &ResourceUri, destination: &ResourceUri) -> Result<(), ResourceError> {
-        self.guest.move_resource(&source.to_string(), &destination.to_string()).await.map_err(|error| resource_error(source, error))
+    async fn move_resource(
+        &self,
+        source: &ResourceUri,
+        destination: &ResourceUri,
+    ) -> Result<(), ResourceError> {
+        self.guest
+            .move_resource(&source.to_string(), &destination.to_string())
+            .await
+            .map_err(|error| resource_error(source, error))
     }
     async fn delete(&self, uri: &ResourceUri) -> Result<(), ResourceError> {
-        self.guest.delete(&uri.to_string()).await.map_err(|error| resource_error(uri, error))
+        self.guest
+            .delete(&uri.to_string())
+            .await
+            .map_err(|error| resource_error(uri, error))
     }
 }
 
@@ -195,13 +268,21 @@ pub struct KernelResourceHost {
 }
 
 impl KernelResourceHost {
-    pub fn new(kernel: Arc<Kernel>) -> Self { Self { kernel } }
+    pub fn new(kernel: Arc<Kernel>) -> Self {
+        Self { kernel }
+    }
 }
 
 fn convert_attrs(attrs: ProviderAttrs) -> types::Attrs {
-    let duration = attrs.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let duration = attrs
+        .mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     types::Attrs {
-        kind: match attrs.kind { NodeKind::Directory => types::Kind::Directory, NodeKind::File => types::Kind::File },
+        kind: match attrs.kind {
+            NodeKind::Directory => types::Kind::Directory,
+            NodeKind::File => types::Kind::File,
+        },
         size: attrs.size,
         mtime_secs: duration.as_secs(),
         mtime_nsecs: duration.subsec_nanos(),
@@ -211,7 +292,10 @@ fn convert_attrs(attrs: ProviderAttrs) -> types::Attrs {
 fn convert_entry(entry: ProviderEntry) -> types::Entry {
     types::Entry {
         name: entry.name,
-        kind: match entry.attrs.kind { NodeKind::Directory => types::Kind::Directory, NodeKind::File => types::Kind::File },
+        kind: match entry.attrs.kind {
+            NodeKind::Directory => types::Kind::Directory,
+            NodeKind::File => types::Kind::File,
+        },
         size: entry.attrs.size,
     }
 }
@@ -224,35 +308,59 @@ fn convert_error(error: ResourceError) -> types::Error {
         ResourceErrorCode::IsDir => types::Error::IsDir,
         ResourceErrorCode::PermissionDenied => types::Error::PermissionDenied,
         ResourceErrorCode::Conflict => types::Error::Conflict,
-        ResourceErrorCode::Io | ResourceErrorCode::Unavailable | ResourceErrorCode::Component
-        | ResourceErrorCode::Cancelled | ResourceErrorCode::Timeout => types::Error::Io,
+        ResourceErrorCode::Io
+        | ResourceErrorCode::Unavailable
+        | ResourceErrorCode::Component
+        | ResourceErrorCode::Cancelled
+        | ResourceErrorCode::Timeout => types::Error::Io,
         ResourceErrorCode::Unsupported => types::Error::Unsupported,
     }
 }
 
 #[async_trait]
 impl ResourceGuestAdapter for KernelResourceHost {
-    async fn matches(&self, uri: &str) -> bool { uri.parse::<ResourceUri>().is_ok() }
+    async fn matches(&self, uri: &str) -> bool {
+        uri.parse::<ResourceUri>().is_ok()
+    }
     async fn attrs(&self, uri: &str) -> Result<types::Attrs, types::Error> {
         let uri = uri.parse().map_err(|_| types::Error::InvalidAddress)?;
-        self.kernel.attrs_uri(&uri).await.map(convert_attrs).map_err(convert_error)
+        self.kernel
+            .attrs_uri(&uri)
+            .await
+            .map(convert_attrs)
+            .map_err(convert_error)
     }
     async fn readdir(&self, uri: &str) -> Result<Vec<types::Entry>, types::Error> {
         let uri = uri.parse().map_err(|_| types::Error::InvalidAddress)?;
-        self.kernel.readdir_uri(&uri).await.map(|entries| entries.into_iter().map(convert_entry).collect()).map_err(convert_error)
+        self.kernel
+            .readdir_uri(&uri)
+            .await
+            .map(|entries| entries.into_iter().map(convert_entry).collect())
+            .map_err(convert_error)
     }
     async fn read(&self, uri: &str, offset: u64, size: u32) -> Result<Vec<u8>, types::Error> {
         let uri = uri.parse().map_err(|_| types::Error::InvalidAddress)?;
-        self.kernel.read_uri(&uri, offset, size).await.map_err(convert_error)
+        self.kernel
+            .read_uri(&uri, offset, size)
+            .await
+            .map_err(convert_error)
     }
     async fn write(&self, uri: &str, offset: u64, data: Vec<u8>) -> Result<u32, types::Error> {
         let uri = uri.parse().map_err(|_| types::Error::InvalidAddress)?;
-        self.kernel.write_uri(&uri, offset, &data).await.map_err(convert_error)
+        self.kernel
+            .write_uri(&uri, offset, &data)
+            .await
+            .map_err(convert_error)
     }
     async fn move_resource(&self, source: &str, destination: &str) -> Result<(), types::Error> {
         let source = source.parse().map_err(|_| types::Error::InvalidAddress)?;
-        let destination = destination.parse().map_err(|_| types::Error::InvalidAddress)?;
-        self.kernel.move_uri(&source, &destination).await.map_err(convert_error)
+        let destination = destination
+            .parse()
+            .map_err(|_| types::Error::InvalidAddress)?;
+        self.kernel
+            .move_uri(&source, &destination)
+            .await
+            .map_err(convert_error)
     }
     async fn delete(&self, uri: &str) -> Result<(), types::Error> {
         let uri = uri.parse().map_err(|_| types::Error::InvalidAddress)?;

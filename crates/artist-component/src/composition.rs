@@ -11,16 +11,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use async_trait::async_trait;
-use artist_wasm::{ComponentLoader, ComponentRecord, ExtensionDependency, ExtensionManager, ExtensionMetadata, GenerationHandle, RegistrationRecord};
 use artist_wasm::master::types;
+use artist_wasm::{
+    ComponentLoader, ComponentRecord, ExtensionDependency, ExtensionManager, ExtensionMetadata,
+    GenerationHandle, RegistrationRecord,
+};
 use artist_wasm_url::{ClaimToken, UrlClaimRegistry};
 use artist_wasm_verbs::component::WasmTool;
+use async_trait::async_trait;
 use notify::{RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
-use crate::{ExtensionCatalog, ExtensionPackage};
 use crate::{ComponentToolRegistry, WasmToolComponent};
+use crate::{ExtensionCatalog, ExtensionPackage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UrlCompositionSource {
@@ -30,7 +33,10 @@ pub struct UrlCompositionSource {
 
 impl UrlCompositionSource {
     pub fn new(global: impl Into<PathBuf>, local: impl Into<PathBuf>) -> Self {
-        Self { global: global.into(), local: local.into() }
+        Self {
+            global: global.into(),
+            local: local.into(),
+        }
     }
 }
 
@@ -67,14 +73,31 @@ impl PackageComponentLoader {
         catalog: ExtensionCatalog,
         claims: UrlClaimRegistry,
     ) -> Self {
-        Self { engine, manager, catalog, claims, next_component: Mutex::new(1), packages: Mutex::new(BTreeMap::new()), active: Mutex::new(BTreeMap::new()), registrations: Mutex::new(BTreeMap::new()) }
+        Self {
+            engine,
+            manager,
+            catalog,
+            claims,
+            next_component: Mutex::new(1),
+            packages: Mutex::new(BTreeMap::new()),
+            active: Mutex::new(BTreeMap::new()),
+            registrations: Mutex::new(BTreeMap::new()),
+        }
     }
 
     fn descriptor(package: &ExtensionPackage) -> types::Descriptor {
         types::Descriptor {
             name: package.manifest().name.clone(),
             version: package.manifest().version.clone(),
-            dependencies: package.manifest().dependencies.iter().map(|dependency| types::Dependency { name: dependency.name.clone(), version: dependency.version.clone() }).collect(),
+            dependencies: package
+                .manifest()
+                .dependencies
+                .iter()
+                .map(|dependency| types::Dependency {
+                    name: dependency.name.clone(),
+                    version: dependency.version.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -86,8 +109,14 @@ impl ComponentLoader for PackageComponentLoader {
         let mut next = self.next_component.lock().unwrap();
         let id = *next;
         *next += 1;
-        self.packages.lock().unwrap().insert(id, package.root().to_path_buf());
-        Ok(ComponentRecord { id, descriptor: Self::descriptor(&package) })
+        self.packages
+            .lock()
+            .unwrap()
+            .insert(id, package.root().to_path_buf());
+        Ok(ComponentRecord {
+            id,
+            descriptor: Self::descriptor(&package),
+        })
     }
 
     async fn describe(&self, component: &ComponentRecord) -> anyhow::Result<types::Descriptor> {
@@ -95,15 +124,32 @@ impl ComponentLoader for PackageComponentLoader {
     }
 
     async fn activate(&self, component: &ComponentRecord) -> anyhow::Result<ComponentRecord> {
-        let root = self.packages.lock().unwrap().get(&component.id).cloned().ok_or_else(|| anyhow!("unknown component record {}", component.id))?;
+        let root = self
+            .packages
+            .lock()
+            .unwrap()
+            .get(&component.id)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown component record {}", component.id))?;
         let package = ExtensionPackage::open(&self.engine, root)?;
         let metadata = ExtensionMetadata {
             name: package.manifest().name.clone(),
             version: package.manifest().version.clone(),
             route_hints: package.manifest().route_hints.clone(),
-            dependencies: package.manifest().dependencies.iter().map(|dependency| ExtensionDependency { name: dependency.name.clone(), version: dependency.version.clone() }).collect(),
+            dependencies: package
+                .manifest()
+                .dependencies
+                .iter()
+                .map(|dependency| ExtensionDependency {
+                    name: dependency.name.clone(),
+                    version: dependency.version.clone(),
+                })
+                .collect(),
         };
-        let handle = self.manager.activate_bytes(package.artifact().bytes(), metadata).await?;
+        let handle = self
+            .manager
+            .activate_bytes(package.artifact().bytes(), metadata)
+            .await?;
         self.catalog.publish(&package);
         self.active.lock().unwrap().insert(component.id, handle);
         Ok(component.clone())
@@ -117,7 +163,11 @@ impl ComponentLoader for PackageComponentLoader {
         Ok(())
     }
 
-    async fn register(&self, _component: &ComponentRecord, uri: &str) -> anyhow::Result<RegistrationRecord> {
+    async fn register(
+        &self,
+        _component: &ComponentRecord,
+        uri: &str,
+    ) -> anyhow::Result<RegistrationRecord> {
         let token = self.claims.register(uri)?;
         let id = token.id();
         self.registrations.lock().unwrap().insert(id, token);
@@ -125,7 +175,12 @@ impl ComponentLoader for PackageComponentLoader {
     }
 
     async fn unregister(&self, registration: &RegistrationRecord) -> anyhow::Result<()> {
-        let token = self.registrations.lock().unwrap().remove(&registration.id).ok_or_else(|| anyhow!("unknown registration {}", registration.id))?;
+        let token = self
+            .registrations
+            .lock()
+            .unwrap()
+            .remove(&registration.id)
+            .ok_or_else(|| anyhow!("unknown registration {}", registration.id))?;
         self.claims.unregister(&token)
     }
 }
@@ -137,7 +192,15 @@ impl UrlComposition {
         manager: ExtensionManager,
         catalog: ExtensionCatalog,
     ) -> Self {
-        Self { source, engine, manager, catalog, active: Mutex::new(BTreeSet::new()), tools: None, active_tools: Mutex::new(BTreeSet::new()) }
+        Self {
+            source,
+            engine,
+            manager,
+            catalog,
+            active: Mutex::new(BTreeSet::new()),
+            tools: None,
+            active_tools: Mutex::new(BTreeSet::new()),
+        }
     }
 
     pub fn with_tools(mut self, tools: ComponentToolRegistry) -> Self {
@@ -145,7 +208,13 @@ impl UrlComposition {
         self
     }
 
-    pub fn source(&self) -> &UrlCompositionSource { &self.source }
+    pub fn source(&self) -> &UrlCompositionSource {
+        &self.source
+    }
+
+    pub fn tools(&self) -> Option<ComponentToolRegistry> {
+        self.tools.clone()
+    }
 
     /// Scan global then local entries. A local package with the same manifest
     /// name replaces the global package before any WASM is compiled.
@@ -153,8 +222,10 @@ impl UrlComposition {
         let mut packages = BTreeMap::new();
         for root in [&self.source.global, &self.source.local] {
             for package_root in package_roots(root)? {
-                let package = ExtensionPackage::open(&self.engine, &package_root)
-                    .with_context(|| format!("open composition package {}", package_root.display()))?;
+                let package =
+                    ExtensionPackage::open(&self.engine, &package_root).with_context(|| {
+                        format!("open composition package {}", package_root.display())
+                    })?;
                 packages.insert(package.manifest().name.clone(), package_root);
             }
         }
@@ -177,38 +248,75 @@ impl UrlComposition {
                 name: package.manifest().name.clone(),
                 version: package.manifest().version.clone(),
                 route_hints: package.manifest().route_hints.clone(),
-                dependencies: package.manifest().dependencies.iter().map(|dependency| ExtensionDependency {
-                    name: dependency.name.clone(),
-                    version: dependency.version.clone(),
-                }).collect(),
+                dependencies: package
+                    .manifest()
+                    .dependencies
+                    .iter()
+                    .map(|dependency| ExtensionDependency {
+                        name: dependency.name.clone(),
+                        version: dependency.version.clone(),
+                    })
+                    .collect(),
             };
             metadata.validate()?;
             bundle.push((package.artifact().bytes().to_vec(), metadata));
         }
 
+        let mut claimed_tools = BTreeSet::new();
+        for package in &packages {
+            for name in &package.manifest().route_hints {
+                if !claimed_tools.insert(name.clone()) {
+                    return Err(anyhow!("duplicate extension route hint: {name}"));
+                }
+            }
+        }
+
         let handles = self.manager.activate_bundle(bundle).await?;
-        for package in &packages { self.catalog.publish(package); }
+        for package in &packages {
+            self.catalog.publish(package);
+        }
 
         let desired: BTreeSet<_> = roots.keys().cloned().collect();
-        let old: Vec<_> = self.active.lock().unwrap().difference(&desired).cloned().collect();
+        let old: Vec<_> = self
+            .active
+            .lock()
+            .unwrap()
+            .difference(&desired)
+            .cloned()
+            .collect();
         for name in old {
-            if let Some(tools) = &self.tools { tools.unregister(&name); }
+            if let Some(tools) = &self.tools {
+                tools.unregister(&name);
+            }
             self.manager.retire(&name).await;
         }
         if let Some(tools) = &self.tools {
             let old_tools = std::mem::take(&mut *self.active_tools.lock().unwrap());
-            for name in old_tools { tools.unregister(&name); }
+            for name in old_tools {
+                tools.unregister(&name);
+            }
             let mut current_tools = self.active_tools.lock().unwrap();
             for handle in &handles {
-                if !handle.class().verb { continue; }
-                let Some(package) = packages.iter().find(|package| package.manifest().name == handle.name()) else { continue; };
+                if !handle.class().verb {
+                    continue;
+                }
+                let Some(package) = packages
+                    .iter()
+                    .find(|package| package.manifest().name == handle.name())
+                else {
+                    continue;
+                };
                 let names = if package.manifest().route_hints.is_empty() {
                     vec![package.manifest().name.clone()]
                 } else {
                     package.manifest().route_hints.clone()
                 };
                 for name in names {
-                    tools.register(WasmToolComponent::new(WasmTool::new(name.clone(), handle.clone())))
+                    tools
+                        .register(WasmToolComponent::new(WasmTool::new(
+                            name.clone(),
+                            handle.clone(),
+                        )))
                         .map_err(|error| anyhow!(error.to_string()))?;
                     current_tools.insert(name);
                 }
@@ -227,7 +335,9 @@ impl UrlComposition {
             let _ = sender.send(event);
         })?;
         for path in [&self.source.global, &self.source.local] {
-            if path.exists() { watcher.watch(path, RecursiveMode::Recursive)?; }
+            if path.exists() {
+                watcher.watch(path, RecursiveMode::Recursive)?;
+            }
         }
 
         let task = tokio::spawn(async move {
@@ -242,20 +352,33 @@ impl UrlComposition {
     }
 }
 
-pub struct CompositionWatcher { task: tokio::task::JoinHandle<()> }
+pub struct CompositionWatcher {
+    task: tokio::task::JoinHandle<()>,
+}
 
 impl CompositionWatcher {
-    pub fn abort(self) { self.task.abort(); }
+    pub fn abort(self) {
+        self.task.abort();
+    }
 }
 
 fn package_roots(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    if !root.exists() { return Ok(Vec::new()); }
-    if !root.is_dir() { return Err(anyhow!("composition root is not a directory: {}", root.display())); }
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    if !root.is_dir() {
+        return Err(anyhow!(
+            "composition root is not a directory: {}",
+            root.display()
+        ));
+    }
     let mut roots = Vec::new();
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() && path.join("extension.toml").is_file() { roots.push(path); }
+        if path.is_dir() && path.join("extension.toml").is_file() {
+            roots.push(path);
+        }
     }
     roots.sort();
     Ok(roots)
@@ -275,7 +398,11 @@ mod tests {
     fn package(root: &Path, name: &str, version: &str) {
         let path = root.join(name);
         std::fs::create_dir_all(path.join("src")).unwrap();
-        std::fs::write(path.join("extension.toml"), format!("name = '{name}'\nversion = '{version}'\n")).unwrap();
+        std::fs::write(
+            path.join("extension.toml"),
+            format!("name = '{name}'\nversion = '{version}'\n"),
+        )
+        .unwrap();
         std::fs::write(path.join("extension.wasm"), COMPONENT).unwrap();
         std::fs::write(path.join("README.md"), name).unwrap();
         std::fs::write(path.join("src/main.rs"), "fn main() {}").unwrap();
@@ -302,7 +429,9 @@ mod tests {
         );
         let discovered = composition.discover().unwrap();
         assert_eq!(discovered.len(), 2);
-        let selected = ExtensionPackage::open(&build_engine().unwrap(), discovered.get("shared").unwrap()).unwrap();
+        let selected =
+            ExtensionPackage::open(&build_engine().unwrap(), discovered.get("shared").unwrap())
+                .unwrap();
         assert_eq!(selected.manifest().version, "2.0.0");
     }
 }

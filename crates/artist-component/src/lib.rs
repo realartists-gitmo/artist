@@ -13,20 +13,42 @@ use artist_kernel::provider::{
     ProviderAttrs, ProviderEntry, ResourceError, ResourceErrorCode, ResourceProvider,
 };
 use artist_kernel::{Kernel, ResourceUri};
-use artist_wasm_nouns::{RoutedNoun, WasmRoutedNoun};
 use artist_wasm::{
     Extension, ExtensionClass, ExtensionDependency, ExtensionMetadata, PreparedGeneration, Runtime,
 };
+use artist_wasm_nouns::{RoutedNoun, WasmRoutedNoun};
 use async_trait::async_trait;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use wasmtime::Engine;
 
+pub mod bootstrap;
 pub mod composition;
+pub mod composition_extension;
+pub mod identity;
+pub mod policy;
 pub mod tools;
 
-pub use composition::{CompositionWatcher, PackageComponentLoader, UrlComposition, UrlCompositionSource};
+pub use artist_wasm_composition::types::SessionInput as CompositionInput;
+pub use bootstrap::ComponentHost;
+pub use composition::{
+    CompositionWatcher, PackageComponentLoader, UrlComposition, UrlCompositionSource,
+};
+pub use composition_extension::{CompositionUpdate, WasmComposition};
+pub use identity::IdentityCatalog;
+pub use policy::{
+    DirectoryResourceProvider, PermissionEffect, PermissionRegistry, PermissionRule,
+    install_profile_view, install_prompt_view,
+};
 pub use tools::{ComponentToolRegistry, ToolComponent, ToolError, WasmToolComponent};
+
+/// Session-bound composition source. The agent loop calls this at each model
+/// boundary and applies the returned provider-neutral events to its
+/// model-facing surface.
+#[async_trait::async_trait]
+pub trait CompositionUpdater: Send + Sync {
+    async fn update(&self, input: CompositionInput) -> anyhow::Result<Vec<CompositionUpdate>>;
+}
 
 const PACKAGE_MANIFEST: &str = "extension.toml";
 const PACKAGE_ARTIFACT: &str = "extension.wasm";

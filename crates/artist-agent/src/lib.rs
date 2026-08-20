@@ -8,9 +8,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use artist_component::{
+    ComponentToolRegistry, CompositionInput, CompositionUpdate, CompositionUpdater,
+    PermissionRegistry,
+};
 use artist_kernel::{Kernel, ResourceError};
-use artist_component::ComponentToolRegistry;
-use artist_session::{EventLog, EventLogTranscript, LogError};
+use artist_session::Snapshot;
+use artist_session::{ContextController, ContextEvent, EventLog, EventLogTranscript, LogError};
 use futures::StreamExt;
 use llm_provider::{
     Message, ModelEvent, ModelProvider, ModelRequest, ModelResponse, Role, ToolCall,
@@ -27,6 +31,9 @@ pub mod observability;
 pub mod protocol;
 pub mod rpc;
 pub mod session;
+pub mod toolsurface;
+
+pub use toolsurface::{ToolSurface, ToolSurfaceError, ToolSurfaceEvent};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -56,32 +63,71 @@ pub trait ToolInvoker: Send + Sync {
 /// its provider-neutral `ToolCall`/`ToolResult` records.
 pub struct ComponentToolInvoker {
     registry: ComponentToolRegistry,
+    permissions: Option<(String, PermissionRegistry)>,
 }
 
 impl ComponentToolInvoker {
-    pub fn new(registry: ComponentToolRegistry) -> Self { Self { registry } }
-    pub fn registry(&self) -> &ComponentToolRegistry { &self.registry }
+    pub fn new(registry: ComponentToolRegistry) -> Self {
+        Self {
+            registry,
+            permissions: None,
+        }
+    }
+    pub fn with_permissions(
+        mut self,
+        profile: impl Into<String>,
+        permissions: PermissionRegistry,
+    ) -> Self {
+        self.permissions = Some((profile.into(), permissions));
+        self
+    }
+    pub fn registry(&self) -> &ComponentToolRegistry {
+        &self.registry
+    }
 }
 
 #[async_trait::async_trait]
 impl ToolInvoker for ComponentToolInvoker {
     async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
-        let request = toon_format::encode_default(&call.arguments)
-            .map_err(|error| ToolError::Failed { message: format!("encode tool request: {error}") })?;
+        if let Some((profile, permissions)) = &self.permissions {
+            let resource = call
+                .arguments
+                .get("uri")
+                .or_else(|| call.arguments.get("source"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if !permissions.authorize(profile, &call.name, resource) {
+                return Ok(ToolResult {
+                    call_id: call.id,
+                    content: vec![llm_provider::ContentPart::Text {
+                        text: format!("permission denied: {}", call.name),
+                    }],
+                    is_error: true,
+                });
+            }
+        }
+        let request =
+            toon_format::encode_default(&call.arguments).map_err(|error| ToolError::Failed {
+                message: format!("encode tool request: {error}"),
+            })?;
         match self.registry.invoke(&call.name, request.as_bytes()).await {
             Ok(response) => {
-                let value: serde_json::Value = toon_format::decode_default(
-                    std::str::from_utf8(&response).map_err(|error| ToolError::Failed { message: error.to_string() })?,
-                ).map_err(|error| ToolError::Failed { message: format!("decode tool response: {error}") })?;
+                let response = std::str::from_utf8(&response)
+                    .map_err(|error| ToolError::Failed {
+                        message: error.to_string(),
+                    })?
+                    .to_owned();
                 Ok(ToolResult {
                     call_id: call.id,
-                    content: vec![llm_provider::ContentPart::Text { text: serde_json::to_string(&value).unwrap_or_default() }],
+                    content: vec![llm_provider::ContentPart::Text { text: response }],
                     is_error: false,
                 })
             }
             Err(error) => Ok(ToolResult {
                 call_id: call.id,
-                content: vec![llm_provider::ContentPart::Text { text: error.to_string() }],
+                content: vec![llm_provider::ContentPart::Text {
+                    text: error.to_string(),
+                }],
                 is_error: true,
             }),
         }
@@ -96,6 +142,12 @@ pub enum AgentError {
     Tool(#[from] ToolError),
     #[error(transparent)]
     Log(#[from] LogError),
+    #[error("composition update failed: {0}")]
+    Composition(String),
+    #[error("tool surface update failed: {0}")]
+    ToolSurface(String),
+    #[error("context update failed: {0}")]
+    Context(String),
     #[error("tool-call continuation limit reached ({limit})")]
     ToolRoundLimit { limit: usize },
     #[error("agent turn cancelled")]
@@ -157,11 +209,15 @@ impl TurnControl {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TurnRequest {
     pub model: String,
     pub user: Message,
     pub tools: Vec<ToolDefinition>,
+    pub tool_surface: Option<Arc<ToolSurface>>,
+    pub composition_updater: Option<Arc<dyn CompositionUpdater>>,
+    pub composition_input: Option<CompositionInput>,
+    pub context: Option<Snapshot>,
     pub control: TurnControl,
 }
 
@@ -241,16 +297,64 @@ where
         self.record(AgentEvent::UserMessage {
             message: request.user.clone(),
         })?;
-        let mut messages = vec![request.user];
+        let context = ContextController::new(
+            request.context.clone().unwrap_or_else(|| Snapshot::new([])),
+            Arc::clone(&self.log),
+        )
+        .map_err(|error| AgentError::Context(error.to_string()))?;
+        let mut messages = crate::session::project_snapshot(&context.snapshot());
+        messages.push(request.user);
         let mut tool_rounds = 0;
         let mut usage = Usage::default();
 
         loop {
             self.check_control(&request.control)?;
+            if let (Some(updater), Some(input), Some(surface)) = (
+                &request.composition_updater,
+                &request.composition_input,
+                &request.tool_surface,
+            ) {
+                let updates = updater
+                    .update(input.clone())
+                    .await
+                    .map_err(|error| AgentError::Composition(error.to_string()))?;
+                for update in updates {
+                    match update {
+                        CompositionUpdate::Context(event) => {
+                            let model_message = match &event {
+                                ContextEvent::Replace { contribution }
+                                | ContextEvent::Append { contribution } => {
+                                    Some(Message::text(Role::System, contribution.content.clone()))
+                                }
+                                ContextEvent::Remove { .. } => None,
+                            };
+                            context
+                                .apply(event)
+                                .map_err(|error| AgentError::Context(error.to_string()))?;
+                            if let Some(message) = model_message {
+                                messages.push(message);
+                            }
+                        }
+                        tool_update => surface
+                            .apply_composition_update(tool_update)
+                            .map_err(|error| AgentError::ToolSurface(error.to_string()))?,
+                    }
+                }
+            }
+            if let Some(surface) = &request.tool_surface {
+                messages.extend(surface.take_messages());
+            }
+            let tools = request
+                .tool_surface
+                .as_ref()
+                .map(|surface| surface.formal_definitions())
+                .unwrap_or_else(|| request.tools.clone());
+            self.provider
+                .register_formal_tools(&request.model, &tools)?;
             let model_request = ModelRequest {
                 model: request.model.clone(),
                 messages: messages.clone(),
-                tools: request.tools.clone(),
+                tools,
                 temperature: None,
                 max_output_tokens: None,
                 metadata: serde_json::json!({}),
@@ -317,7 +421,12 @@ where
                 self.check_control(&request.control)?;
                 self.record(AgentEvent::ToolRequested { call: call.clone() })?;
                 self.metrics.tool_call();
-                let result = self.tools.invoke(call).await.map_err(|error| {
+                let result = if let Some(surface) = &request.tool_surface {
+                    surface.invoke(call).await
+                } else {
+                    self.tools.invoke(call).await
+                }
+                .map_err(|error| {
                     self.abort(format!("tool: {error}"));
                     AgentError::Tool(error)
                 })?;
@@ -464,6 +573,10 @@ mod tests {
                 model: "fake".into(),
                 user: Message::text(Role::User, "go"),
                 tools: vec![],
+                tool_surface: None,
+                composition_updater: None,
+                composition_input: None,
+                context: None,
                 control: TurnControl::default(),
             })
             .await
@@ -521,6 +634,10 @@ mod tests {
                 model: "empty".into(),
                 user: Message::text(Role::User, "go"),
                 tools: vec![],
+                tool_surface: None,
+                composition_updater: None,
+                composition_input: None,
+                context: None,
                 control: TurnControl::default(),
             })
             .await;
@@ -547,6 +664,10 @@ mod tests {
             model: "fake".into(),
             user: Message::text(Role::User, "go"),
             tools: vec![],
+            tool_surface: None,
+            composition_updater: None,
+            composition_input: None,
+            context: None,
             control,
         })
         .await;

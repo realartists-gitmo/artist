@@ -6,17 +6,17 @@ use anyhow::{Context, anyhow};
 use artist_kernel::{Kernel, ProviderAttrs, ProviderEntry, ResourceError, ResourceUri};
 use async_trait::async_trait;
 use tokio::sync::Notify;
+use wasmtime::component::ResourceTable;
 use wasmtime::{
     Engine, Store,
     component::{Component, Instance, Linker},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
-use wasmtime::component::ResourceTable;
 
 use crate::classify::ExtensionClass;
 use crate::loader::Extension;
-use crate::master::{ComponentLoader, MasterState, UnavailableComponentLoader};
 use crate::master::add_to_linker as add_master_to_linker;
+use crate::master::{ComponentLoader, MasterState, UnavailableComponentLoader};
 
 /// The unrestricted host environment shared by active components.
 ///
@@ -133,7 +133,10 @@ pub struct RuntimeStore {
 
 impl WasiView for RuntimeStore {
     fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView { ctx: &mut self.wasi, table: &mut self.wasi_table }
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.wasi_table,
+        }
     }
 }
 
@@ -553,6 +556,7 @@ impl Runtime {
         store.set_fuel(self.limits.fuel)?;
         let mut linker = Linker::new(&self.engine);
         add_master_to_linker(&mut linker)?;
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         configure(&mut linker)?;
         let instance = linker.instantiate_async(&mut store, &component).await?;
         Ok((store, instance))

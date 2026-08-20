@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+pub mod context;
+
+pub use context::{
+    ContextController, ContextError, ContextEvent, ContextState, Contribution, Snapshot,
+};
+
 /// A validated identifier used to address a durable workspace.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WorkspaceId(String);

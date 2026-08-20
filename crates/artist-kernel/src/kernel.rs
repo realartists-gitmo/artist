@@ -24,6 +24,13 @@ enum ProviderSlot {
 }
 
 impl ProviderSlot {
+    fn provider_name(&self) -> &str {
+        match self {
+            Self::Namespace(provider) => provider.name(),
+            Self::Resource(provider) => provider.provider_name(),
+        }
+    }
+
     fn priority(&self) -> u32 {
         match self {
             Self::Namespace(provider) => provider.priority(),
@@ -237,6 +244,17 @@ impl Kernel {
             .unwrap()
             .providers
             .push(ProviderSlot::Resource(Arc::new(provider)));
+    }
+
+    /// Remove a dynamically registered resource provider by its stable name.
+    /// Native namespaces are never removed through this API.
+    pub fn unregister_resource_provider(&self, name: &str) -> bool {
+        let mut registry = self.registry.write().unwrap();
+        let before = registry.providers.len();
+        registry.providers.retain(|provider| {
+            !matches!(provider, ProviderSlot::Resource(_) if provider.provider_name() == name)
+        });
+        before != registry.providers.len()
     }
 
     /// Register one logical namespace backed by a local-over-global provider

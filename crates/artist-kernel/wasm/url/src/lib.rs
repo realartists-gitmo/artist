@@ -22,8 +22,12 @@ pub struct ClaimToken {
 }
 
 impl ClaimToken {
-    pub fn id(&self) -> u64 { self.id }
-    pub fn uri(&self) -> &str { &self.uri }
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
 }
 
 #[derive(Default)]
@@ -50,7 +54,10 @@ impl UrlClaimRegistry {
             return Err(anyhow!("URI claim already registered: {canonical}"));
         }
         claims.next_id += 1;
-        let token = ClaimToken { id: claims.next_id, uri: canonical.clone() };
+        let token = ClaimToken {
+            id: claims.next_id,
+            uri: canonical.clone(),
+        };
         claims.by_uri.insert(canonical, token.clone());
         Ok(token)
     }
@@ -79,7 +86,11 @@ pub struct UrlRegistryContext {
 
 impl UrlRegistryContext {
     pub fn new(registry: UrlClaimRegistry) -> Self {
-        Self { registry, registrations: BTreeMap::new(), next_registration: 0 }
+        Self {
+            registry,
+            registrations: BTreeMap::new(),
+            next_registration: 0,
+        }
     }
 }
 
@@ -90,7 +101,10 @@ impl HasData for UrlRegistryMarker {
 }
 
 impl registry::HostRegistration for UrlRegistryContext {
-    async fn drop(&mut self, value: wasmtime::component::Resource<registry::Registration>) -> wasmtime::Result<()> {
+    async fn drop(
+        &mut self,
+        value: wasmtime::component::Resource<registry::Registration>,
+    ) -> wasmtime::Result<()> {
         if let Some(token) = self.registrations.remove(&value.rep()) {
             let _ = self.registry.unregister(&token);
         }
@@ -110,7 +124,9 @@ impl registry::Host for UrlRegistryContext {
                 self.registrations.insert(id, token);
                 Ok(wasmtime::component::Resource::new_own(id))
             }
-            Err(error) if error.to_string().starts_with("invalid URI") => Err(registry::Error::InvalidUri),
+            Err(error) if error.to_string().starts_with("invalid URI") => {
+                Err(registry::Error::InvalidUri)
+            }
             Err(_) => Err(registry::Error::Conflict),
         }
     }
@@ -129,7 +145,10 @@ impl registry::Host for UrlRegistryContext {
     }
 }
 
-pub fn add_to_linker<T>(linker: &mut Linker<T>, registry: fn(&mut T) -> UrlRegistryContext) -> wasmtime::Result<()>
+pub fn add_to_linker<T>(
+    linker: &mut Linker<T>,
+    registry: fn(&mut T) -> UrlRegistryContext,
+) -> wasmtime::Result<()>
 where
     T: Send + 'static,
 {
@@ -146,6 +165,9 @@ mod tests {
         let token = registry.register("ast://file.rs/symbols").unwrap();
         assert!(registry.register("ast://file.rs/symbols").is_err());
         registry.unregister(&token).unwrap();
-        assert_eq!(registry.register("ast://file.rs/symbols").unwrap().uri, "ast://file.rs/symbols");
+        assert_eq!(
+            registry.register("ast://file.rs/symbols").unwrap().uri,
+            "ast://file.rs/symbols"
+        );
     }
 }

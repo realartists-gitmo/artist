@@ -209,8 +209,9 @@ impl WasmRoutedNoun {
         F: for<'a> FnOnce(
                 &'a crate::bindings::ns::Guest,
                 &'a mut wasmtime::Store<RuntimeStore>,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = wasmtime::Result<R>> + Send + 'a>>
-            + Send,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = wasmtime::Result<R>> + Send + 'a>,
+            > + Send,
         R: Send + 'static,
     {
         let lease = self
@@ -232,37 +233,38 @@ impl WasmRoutedNoun {
 impl RoutedNounGuest for WasmRoutedNoun {
     async fn matches(&self, uri: &str) -> bool {
         let uri = uri.to_owned();
-        self.call(move |guest, store| Box::pin(async move { guest.call_matches(store, &uri).await }))
-            .await
-            .unwrap_or(false)
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_matches(store, &uri).await })
+        })
+        .await
+        .unwrap_or(false)
     }
 
     async fn getattr(&self, uri: &str) -> Result<types::Attrs, types::Error> {
         let uri = uri.to_owned();
-        self.call(move |guest, store| Box::pin(async move { guest.call_getattr(store, &uri).await }))
-            .await
-            .map_err(|_| types::Error::Io)?
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_getattr(store, &uri).await })
+        })
+        .await
+        .map_err(|_| types::Error::Io)?
     }
 
     async fn readdir(&self, uri: &str) -> Result<Vec<types::Entry>, types::Error> {
         let uri = uri.to_owned();
-        self.call(move |guest, store| Box::pin(async move { guest.call_readdir(store, &uri).await }))
-            .await
-            .map_err(|_| types::Error::Io)?
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_readdir(store, &uri).await })
+        })
+        .await
+        .map_err(|_| types::Error::Io)?
     }
 
-    async fn read(
-        &self,
-        uri: &str,
-        offset: u64,
-        size: u32,
-    ) -> Result<Vec<u8>, types::Error> {
+    async fn read(&self, uri: &str, offset: u64, size: u32) -> Result<Vec<u8>, types::Error> {
         let uri = uri.to_owned();
-        self.call(move |guest, store| Box::pin(async move {
-            guest.call_read(store, &uri, offset, size).await
-        }))
-            .await
-            .map_err(|_| types::Error::Io)?
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_read(store, &uri, offset, size).await })
+        })
+        .await
+        .map_err(|_| types::Error::Io)?
     }
 }
 

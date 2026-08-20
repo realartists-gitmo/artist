@@ -1,6 +1,7 @@
 use std::fs;
 
 use artist_cli::ToolRunner;
+use artist_component::CompositionInput;
 use serde_json::Value;
 use tempfile::tempdir;
 
@@ -21,6 +22,64 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
     fs::write(dir.path().join("old.txt"), "move me\n").unwrap();
 
     let runner = ToolRunner::new(dir.path()).await.unwrap();
+
+    let profile_uri: artist_kernel::ResourceUri = "profile://planner/PROFILE.md".parse().unwrap();
+    let profile = runner
+        .component_host()
+        .kernel()
+        .read_uri(&profile_uri, 0, u32::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8(profile)
+            .unwrap()
+            .contains("Planner profile")
+    );
+
+    let packaged = runner
+        .component_host()
+        .compose_initial(CompositionInput {
+            identity: "tester".into(),
+            profile: None,
+            system: None,
+            agent_instructions: None,
+            profile_content: None,
+            visible_resources: Vec::new(),
+            tool_events: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        packaged
+            .contributions
+            .iter()
+            .find(|contribution| contribution.id == "system")
+            .is_some_and(|contribution| contribution.content.contains("agentic coding harness"))
+    );
+
+    let snapshot = runner
+        .component_host()
+        .compose_initial(CompositionInput {
+            identity: "tester".into(),
+            profile: None,
+            system: Some("system".into()),
+            agent_instructions: Some("instructions".into()),
+            profile_content: None,
+            visible_resources: Vec::new(),
+            tool_events: vec!["read: read a file".into(), "find: search resources".into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.contributions.last().unwrap().content,
+        "You are tester."
+    );
+    let tools = snapshot
+        .contributions
+        .iter()
+        .find(|contribution| contribution.id == "tools")
+        .expect("default prompt composition includes tool summary");
+    assert!(tools.content.contains("read: read a file"));
 
     let registered = ["edit", "find", "grep", "move", "read", "write"];
     for verb in registered {
@@ -53,6 +112,16 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
     assert_eq!(read["response"]["uri"], "file:///src/main.rs");
     assert_eq!(read["response"]["lines"][0]["anchor"], "line:0");
 
+    let (anchored, ok) = runner
+        .call_toon("read", "uri: \"src/main.rs#line:1\"\nrange: -1..+1\n")
+        .await
+        .unwrap();
+    assert!(ok);
+    let anchored = decode(&anchored);
+    assert_eq!(anchored["response"]["position"], "line:1");
+    assert_eq!(anchored["response"]["lines"][0]["anchor"], "line:0");
+    assert_eq!(anchored["response"]["lines"][1]["anchor"], "line:1");
+
     let (find, ok) = runner
         .call_toon("find", "uri: src\nquery: \"**/*.rs\"\nlimit: 20\n")
         .await
@@ -80,6 +149,18 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0]["uri"], "file:///src/main.rs#2");
     assert!(matches[0]["content"].as_str().unwrap().contains("println"));
+
+    let (grep_page, ok) = runner
+        .call_toon("grep", "uri: src\nquery: fn\nlimit: 1\n")
+        .await
+        .unwrap();
+    assert!(ok);
+    let grep_page = decode(&grep_page);
+    assert_eq!(
+        grep_page["response"]["matches"].as_array().unwrap().len(),
+        1
+    );
+    assert!(grep_page["response"].get("next_cursor").is_some());
 
     let (first_page, ok) = runner
         .call_toon("find", "uri: src\nquery: \"**/*.rs\"\nlimit: 1\n")
