@@ -187,7 +187,7 @@ pub struct PermissionRule {
     pub pattern: Option<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PermissionRegistry {
     rules: Arc<Vec<PermissionRule>>,
 }
@@ -200,23 +200,24 @@ impl PermissionRegistry {
     }
 
     pub fn authorize(&self, profile: &str, verb: &str, uri: &str) -> bool {
-        let mut decision = true;
+        let mut tool_decision = true;
+        let mut resource_decision = true;
         for rule in self.rules.iter() {
             if rule.verb.as_deref().is_some_and(|value| value != verb) {
                 continue;
             }
             let Some(raw_pattern) = &rule.pattern else {
-                decision = matches!(rule.effect, PermissionEffect::Allow);
+                tool_decision = matches!(rule.effect, PermissionEffect::Allow);
                 continue;
             };
             let pattern = raw_pattern.replace("{current-profile}", profile);
             if wildcard_match(uri, &pattern)
                 || (pattern.ends_with('/') && uri.starts_with(&pattern))
             {
-                decision = matches!(rule.effect, PermissionEffect::Allow);
+                resource_decision = matches!(rule.effect, PermissionEffect::Allow);
             }
         }
-        decision
+        tool_decision && (uri.is_empty() || resource_decision)
     }
 
     /// Interpret a query such as `?read` as an authorization metadata request.

@@ -1,4 +1,10 @@
-# Default profile
+---
+name: default
+description: General-purpose Artist profile.
+resources:
+  deny:
+    - "profile://{current-profile}/.artist/**"
+---
 
 Work directly toward the user's requested outcome. Inspect before changing
 things, make the smallest coherent change, and verify behavior with the

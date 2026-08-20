@@ -6,7 +6,7 @@
 
 use anyhow::{Context, anyhow};
 use artist_component::{
-    ComponentHost, UrlCompositionSource, install_profile_view, install_prompt_view,
+    ComponentHost, ProfileDocument, UrlCompositionSource, install_profile_view, install_prompt_view,
 };
 use artist_component::{ComponentToolRegistry, ToolError};
 use artist_kernel::Kernel;
@@ -17,6 +17,8 @@ use std::sync::Arc;
 pub struct ToolRunner {
     host: ComponentHost,
     tools: ComponentToolRegistry,
+    global_profile_root: PathBuf,
+    local_profile_root: PathBuf,
 }
 
 impl ToolRunner {
@@ -30,6 +32,8 @@ impl ToolRunner {
         let root = root.into();
         let kernel = Arc::new(Kernel::with_files_root(root.clone()));
         let global = extension_root()?;
+        let global_profile_root = global.join(".artist/profile");
+        let local_profile_root = root.join(".artist/profile");
         install_prompt_view(
             &kernel,
             global.join(".artist/prompt"),
@@ -37,8 +41,8 @@ impl ToolRunner {
         );
         install_profile_view(
             &kernel,
-            global.join(".artist/profile"),
-            root.join(".artist/profile"),
+            global_profile_root.clone(),
+            local_profile_root.clone(),
         );
         let local = root.join(".artist/url");
         let host = ComponentHost::start(kernel, UrlCompositionSource::new(global, local))
@@ -48,7 +52,16 @@ impl ToolRunner {
         if tools.names().is_empty() {
             return Err(anyhow!("URL composition registered no model-facing tools"));
         }
-        Ok(Self { host, tools })
+        Ok(Self {
+            host,
+            tools,
+            global_profile_root,
+            local_profile_root,
+        })
+    }
+
+    pub fn load_profile(&self, name: &str) -> anyhow::Result<ProfileDocument> {
+        ProfileDocument::load(&self.global_profile_root, &self.local_profile_root, name)
     }
 
     /// Decode one scalar request or a list of requests and return the same

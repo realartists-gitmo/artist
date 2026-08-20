@@ -27,6 +27,7 @@ pub mod composition;
 pub mod composition_extension;
 pub mod identity;
 pub mod policy;
+pub mod profile;
 pub mod tools;
 
 pub use artist_wasm_composition::types::SessionInput as CompositionInput;
@@ -40,6 +41,7 @@ pub use policy::{
     DirectoryResourceProvider, PermissionEffect, PermissionRegistry, PermissionRule,
     install_profile_view, install_prompt_view,
 };
+pub use profile::ProfileDocument;
 pub use tools::{ComponentToolRegistry, ToolComponent, ToolError, WasmToolComponent};
 
 /// Session-bound composition source. The agent loop calls this at each model

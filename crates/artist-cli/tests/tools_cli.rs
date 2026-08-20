@@ -23,6 +23,10 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
 
     let runner = ToolRunner::new(dir.path()).await.unwrap();
 
+    let planner = runner.load_profile("planner").unwrap();
+    assert_eq!(planner.name, "planner");
+    assert!(planner.prompt.contains("broad requests"));
+
     let profile_uri: artist_kernel::ResourceUri = "profile://planner/PROFILE.md".parse().unwrap();
     let profile = runner
         .component_host()
