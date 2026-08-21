@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use artist_core::{ContextFragment as CoreContextFragment, InitialContext};
 use artist_plugin::{ContextFragment, HookEvent, Message, ModelConfig, PluginHost};
 use artist_resource::{ResourceReply, ResourceRequest, ResourceUri};
 
@@ -10,6 +11,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .ok_or("usage: load <component.wasm>")?;
     let mut host = PluginHost::new()?;
+    let untouched = host.compose_prompt(vec![ContextFragment {
+        source: "empty".into(),
+        content: "  ".into(),
+    }])?;
+    assert_eq!(untouched.len(), 1, "the host must not compose prompts itself");
     let descriptor = host.load(path)?;
     assert_eq!(descriptor.id.as_str(), "artist.default");
 
@@ -24,6 +30,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ])?;
     assert_eq!(prompt.len(), 1);
+    let composed = host.compose_initial_context(InitialContext {
+        fragments: vec![
+            CoreContextFragment {
+                source: "empty".into(),
+                content: " ".into(),
+            },
+            CoreContextFragment {
+                source: "SYSTEM.md".into(),
+                content: "system".into(),
+            },
+        ],
+    })?;
+    assert_eq!(composed.fragments.len(), 1);
+    assert_eq!(composed.fragments[0].source, "SYSTEM.md");
     assert_eq!(host.tools()?.len(), 6);
     let messages = vec![Message {
         role: "user".into(),
@@ -89,6 +109,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(ast_fixture) = paths.next() {
         host.load(ast_fixture)?;
+        // The two narrow fixtures deliberately fail every lifecycle socket
+        // they do not advertise. These calls prove capability discovery keeps
+        // them out of the corresponding component chains.
+        assert_eq!(
+            host.compose_prompt(vec![ContextFragment {
+                source: "SYSTEM.md".into(),
+                content: "still component-composed".into(),
+            }])?
+            .len(),
+            1
+        );
+        assert_eq!(host.transform_context(vec![Message {
+            role: "user".into(),
+            content: "still default-owned".into(),
+        }])?.len(), 1);
         assert_eq!(
             host.call_tool("fixture-cross", r#"{"value":42}"#)?,
             Some(r#"{"value":42}"#.into())

@@ -111,3 +111,64 @@ pub enum PluginCapability {
     Model,
     Events,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PluginId;
+    use serde::{Serialize, de::DeserializeOwned};
+
+    fn round_trip<T>(value: &T)
+    where
+        T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(value).unwrap();
+        assert_eq!(serde_json::from_str::<T>(&json).unwrap(), *value);
+    }
+
+    #[test]
+    fn public_commands_round_trip() {
+        for command in [
+            Command::Input {
+                source: Source::User,
+                content: "hello".into(),
+            },
+            Command::Steer {
+                source: Source::Harness,
+                content: "notice".into(),
+            },
+            Command::Abort {
+                cause: InterruptionCause::Provider {
+                    reason: "connection closed".into(),
+                },
+            },
+        ] {
+            round_trip(&command);
+        }
+    }
+
+    #[test]
+    fn streamed_events_and_plugin_descriptors_round_trip() {
+        let event = StreamEvent {
+            event_id: EventId::from("event"),
+            session_id: SessionId::from("session"),
+            run_id: Some(RunId::from("run")),
+            sequence: 7,
+            kind: StreamEventKind::Interrupted {
+                cause: InterruptionCause::User,
+            },
+        };
+        round_trip(&event);
+
+        let descriptor = PluginDescriptor {
+            id: PluginId::from("artist.fixture"),
+            version: "0.3.0".into(),
+            capabilities: vec![
+                PluginCapability::Prompt,
+                PluginCapability::Tools,
+                PluginCapability::Resources,
+            ],
+        };
+        round_trip(&descriptor);
+    }
+}

@@ -232,22 +232,88 @@ fn hex(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artist_core::{MessageId, RECORD_VERSION, TranscriptEntryKind};
+    use artist_core::{
+        CallId, InterruptionCause, MessageId, RECORD_VERSION, RunId, Source,
+        TranscriptEntryKind,
+    };
 
     async fn round_trip(store: impl SessionStore) {
         let id = SessionId::from("a/session");
         let mut record = SessionRecord::new(id.clone(), InitialContext { fragments: vec![] });
-        let entry = record.entry(TranscriptEntryKind::Input {
-            message_id: MessageId::from("message"),
-            source: artist_core::Source::User,
-            content: "hello".into(),
-        });
-        store.create(record.clone()).await.unwrap();
-        store
-            .append(&id, std::slice::from_ref(&entry))
-            .await
-            .unwrap();
-        record.append(entry).unwrap();
+        let run = RunId::from("run");
+        let interrupted = RunId::from("interrupted");
+        let call = CallId::from("call");
+        let kinds = [
+            TranscriptEntryKind::Input {
+                message_id: MessageId::from("input"),
+                source: Source::User,
+                content: "hello".into(),
+            },
+            TranscriptEntryKind::RunStarted {
+                run_id: run.clone(),
+                input_id: MessageId::from("input"),
+            },
+            TranscriptEntryKind::ToolCall {
+                run_id: run.clone(),
+                call_id: call.clone(),
+                name: "read".into(),
+                arguments: r#"{"uri":"file:///tmp/a"}"#.into(),
+            },
+            TranscriptEntryKind::ToolResult {
+                run_id: run.clone(),
+                call_id: call,
+                result: "body".into(),
+            },
+            TranscriptEntryKind::AssistantMessage {
+                message_id: MessageId::from("answer"),
+                run_id: run,
+                content: "done".into(),
+                complete: true,
+            },
+            TranscriptEntryKind::SteeringQueued {
+                message_id: MessageId::from("steering"),
+                source: Source::Harness,
+                content: "remember this".into(),
+            },
+            TranscriptEntryKind::Input {
+                message_id: MessageId::from("second-input"),
+                source: Source::User,
+                content: "continue".into(),
+            },
+            TranscriptEntryKind::RunStarted {
+                run_id: interrupted.clone(),
+                input_id: MessageId::from("second-input"),
+            },
+            TranscriptEntryKind::SteeringDelivered {
+                run_id: interrupted.clone(),
+                message_ids: vec![MessageId::from("steering")],
+            },
+            TranscriptEntryKind::Compaction {
+                through_sequence: 4,
+                artifact: "summary".into(),
+            },
+            TranscriptEntryKind::AssistantMessage {
+                message_id: MessageId::from("partial"),
+                run_id: interrupted.clone(),
+                content: "half".into(),
+                complete: false,
+            },
+            TranscriptEntryKind::Interrupted {
+                run_id: interrupted,
+                cause: InterruptionCause::User,
+            },
+        ];
+        let entries: Vec<_> = kinds
+            .into_iter()
+            .map(|kind| {
+                let entry = record.entry(kind);
+                record.append(entry.clone()).unwrap();
+                entry
+            })
+            .collect();
+        let empty = SessionRecord::new(id.clone(), InitialContext { fragments: vec![] });
+        store.create(empty).await.unwrap();
+        store.append(&id, &entries).await.unwrap();
         assert_eq!(store.load(&id).await.unwrap(), record);
     }
 
