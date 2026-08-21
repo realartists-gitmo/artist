@@ -6,6 +6,7 @@
 //! these pieces independently.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -16,7 +17,11 @@ use artist_wasm::{ExtensionManager, KernelHostEnvironment, Runtime, build_engine
 use artist_wasm_composition::types;
 use artist_wasm_nouns::{RoutedNoun, WasmRoutedNoun};
 
-use crate::{ComponentToolRegistry, ExtensionCatalog, UrlComposition, UrlCompositionSource};
+use crate::{
+    CompactionSocket, ComponentToolRegistry, CompositionWatcher, ExtensionCatalog,
+    FileProfileComponent, ProcessRegistry, ProfileSocket, UrlComposition, UrlCompositionSource,
+};
+use llm_provider::ProviderCatalog;
 
 pub struct ComponentHost {
     kernel: Arc<Kernel>,
@@ -24,10 +29,26 @@ pub struct ComponentHost {
     composition: Arc<UrlComposition>,
     composition_extension: Arc<RwLock<crate::WasmComposition>>,
     noun_providers: Arc<RwLock<BTreeSet<String>>>,
+    provider_catalog: ProviderCatalog,
+    compaction: CompactionSocket,
+    profiles: ProfileSocket,
+    _composition_watcher: CompositionWatcher,
 }
 
 impl ComponentHost {
     pub async fn start(kernel: Arc<Kernel>, source: UrlCompositionSource) -> anyhow::Result<Self> {
+        let workspace_root = source
+            .local
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| source.local.clone());
+        let profile_component: Arc<dyn crate::ProfileComponent> =
+            Arc::new(FileProfileComponent::new(
+                "profile://filesystem",
+                source.global.join(".artist/profile"),
+                source.local.join(".artist/profile"),
+            ));
         let engine = build_engine().context("build component engine")?;
         let catalog = ExtensionCatalog::default();
         catalog.install_into(&kernel);
@@ -75,12 +96,43 @@ impl ComponentHost {
         let tools = composition
             .tools()
             .expect("component host owns a tool registry");
+        let processes = ProcessRegistry::with_file_root(workspace_root);
+        processes.install(&kernel);
+        processes
+            .install_tools(&tools)
+            .context("install component process tools")?;
+        let composition_extension = Arc::new(RwLock::new(composition_extension));
+        let noun_providers = Arc::new(RwLock::new(noun_providers));
+        let callback_kernel = Arc::clone(&kernel);
+        let callback_extension = Arc::clone(&composition_extension);
+        let callback_nouns = Arc::clone(&noun_providers);
+        let composition_watcher = composition
+            .clone()
+            .watch_with(move |handles| {
+                let callback_kernel = Arc::clone(&callback_kernel);
+                let callback_extension = Arc::clone(&callback_extension);
+                let callback_nouns = Arc::clone(&callback_nouns);
+                async move {
+                    let old = callback_nouns.read().await.clone();
+                    let next = Self::publish_nouns(&callback_kernel, &handles, &old);
+                    *callback_nouns.write().await = next;
+                    if let Some(handle) = handles.iter().find(|handle| handle.class().composition) {
+                        *callback_extension.write().await =
+                            crate::WasmComposition::new(handle.clone());
+                    }
+                }
+            })
+            .context("start live URL composition watcher")?;
         Ok(Self {
             kernel,
             tools,
             composition,
-            composition_extension: Arc::new(RwLock::new(composition_extension)),
-            noun_providers: Arc::new(RwLock::new(noun_providers)),
+            composition_extension,
+            noun_providers,
+            provider_catalog: ProviderCatalog::builtins(),
+            compaction: CompactionSocket::default(),
+            profiles: ProfileSocket::new([profile_component]),
+            _composition_watcher: composition_watcher,
         })
     }
 
@@ -92,6 +144,22 @@ impl ComponentHost {
     }
     pub fn composition(&self) -> &Arc<UrlComposition> {
         &self.composition
+    }
+
+    /// Provider factories are selected by stable configuration identity by
+    /// the session host; the kernel never interprets provider types.
+    pub fn provider_catalog(&self) -> &ProviderCatalog {
+        &self.provider_catalog
+    }
+
+    /// Optional compaction implementations are selected by resource identity.
+    /// An empty socket is a valid installation.
+    pub fn compaction(&self) -> &CompactionSocket {
+        &self.compaction
+    }
+
+    pub fn profiles(&self) -> &ProfileSocket {
+        &self.profiles
     }
 
     /// Atomically refresh the active extension package set and the host's
@@ -150,8 +218,19 @@ impl ComponentHost {
         mut input: types::SessionInput,
     ) -> anyhow::Result<Snapshot> {
         if input.system.is_none() {
+            const MAX_SYSTEM_PROMPT_BYTES: u32 = 4 * 1024 * 1024;
             let uri: artist_kernel::ResourceUri = "prompt://SYSTEM.md".parse()?;
-            if let Ok(bytes) = self.kernel.read_uri(&uri, 0, u32::MAX).await {
+            if let Ok(bytes) = self
+                .kernel
+                .read_uri(&uri, 0, MAX_SYSTEM_PROMPT_BYTES.saturating_add(1))
+                .await
+            {
+                if bytes.len() > MAX_SYSTEM_PROMPT_BYTES as usize {
+                    return Err(anyhow::anyhow!(
+                        "system prompt exceeds the {} byte composition limit",
+                        MAX_SYSTEM_PROMPT_BYTES
+                    ));
+                }
                 input.system = Some(String::from_utf8(bytes)?);
             }
         }

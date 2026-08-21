@@ -13,6 +13,7 @@ artist-wasm-url = { path = "../artist-kernel/wasm/url" }
 artist-wasm-verbs = { path = "../artist-kernel/wasm/verbs" }
 artist-wasm-composition = { path = "../artist-kernel/wasm/composition" }
 artist-session = { path = "../artist-session" }
+llm-provider = { path = "../llm-provider" }
 anyhow = "1"
 async-trait = "0.1"
 sha2 = "0.10"
@@ -22,6 +23,7 @@ walkdir = "2"
 tokio = { version = "1", features = ["fs", "io-util", "process", "rt", "rt-multi-thread", "macros", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 thiserror = "2"
+toon-format = { version = "0.5", default-features = false }
 cap-std = "4"
 gray_matter = "0.2"
 serde_yaml = "0.9"

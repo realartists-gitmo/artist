@@ -13,6 +13,7 @@ pub mod host;
 pub mod move_;
 pub mod process;
 pub mod read;
+pub mod teca;
 pub mod write;
 
 pub use host::{ToonVerbHandler, VerbDispatcher, VerbError, VerbTool};

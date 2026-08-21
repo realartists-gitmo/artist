@@ -124,10 +124,19 @@ fn composition_host(store: &mut RuntimeStore) -> CompositionHostContext {
 
 impl resource_host::Host for CompositionHostContext {
     async fn read(&mut self, uri: String) -> wasmtime::Result<Result<String, types::Error>> {
+        const MAX_COMPOSITION_RESOURCE_BYTES: u64 = 4 * 1024 * 1024;
         let uri: ResourceUri = uri.parse().map_err(|_| types::Error::InvalidInput)?;
+        let attrs = self
+            .host
+            .attrs(&uri)
+            .await
+            .map_err(|_| types::Error::Unavailable)?;
+        if attrs.size > MAX_COMPOSITION_RESOURCE_BYTES {
+            return Ok(Err(types::Error::Failed));
+        }
         let bytes = self
             .host
-            .read(&uri, 0, u32::MAX)
+            .read(&uri, 0, MAX_COMPOSITION_RESOURCE_BYTES as u32)
             .await
             .map_err(|_| types::Error::Unavailable)?;
         String::from_utf8(bytes)

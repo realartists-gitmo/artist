@@ -127,7 +127,7 @@ impl ResourceUri {
     /// [`Self::path`] remains the canonical serialized path.
     pub fn decoded_segments(&self) -> Result<Vec<String>, UriError> {
         let parsed = url::Url::parse(&self.to_string()).map_err(|_| UriError::InvalidUri)?;
-        Ok(parsed
+        let segments: Vec<String> = parsed
             .path_segments()
             .map(|segments| {
                 segments
@@ -138,7 +138,13 @@ impl ResourceUri {
                     })
                     .collect()
             })
-            .unwrap_or_default())
+            .unwrap_or_default();
+        if segments.iter().any(|segment| {
+            segment == "." || segment == ".." || segment.contains('/') || segment.contains('\\')
+        }) {
+            return Err(UriError::InvalidPath);
+        }
+        Ok(segments)
     }
 
     pub fn is_root(&self) -> bool {

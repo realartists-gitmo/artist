@@ -20,6 +20,10 @@ pub trait ResourceGuestAdapter: Send + Sync {
     async fn readdir(&self, uri: &str) -> Result<Vec<types::Entry>, types::Error>;
     async fn read(&self, uri: &str, offset: u64, size: u32) -> Result<Vec<u8>, types::Error>;
     async fn write(&self, uri: &str, offset: u64, data: Vec<u8>) -> Result<u32, types::Error>;
+    async fn replace(&self, uri: &str, data: Vec<u8>) -> Result<u64, types::Error> {
+        let _ = (uri, data);
+        Err(types::Error::Unsupported)
+    }
     async fn move_resource(&self, source: &str, destination: &str) -> Result<(), types::Error>;
     async fn delete(&self, uri: &str) -> Result<(), types::Error>;
 }
@@ -124,6 +128,15 @@ impl ResourceGuestAdapter for WasmResource {
         self.call(move |guest, store| Box::pin(async move { guest.call_delete(store, &uri).await }))
             .await
             .map_err(|_| types::Error::Io)?
+    }
+
+    async fn replace(&self, uri: &str, data: Vec<u8>) -> Result<u64, types::Error> {
+        let uri = uri.to_owned();
+        self.call(move |guest, store| {
+            Box::pin(async move { guest.call_replace(store, &uri, &data).await })
+        })
+        .await
+        .map_err(|_| types::Error::Io)?
     }
 }
 
@@ -245,6 +258,12 @@ impl artist_kernel::ResourceProvider for RoutedResource {
             .await
             .map_err(|error| resource_error(uri, error))
     }
+    async fn replace_all(&self, uri: &ResourceUri, data: &[u8]) -> Result<u64, ResourceError> {
+        self.guest
+            .replace(&uri.to_string(), data.to_vec())
+            .await
+            .map_err(|error| resource_error(uri, error))
+    }
     async fn move_resource(
         &self,
         source: &ResourceUri,
@@ -351,6 +370,23 @@ impl ResourceGuestAdapter for KernelResourceHost {
             .write_uri(&uri, offset, &data)
             .await
             .map_err(convert_error)
+    }
+    async fn replace(&self, uri: &str, data: Vec<u8>) -> Result<u64, types::Error> {
+        let uri = uri.parse().map_err(|_| types::Error::InvalidAddress)?;
+        match self.kernel.replace_uri(&uri, &data).await {
+            Ok(written) => Ok(written),
+            Err(error) if error.code == artist_kernel::ResourceErrorCode::NotFound => {
+                self.kernel
+                    .create_file_uri(&uri)
+                    .await
+                    .map_err(convert_error)?;
+                self.kernel
+                    .replace_uri(&uri, &data)
+                    .await
+                    .map_err(convert_error)
+            }
+            Err(error) => Err(convert_error(error)),
+        }
     }
     async fn move_resource(&self, source: &str, destination: &str) -> Result<(), types::Error> {
         let source = source.parse().map_err(|_| types::Error::InvalidAddress)?;

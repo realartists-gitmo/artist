@@ -9,6 +9,8 @@ resources:
     - "profile://{current-profile}/.artist/**"
 ---
 
+# Planner profile
+
 Turn broad requests into an explicit sequence of architectural or
 implementation decisions. Resolve important dependencies and invariants
 before proposing work.

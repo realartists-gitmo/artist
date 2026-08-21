@@ -4,8 +4,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
+use async_trait::async_trait;
 use gray_matter::{Matter, engine::YAML};
 use serde::Deserialize;
+use serde_json::Value;
+use std::sync::Arc;
 
 use crate::{PermissionEffect, PermissionRegistry, PermissionRule};
 
@@ -28,6 +31,24 @@ struct ProfileMetadata {
     tools: PolicyMetadata,
     #[serde(default)]
     resources: PolicyMetadata,
+    #[serde(default)]
+    post_system: Option<String>,
+    #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    provider_config: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    required_tools: Vec<String>,
+    #[serde(default)]
+    yield_schema: Option<Value>,
+    #[serde(default)]
+    allow_fork: bool,
+    #[serde(default)]
+    allow_handoff: bool,
 }
 
 /// A parsed profile document. The body is the profile's model-facing prompt;
@@ -38,6 +59,93 @@ pub struct ProfileDocument {
     pub description: Option<String>,
     pub prompt: String,
     pub permissions: PermissionRegistry,
+    pub post_system: Option<String>,
+    pub identity: Option<String>,
+    pub provider: Option<String>,
+    pub provider_config: Option<String>,
+    pub model: Option<String>,
+    pub required_tools: Vec<String>,
+    pub yield_schema: Option<Value>,
+    pub allow_fork: bool,
+    pub allow_handoff: bool,
+}
+
+/// Component-owned profile/prompt resolver. The daemon stores only the stable
+/// profile identity selected for a session; loading and interpreting a profile
+/// remains behind this socket.
+#[async_trait]
+pub trait ProfileComponent: Send + Sync {
+    fn resource_id(&self) -> &str;
+    async fn resolve(&self, profile_id: &str) -> anyhow::Result<ProfileDocument>;
+}
+
+/// Native filesystem-backed profile component used by the default host. It is
+/// still selected through the profile socket; the daemon does not parse
+/// Markdown or decide profile precedence itself.
+pub struct FileProfileComponent {
+    resource_id: String,
+    global_root: PathBuf,
+    local_root: PathBuf,
+}
+
+impl FileProfileComponent {
+    pub fn new(
+        resource_id: impl Into<String>,
+        global_root: impl Into<PathBuf>,
+        local_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            resource_id: resource_id.into(),
+            global_root: global_root.into(),
+            local_root: local_root.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl ProfileComponent for FileProfileComponent {
+    fn resource_id(&self) -> &str {
+        &self.resource_id
+    }
+
+    async fn resolve(&self, profile_id: &str) -> anyhow::Result<ProfileDocument> {
+        ProfileDocument::load(&self.global_root, &self.local_root, profile_id)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct ProfileSocket {
+    components: Arc<std::collections::BTreeMap<String, Arc<dyn ProfileComponent>>>,
+}
+
+impl ProfileSocket {
+    pub fn new(components: impl IntoIterator<Item = Arc<dyn ProfileComponent>>) -> Self {
+        let mut values = std::collections::BTreeMap::new();
+        for component in components {
+            values.insert(component.resource_id().to_owned(), component);
+        }
+        Self {
+            components: Arc::new(values),
+        }
+    }
+
+    pub fn selected(
+        &self,
+        resource: Option<&str>,
+    ) -> anyhow::Result<Option<Arc<dyn ProfileComponent>>> {
+        let Some(resource) = resource else {
+            return Ok(None);
+        };
+        self.components
+            .get(resource)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| anyhow!("profile component {resource:?} is unavailable"))
+    }
+
+    pub fn resource_ids(&self) -> Vec<String> {
+        self.components.keys().cloned().collect()
+    }
 }
 
 impl ProfileDocument {
@@ -66,6 +174,29 @@ impl ProfileDocument {
             description: data.description,
             prompt: parsed.content.trim().to_owned(),
             permissions: compile_permissions(&data.tools, &data.resources),
+            post_system: data.post_system,
+            identity: data.identity,
+            provider: data.provider,
+            provider_config: data.provider_config,
+            model: data.model,
+            required_tools: data.required_tools,
+            yield_schema: data.yield_schema,
+            allow_fork: data.allow_fork,
+            allow_handoff: data.allow_handoff,
+        })
+    }
+
+    pub fn yield_schema(&self) -> Value {
+        self.yield_schema.clone().unwrap_or_else(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "complete": {"type": "boolean"},
+                    "remaining": {"type": "string"}
+                },
+                "required": ["complete"],
+                "additionalProperties": false
+            })
         })
     }
 

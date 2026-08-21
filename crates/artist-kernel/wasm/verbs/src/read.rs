@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use crate::host::{VerbError, VerbTool};
 
 const READ_CHUNK_SIZE: u32 = 64 * 1024;
+const MAX_READ_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ReadRequest {
@@ -63,6 +64,10 @@ pub struct ReadResponse {
     pub position: Option<String>,
     pub range: ReadRange,
     pub lines: Vec<AnchoredLine>,
+    pub partial: bool,
+    pub binary: bool,
+    pub mime_type: Option<String>,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,6 +125,21 @@ pub trait LineAddresser: Send + Sync {
 #[async_trait]
 pub trait ResourceReader: Send + Sync {
     async fn read_all(&self, uri: &ResourceUri) -> Result<Vec<u8>, ReadError>;
+
+    /// Bounded read used by the model-facing verb. Implementors must route
+    /// this directly to their resource provider; there is intentionally no
+    /// read-all fallback because a small requested range must not force an
+    /// arbitrarily large resource into memory.
+    async fn read_range(
+        &self,
+        uri: &ResourceUri,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>, ReadError>;
+
+    async fn mime_type(&self, _uri: &ResourceUri) -> Result<Option<String>, ReadError> {
+        Ok(None)
+    }
 }
 
 /// Batch-native host implementation of the read verb. A WASM guest can use
@@ -194,6 +214,18 @@ impl ResourceReader for KernelReader {
         }
         Ok(bytes)
     }
+
+    async fn read_range(
+        &self,
+        uri: &ResourceUri,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>, ReadError> {
+        self.kernel
+            .read_uri(uri, offset, size)
+            .await
+            .map_err(ReadError::Resource)
+    }
 }
 
 /// Execute one read request against a resource reader and line addresser.
@@ -207,8 +239,39 @@ pub async fn read<R: ResourceReader, A: LineAddresser>(
         .parse::<ResourceUri>()
         .map_err(|error| ReadError::InvalidUri(error.to_string()))?;
     let base = uri.without_fragment();
-    let bytes = reader.read_all(&base).await?;
-    let source = std::str::from_utf8(&bytes).map_err(|_| ReadError::InvalidUtf8)?;
+    let mime_type = reader
+        .mime_type(&base)
+        .await?
+        .or_else(|| infer_mime_type(base.path()));
+    // A model-facing read is bounded. The extra byte distinguishes a full
+    // response from a resource clipped at the budget; edit uses its own
+    // transactional full-resource path.
+    let bytes = reader
+        .read_range(&base, 0, (MAX_READ_BYTES + 1) as u32)
+        .await?;
+    let partial = bytes.len() > MAX_READ_BYTES;
+    let bytes = if partial {
+        bytes[..MAX_READ_BYTES].to_vec()
+    } else {
+        bytes
+    };
+    let Ok(source) = std::str::from_utf8(&bytes) else {
+        return Ok(ReadResponse {
+            uri: base.to_string(),
+            position: uri.fragment().map(str::to_owned),
+            range: request
+                .range
+                .as_deref()
+                .map(ReadRange::parse)
+                .transpose()?
+                .unwrap_or_else(default_range),
+            lines: Vec::new(),
+            partial,
+            binary: true,
+            mime_type,
+            bytes,
+        });
+    };
     let lines = addresser.address_lines(source)?;
     let position = uri.fragment().map(str::to_owned);
     let position_index = match position.as_deref() {
@@ -235,7 +298,32 @@ pub async fn read<R: ResourceReader, A: LineAddresser>(
         position,
         range,
         lines: lines.get(start..end).unwrap_or_default().to_vec(),
+        partial,
+        binary: false,
+        mime_type,
+        bytes: Vec::new(),
     })
+}
+
+fn infer_mime_type(path: &str) -> Option<String> {
+    let extension = path
+        .rsplit('/')
+        .next()?
+        .rsplit_once('.')?
+        .1
+        .to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "txt" | "md" | "rs" | "js" | "ts" | "tsx" | "jsx" | "py" | "go" | "java" | "c" | "h"
+        | "cpp" | "toml" | "yaml" | "yml" | "json" | "xml" | "html" | "css" => "text/plain",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "wasm" => "application/wasm",
+        _ => return None,
+    };
+    Some(mime.into())
 }
 
 /// Default context around the selected line. Keep this a function: it is the
@@ -258,10 +346,10 @@ fn resolve_position(lines: &[AnchoredLine], fragment: &str) -> Result<usize, Rea
     }
     // Compatibility fallback: line numbers are 1-based. Anchor identity wins
     // above, so numeric anchors remain valid if Teca ever emits one.
-    if let Ok(line_number) = fragment.parse::<usize>() {
-        if (1..=lines.len()).contains(&line_number) {
-            return Ok(line_number - 1);
-        }
+    if let Ok(line_number) = fragment.parse::<usize>()
+        && (1..=lines.len()).contains(&line_number)
+    {
+        return Ok(line_number - 1);
     }
     let (anchor, offset) = split_position_offset(fragment)?;
     let base = lines
@@ -340,6 +428,24 @@ mod tests {
     impl ResourceReader for TestReader {
         async fn read_all(&self, _uri: &ResourceUri) -> Result<Vec<u8>, ReadError> {
             Ok(b"zero\none\ntwo\nthree\nfour\n".to_vec())
+        }
+
+        async fn read_range(
+            &self,
+            _uri: &ResourceUri,
+            offset: u64,
+            size: u32,
+        ) -> Result<Vec<u8>, ReadError> {
+            let bytes = b"zero\none\ntwo\nthree\nfour\n";
+            let start = usize::try_from(offset)
+                .map_err(|_| ReadError::Addressing("offset exceeds host capacity".into()))?;
+            Ok(bytes
+                .get(start..)
+                .unwrap_or_default()
+                .iter()
+                .take(size as usize)
+                .copied()
+                .collect())
         }
     }
 

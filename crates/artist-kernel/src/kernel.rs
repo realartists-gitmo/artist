@@ -101,6 +101,15 @@ impl ProviderSlot {
         }
     }
 
+    async fn replace_all(&self, uri: &ResourceUri, data: &[u8]) -> Result<u64, ResourceError> {
+        match self {
+            Self::Namespace(provider) => {
+                ResourceProvider::replace_all(&**provider, uri, data).await
+            }
+            Self::Resource(provider) => provider.replace_all(uri, data).await,
+        }
+    }
+
     async fn create_file(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
         match self {
             Self::Namespace(provider) => ResourceProvider::create_file(&**provider, uri).await,
@@ -239,11 +248,17 @@ impl Kernel {
     /// Register a provider-owned URI subtree without adding a new native root
     /// to the VFS. This is the path used by WASM resource components.
     pub fn register_resource_provider<P: ResourceProvider + 'static>(&self, provider: P) {
-        self.registry
-            .write()
-            .unwrap()
-            .providers
-            .push(ProviderSlot::Resource(Arc::new(provider)));
+        let provider: Arc<dyn ResourceProvider> = Arc::new(provider);
+        let name = provider.provider_name().to_owned();
+        let mut registry = self.registry.write().unwrap();
+        // Provider identity is the replacement boundary. Keeping two live
+        // registrations under one name makes routing depend on insertion
+        // order and leaves stale resource generations reachable after a hot
+        // replacement.
+        registry.providers.retain(|existing| {
+            !matches!(existing, ProviderSlot::Resource(existing) if existing.provider_name() == name)
+        });
+        registry.providers.push(ProviderSlot::Resource(provider));
     }
 
     /// Remove a dynamically registered resource provider by its stable name.
@@ -424,6 +439,14 @@ impl Kernel {
         self.provider_for_uri(&base)
             .await?
             .set_size(&base, size)
+            .await
+    }
+
+    pub async fn replace_uri(&self, uri: &ResourceUri, data: &[u8]) -> Result<u64, ResourceError> {
+        let base = uri.without_fragment();
+        self.provider_for_uri(&base)
+            .await?
+            .replace_all(&base, data)
             .await
     }
 

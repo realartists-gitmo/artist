@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -58,6 +60,19 @@ pub trait HostEnvironment: Send + Sync {
             .await
     }
 }
+
+/// Host-owned lifecycle adapter for event-role components.
+///
+/// The generic runtime does not interpret event topics or payloads. A host
+/// that installs an event broker supplies this adapter to start a subscriber
+/// after its generation has been fully prepared. The returned cleanup hook is
+/// attached to that generation and runs when all in-flight pins have drained.
+pub trait EventRoleActivator: Send + Sync {
+    fn start(&self, generation: GenerationHandle) -> EventRoleStart;
+}
+
+pub type EventRoleCleanup = Box<dyn FnOnce() + Send>;
+pub type EventRoleStart = Pin<Box<dyn Future<Output = anyhow::Result<EventRoleCleanup>> + Send>>;
 
 #[derive(Clone)]
 pub struct KernelHostEnvironment {
@@ -360,7 +375,9 @@ pub struct Runtime {
     component_loader: Arc<dyn ComponentLoader>,
     master_state: Arc<Mutex<MasterState>>,
     limits: RuntimeLimits,
+    event_activator: Option<Arc<dyn EventRoleActivator>>,
     next_id: AtomicUsize,
+    activation_lock: tokio::sync::Mutex<()>,
     active: RwLock<BTreeMap<String, Arc<GenerationInner>>>,
 }
 
@@ -509,9 +526,19 @@ impl Runtime {
             component_loader: Arc::new(UnavailableComponentLoader),
             master_state: Arc::new(Mutex::new(MasterState::default())),
             limits,
+            event_activator: None,
             next_id: AtomicUsize::new(1),
+            activation_lock: tokio::sync::Mutex::new(()),
             active: RwLock::new(BTreeMap::new()),
         }
+    }
+
+    /// Install the host adapter used to start and stop event-role
+    /// components. Without an adapter, activating an event-role generation is
+    /// rejected rather than silently leaving a declared subscriber inert.
+    pub fn with_event_activator(mut self, activator: Arc<dyn EventRoleActivator>) -> Self {
+        self.event_activator = Some(activator);
+        self
     }
 
     pub fn engine(&self) -> &Engine {
@@ -653,17 +680,23 @@ impl Runtime {
         &self,
         prepared: Vec<PreparedGeneration>,
     ) -> anyhow::Result<Vec<GenerationHandle>> {
+        let _activation_guard = self.activation_lock.lock().await;
         let replacing: std::collections::BTreeSet<_> = prepared
             .iter()
             .map(|generation| generation.metadata.name.clone())
             .collect();
-        let mut dependents = std::collections::BTreeSet::new();
+        // Do not retire the old dependency tree until every candidate event
+        // role has started successfully. Otherwise a failed replacement could
+        // leave the previous generation's dependents gone even though the
+        // candidate was never published.
+        let mut retirement_order = Vec::new();
+        let mut retirement_names = std::collections::BTreeSet::new();
         for name in &replacing {
-            dependents.extend(self.dependent_names(name));
-        }
-        dependents.retain(|name| !replacing.contains(name));
-        for name in dependents {
-            self.retire(&name).await;
+            for dependent in self.retirement_order(name) {
+                if retirement_names.insert(dependent.clone()) {
+                    retirement_order.push(dependent);
+                }
+            }
         }
 
         let generations: Vec<_> = prepared
@@ -685,10 +718,57 @@ impl Runtime {
                 })
             })
             .collect();
+        let handles: Vec<_> = generations
+            .iter()
+            .cloned()
+            .map(|generation| GenerationHandle { inner: generation })
+            .collect();
+
+        // Event subscribers are started before publication. If startup fails,
+        // no candidate generation becomes visible and the previous active
+        // generation remains untouched.
+        let mut started_events: Vec<GenerationHandle> = Vec::new();
+        for handle in &handles {
+            if !handle.class().event {
+                continue;
+            }
+            let Some(activator) = &self.event_activator else {
+                for started in started_events {
+                    started.retire().await;
+                }
+                return Err(anyhow!(
+                    "event-role component {} has no installed event activator",
+                    handle.name()
+                ));
+            };
+            match activator.start(handle.clone()).await {
+                Ok(cleanup) => {
+                    handle.on_retire(cleanup);
+                    started_events.push(handle.clone());
+                }
+                Err(error) => {
+                    for started in started_events {
+                        started.retire().await;
+                    }
+                    handle.retire().await;
+                    return Err(
+                        error.context(format!("start event-role component {}", handle.name()))
+                    );
+                }
+            }
+        }
         let olds = {
             let mut active = self.active.write().unwrap();
             let mut olds = Vec::new();
+            for name in &retirement_order {
+                if let Some(old) = active.remove(name) {
+                    old.begin_retirement();
+                    olds.push(old);
+                }
+            }
             for generation in &generations {
+                // A candidate may not have appeared in `retirement_order` if
+                // there was no active generation with that name yet.
                 if let Some(old) = active.remove(&generation.metadata.name) {
                     old.begin_retirement();
                     olds.push(old);
@@ -700,10 +780,7 @@ impl Runtime {
         for old in olds {
             old.retire().await;
         }
-        Ok(generations
-            .into_iter()
-            .map(|generation| GenerationHandle { inner: generation })
-            .collect())
+        Ok(handles)
     }
 
     pub fn get(&self, name: &str) -> Option<GenerationHandle> {
@@ -728,6 +805,7 @@ impl Runtime {
     }
 
     pub async fn retire(&self, name: &str) -> bool {
+        let _activation_guard = self.activation_lock.lock().await;
         let names = self.retirement_order(name);
         if names.is_empty() {
             return false;
@@ -780,7 +858,53 @@ pub type ComponentRuntime = Runtime;
 mod tests {
     use super::*;
     use crate::build_engine;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RecordingEventActivator {
+        started: Arc<AtomicUsize>,
+        stopped: Arc<AtomicUsize>,
+    }
+
+    struct ToggleEventActivator {
+        reject: Arc<AtomicUsize>,
+        started: Arc<AtomicUsize>,
+        stopped: Arc<AtomicUsize>,
+    }
+
+    impl EventRoleActivator for RecordingEventActivator {
+        fn start(
+            &self,
+            _generation: GenerationHandle,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Box<dyn FnOnce() + Send>>> + Send>>
+        {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let stopped = Arc::clone(&self.stopped);
+            Box::pin(async move {
+                Ok(Box::new(move || {
+                    stopped.fetch_add(1, Ordering::SeqCst);
+                }) as Box<dyn FnOnce() + Send>)
+            })
+        }
+    }
+
+    impl EventRoleActivator for ToggleEventActivator {
+        fn start(
+            &self,
+            _generation: GenerationHandle,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Box<dyn FnOnce() + Send>>> + Send>>
+        {
+            if self.reject.load(Ordering::SeqCst) != 0 {
+                return Box::pin(async { Err(anyhow!("event startup rejected")) });
+            }
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let stopped = Arc::clone(&self.stopped);
+            Box::pin(async move {
+                Ok(Box::new(move || {
+                    stopped.fetch_add(1, Ordering::SeqCst);
+                }) as Box<dyn FnOnce() + Send>)
+            })
+        }
+    }
 
     #[tokio::test]
     async fn generations_pin_and_retire() {
@@ -846,6 +970,123 @@ mod tests {
         assert_eq!(manager.active_names(), vec!["read"]);
         assert!(manager.retire("read").await);
         assert!(manager.active_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn event_roles_start_on_activation_and_cleanup_on_retirement() {
+        let kernel = Arc::new(Kernel::empty());
+        let started = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let runtime = Arc::new(
+            Runtime::new(
+                build_engine().unwrap(),
+                Arc::new(KernelHostEnvironment::new(kernel)),
+            )
+            .with_event_activator(Arc::new(RecordingEventActivator {
+                started: Arc::clone(&started),
+                stopped: Arc::clone(&stopped),
+            })),
+        );
+        let manager = ExtensionManager::new(runtime);
+        let event = r#"(component
+            (core module $m (func (export "f")))
+            (export "artist:events/subscriber@1.0.0" (core module $m))
+        )"#;
+        let handle = manager
+            .activate_bytes(
+                event.as_bytes(),
+                ExtensionMetadata {
+                    name: "events".into(),
+                    version: "1.0.0".into(),
+                    route_hints: Vec::new(),
+                    dependencies: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(stopped.load(Ordering::SeqCst), 0);
+        assert!(manager.retire(handle.name()).await);
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn event_roles_without_an_activator_are_not_published() {
+        let kernel = Arc::new(Kernel::empty());
+        let runtime = Arc::new(Runtime::new(
+            build_engine().unwrap(),
+            Arc::new(KernelHostEnvironment::new(kernel)),
+        ));
+        let manager = ExtensionManager::new(Arc::clone(&runtime));
+        let event = r#"(component
+            (core module $m (func (export "f")))
+            (export "artist:events/subscriber@1.0.0" (core module $m))
+        )"#;
+        let result = manager
+            .activate_bytes(
+                event.as_bytes(),
+                ExtensionMetadata {
+                    name: "events".into(),
+                    version: "1.0.0".into(),
+                    route_hints: Vec::new(),
+                    dependencies: Vec::new(),
+                },
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("event generation unexpectedly activated"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("event activator"));
+        assert!(runtime.active_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_event_replacement_preserves_the_previous_generation() {
+        let kernel = Arc::new(Kernel::empty());
+        let reject = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let runtime = Arc::new(
+            Runtime::new(
+                build_engine().unwrap(),
+                Arc::new(KernelHostEnvironment::new(kernel)),
+            )
+            .with_event_activator(Arc::new(ToggleEventActivator {
+                reject: Arc::clone(&reject),
+                started: Arc::clone(&started),
+                stopped: Arc::clone(&stopped),
+            })),
+        );
+        let manager = ExtensionManager::new(Arc::clone(&runtime));
+        let event = r#"(component
+            (core module $m (func (export "f")))
+            (export "artist:events/subscriber@1.0.0" (core module $m))
+        )"#;
+        let metadata = || ExtensionMetadata {
+            name: "events".into(),
+            version: "1.0.0".into(),
+            route_hints: Vec::new(),
+            dependencies: Vec::new(),
+        };
+
+        let previous = manager
+            .activate_bytes(event.as_bytes(), metadata())
+            .await
+            .unwrap();
+        reject.store(1, Ordering::SeqCst);
+        assert!(
+            manager
+                .replace_bytes(event.as_bytes(), metadata())
+                .await
+                .is_err()
+        );
+
+        assert_eq!(runtime.get("events").unwrap().id(), previous.id());
+        assert!(!previous.is_retiring());
+        assert_eq!(runtime.active_names(), vec!["events"]);
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(stopped.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

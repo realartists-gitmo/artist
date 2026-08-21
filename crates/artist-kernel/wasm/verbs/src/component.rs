@@ -60,6 +60,8 @@ impl WasmTool {
 
 struct ResourceHostMarker;
 
+const MAX_COMPONENT_RESOURCE_READ: u32 = 64 * 1024 * 1024;
+
 struct ResourceContext {
     host: std::sync::Arc<dyn HostEnvironment>,
 }
@@ -80,8 +82,18 @@ impl resource::Host for ResourceContext {
         uri: String,
         offset: u64,
         size: u32,
-    ) -> wasmtime::Result<Result<Vec<u8>, resource::Error>> {
-        let uri: ResourceUri = uri.parse().map_err(|_| resource::Error::InvalidArgument)?;
+    ) -> wasmtime::Result<Result<Vec<u8>, resource::Failure>> {
+        if size > MAX_COMPONENT_RESOURCE_READ {
+            return Ok(Err(resource_failure(
+                "unsupported",
+                format!(
+                    "component resource reads are limited to {MAX_COMPONENT_RESOURCE_READ} bytes"
+                ),
+            )));
+        }
+        let uri: ResourceUri = uri
+            .parse()
+            .map_err(|_| resource_failure("invalid_argument", "invalid resource URI"))?;
         Ok(self
             .host
             .read(&uri, offset, size)
@@ -93,8 +105,10 @@ impl resource::Host for ResourceContext {
         uri: String,
         offset: u64,
         data: Vec<u8>,
-    ) -> wasmtime::Result<Result<u32, resource::Error>> {
-        let uri: ResourceUri = uri.parse().map_err(|_| resource::Error::InvalidArgument)?;
+    ) -> wasmtime::Result<Result<u32, resource::Failure>> {
+        let uri: ResourceUri = uri
+            .parse()
+            .map_err(|_| resource_failure("invalid_argument", "invalid resource URI"))?;
         let kernel = self.host.kernel();
         let result = kernel.write_uri(&uri, offset, &data).await;
         if matches!(result, Err(ref error) if error.code == ResourceErrorCode::NotFound)
@@ -115,8 +129,10 @@ impl resource::Host for ResourceContext {
         &mut self,
         uri: String,
         size: u64,
-    ) -> wasmtime::Result<Result<(), resource::Error>> {
-        let uri: ResourceUri = uri.parse().map_err(|_| resource::Error::InvalidArgument)?;
+    ) -> wasmtime::Result<Result<(), resource::Failure>> {
+        let uri: ResourceUri = uri
+            .parse()
+            .map_err(|_| resource_failure("invalid_argument", "invalid resource URI"))?;
         Ok(self
             .host
             .kernel()
@@ -124,11 +140,52 @@ impl resource::Host for ResourceContext {
             .await
             .map_err(map_resource_error))
     }
+    async fn replace(
+        &mut self,
+        uri: String,
+        data: Vec<u8>,
+    ) -> wasmtime::Result<Result<u64, resource::Failure>> {
+        let uri: ResourceUri = uri
+            .parse()
+            .map_err(|_| resource_failure("invalid_argument", "invalid resource URI"))?;
+        let kernel = self.host.kernel();
+        let initial = kernel.replace_uri(&uri, &data).await;
+        let initial = match initial {
+            Err(error) if error.code == ResourceErrorCode::NotFound => {
+                kernel
+                    .create_file_uri(&uri)
+                    .await
+                    .map(|_| ())
+                    .map_err(map_resource_error)?;
+                kernel.replace_uri(&uri, &data).await
+            }
+            other => other,
+        };
+        Ok(match initial {
+            Ok(written) => Ok(written),
+            Err(error) if error.code == ResourceErrorCode::Unsupported => {
+                if let Err(error) = self.host.kernel().set_size_uri(&uri, 0).await {
+                    Err(map_resource_error(error))
+                } else {
+                    match self.host.kernel().write_uri(&uri, 0, &data).await {
+                        Ok(written) if written as usize == data.len() => Ok(written as u64),
+                        Ok(_written) => {
+                            Err(resource_failure("io", "resource write completed partially"))
+                        }
+                        Err(error) => Err(map_resource_error(error)),
+                    }
+                }
+            }
+            Err(error) => Err(map_resource_error(error)),
+        })
+    }
     async fn readdir(
         &mut self,
         uri: String,
-    ) -> wasmtime::Result<Result<Vec<resource::Entry>, resource::Error>> {
-        let uri: ResourceUri = uri.parse().map_err(|_| resource::Error::InvalidArgument)?;
+    ) -> wasmtime::Result<Result<Vec<resource::Entry>, resource::Failure>> {
+        let uri: ResourceUri = uri
+            .parse()
+            .map_err(|_| resource_failure("invalid_argument", "invalid resource URI"))?;
         let entries = self
             .host
             .kernel()
@@ -151,13 +208,13 @@ impl resource::Host for ResourceContext {
         &mut self,
         source: String,
         destination: String,
-    ) -> wasmtime::Result<Result<(), resource::Error>> {
+    ) -> wasmtime::Result<Result<(), resource::Failure>> {
         let source: ResourceUri = source
             .parse()
-            .map_err(|_| resource::Error::InvalidArgument)?;
-        let destination: ResourceUri = destination
-            .parse()
-            .map_err(|_| resource::Error::InvalidArgument)?;
+            .map_err(|_| resource_failure("invalid_argument", "invalid source resource URI"))?;
+        let destination: ResourceUri = destination.parse().map_err(|_| {
+            resource_failure("invalid_argument", "invalid destination resource URI")
+        })?;
         Ok(self
             .host
             .kernel()
@@ -165,8 +222,10 @@ impl resource::Host for ResourceContext {
             .await
             .map_err(map_resource_error))
     }
-    async fn delete(&mut self, uri: String) -> wasmtime::Result<Result<(), resource::Error>> {
-        let uri: ResourceUri = uri.parse().map_err(|_| resource::Error::InvalidArgument)?;
+    async fn delete(&mut self, uri: String) -> wasmtime::Result<Result<(), resource::Failure>> {
+        let uri: ResourceUri = uri
+            .parse()
+            .map_err(|_| resource_failure("invalid_argument", "invalid resource URI"))?;
         Ok(self
             .host
             .kernel()
@@ -176,18 +235,33 @@ impl resource::Host for ResourceContext {
     }
 }
 
-fn map_resource_error(error: artist_kernel::ResourceError) -> resource::Error {
-    match error.code {
-        ResourceErrorCode::InvalidAddress => resource::Error::InvalidArgument,
-        ResourceErrorCode::NotFound => resource::Error::NotFound,
-        ResourceErrorCode::PermissionDenied => resource::Error::PermissionDenied,
-        ResourceErrorCode::Unsupported => resource::Error::Unsupported,
-        ResourceErrorCode::Conflict => resource::Error::Conflict,
-        _ => resource::Error::Io,
+fn resource_failure(code: impl Into<String>, message: impl Into<String>) -> resource::Failure {
+    resource::Failure {
+        code: code.into(),
+        message: message.into(),
+        details: None,
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+fn map_resource_error(error: artist_kernel::ResourceError) -> resource::Failure {
+    let code = match error.code {
+        ResourceErrorCode::InvalidAddress => "invalid_argument",
+        ResourceErrorCode::NotFound => "not_found",
+        ResourceErrorCode::NotDir => "not_directory",
+        ResourceErrorCode::IsDir => "is_directory",
+        ResourceErrorCode::Unsupported => "unsupported",
+        ResourceErrorCode::Unavailable => "unavailable",
+        ResourceErrorCode::Io => "io",
+        ResourceErrorCode::Component => "component",
+        ResourceErrorCode::Cancelled => "cancelled",
+        ResourceErrorCode::Timeout => "timeout",
+        ResourceErrorCode::Conflict => "conflict",
+        ResourceErrorCode::PermissionDenied => "permission_denied",
+    };
+    resource_failure(code, error.message)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToolError {
     InvalidArgument,
     NotFound,
@@ -197,18 +271,19 @@ pub enum ToolError {
     Aborted,
     Internal,
     Unavailable,
+    Detailed {
+        code: String,
+        message: String,
+        details: Option<String>,
+    },
 }
 
-impl From<tool::Error> for ToolError {
-    fn from(error: tool::Error) -> Self {
-        match error {
-            tool::Error::InvalidArgument => Self::InvalidArgument,
-            tool::Error::NotFound => Self::NotFound,
-            tool::Error::Unsupported => Self::Unsupported,
-            tool::Error::PermissionDenied => Self::PermissionDenied,
-            tool::Error::Conflict => Self::Conflict,
-            tool::Error::Aborted => Self::Aborted,
-            tool::Error::Internal => Self::Internal,
+impl From<tool::Failure> for ToolError {
+    fn from(error: tool::Failure) -> Self {
+        Self::Detailed {
+            code: error.code,
+            message: error.message,
+            details: error.details,
         }
     }
 }

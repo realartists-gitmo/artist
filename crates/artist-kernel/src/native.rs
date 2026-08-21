@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File, ReadDir};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
@@ -14,6 +15,9 @@ use crate::provider::{
 };
 use crate::uri::ResourceUri;
 use crate::vfs::{Attrs, DirEntry, Ino, NodeKind, VfsError};
+
+static NEXT_REPLACEMENT_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_NATIVE_READ: u32 = 64 * 1024 * 1024;
 
 fn to_vfs(ino: Ino, attrs: ProviderAttrs) -> Attrs {
     Attrs {
@@ -398,7 +402,9 @@ impl ResourceProvider for FilesNamespace {
         let mut file = File::open(&path).map_err(|e| io_error(e, &path))?;
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| io_error(e, &path))?;
-        let mut buffer = vec![0; size as usize];
+        // A resource read is a bounded slice, not permission to allocate an
+        // arbitrary `u32`-sized buffer on behalf of a caller.
+        let mut buffer = vec![0; size.min(MAX_NATIVE_READ) as usize];
         let count = file.read(&mut buffer).map_err(|e| io_error(e, &path))?;
         buffer.truncate(count);
         Ok(buffer)
@@ -449,6 +455,54 @@ impl ResourceProvider for FilesNamespace {
             .open(&path)
             .map_err(|e| io_error(e, &path))?;
         file.set_len(size).map_err(|e| io_error(e, &path))
+    }
+
+    async fn replace_all(&self, uri: &ResourceUri, data: &[u8]) -> Result<u64, ResourceError> {
+        reject_mutation_query(uri)?;
+        let path = self.host_path(uri)?;
+        let metadata = fs::metadata(&path).map_err(|e| io_error(e, &path))?;
+        if metadata.is_dir() {
+            return Err(ResourceError::new(
+                ResourceErrorCode::IsDir,
+                "cannot replace a directory",
+            ));
+        }
+        let parent = path.parent().ok_or_else(|| {
+            ResourceError::new(
+                ResourceErrorCode::InvalidAddress,
+                "resource has no replaceable parent directory",
+            )
+        })?;
+        let file_name = path.file_name().ok_or_else(|| {
+            ResourceError::new(
+                ResourceErrorCode::InvalidAddress,
+                "resource has no file name",
+            )
+        })?;
+        let temporary = parent.join(format!(
+            ".{}.artist-replace-{}",
+            file_name.to_string_lossy(),
+            NEXT_REPLACEMENT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|e| io_error(e, &temporary))?;
+            file.write_all(data).map_err(|e| io_error(e, &temporary))?;
+            file.sync_all().map_err(|e| io_error(e, &temporary))?;
+            drop(file);
+            atomic_replace_path(&temporary, &path).map_err(|e| io_error(e, &path))?;
+            if let Ok(directory) = fs::File::open(parent) {
+                let _ = directory.sync_all();
+            }
+            Ok::<u64, ResourceError>(data.len() as u64)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 
     async fn create_file(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
@@ -513,6 +567,34 @@ impl ResourceProvider for FilesNamespace {
             fs::remove_dir(&path).map_err(|e| io_error(e, &path))
         } else {
             fs::remove_file(&path).map_err(|e| io_error(e, &path))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_path(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(temporary, destination)
+}
+
+#[cfg(windows)]
+fn atomic_replace_path(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    let backup = temporary.with_extension("artist-backup");
+    if backup.exists() {
+        fs::remove_file(&backup)?;
+    }
+    if destination.exists() {
+        fs::rename(destination, &backup)?;
+    }
+    match fs::rename(temporary, destination) {
+        Ok(()) => {
+            let _ = fs::remove_file(&backup);
+            Ok(())
+        }
+        Err(error) => {
+            if backup.exists() && !destination.exists() {
+                let _ = fs::rename(&backup, destination);
+            }
+            Err(error)
         }
     }
 }

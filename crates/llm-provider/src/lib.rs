@@ -6,6 +6,7 @@
 //! rest of Artist.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
@@ -14,11 +15,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+pub mod catalog;
 pub mod codec;
 pub mod openai;
 
+pub use catalog::ProviderCatalog;
 pub use codec::{StandardToolPayloadCodec, ToolPayloadCodec, ToolPayloadError, ToolWireMode};
 pub use openai::{OpenAiProvider, OpenAiRetryPolicy};
+pub use openai::{ResolvedResource, ResourceResolver};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Role {
@@ -118,6 +122,10 @@ pub struct ModelRequest {
     pub temperature: Option<f32>,
     pub max_output_tokens: Option<u32>,
     pub metadata: Value,
+    /// Provider-neutral structured-output request. Provider components may
+    /// translate this into their native response-format contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -133,6 +141,10 @@ pub struct ModelResponse {
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
     pub usage: Usage,
+    #[serde(default)]
+    pub refusal: Option<String>,
+    #[serde(default)]
+    pub incomplete: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -143,6 +155,9 @@ pub enum ModelEvent {
         text: String,
     },
     ReasoningDelta {
+        text: String,
+    },
+    RefusalDelta {
         text: String,
     },
     ToolCallDelta {
@@ -158,6 +173,290 @@ pub enum ModelEvent {
     },
 }
 
+/// Stable identity for a configured provider instance. It is intentionally
+/// separate from a display name or provider type so two accounts/endpoints
+/// can coexist and a session can replay the exact selected configuration.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProviderConfigId(String);
+
+impl ProviderConfigId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProviderConfigError> {
+        let value = value.into();
+        if value.trim().is_empty()
+            || value.contains('/')
+            || value.contains('\\')
+            || value.contains('\0')
+        {
+            return Err(ProviderConfigError::InvalidId(value));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProviderConfigId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderAuth {
+    None,
+    ApiKey {
+        secret: String,
+    },
+    ChatGptOAuth {
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_at_ms: Option<u64>,
+    },
+}
+
+impl ProviderAuth {
+    pub fn redacted_kind(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ApiKey { .. } => "api_key",
+            Self::ChatGptOAuth { .. } => "chatgpt_oauth",
+        }
+    }
+}
+
+impl fmt::Debug for ProviderAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderAuth")
+            .field("kind", &self.redacted_kind())
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+pub struct ProviderConfig {
+    pub id: ProviderConfigId,
+    pub provider_type: String,
+    pub endpoint: Option<String>,
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub options: Value,
+    pub auth: ProviderAuth,
+}
+
+impl fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("id", &self.id)
+            .field("provider_type", &self.provider_type)
+            .field("endpoint", &self.endpoint)
+            .field("default_model", &self.default_model)
+            .field("options", &redacted_value(&self.options))
+            .field("auth", &self.auth)
+            .finish()
+    }
+}
+
+fn redacted_value(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    let normalized = key.to_ascii_lowercase().replace('-', "_");
+                    let redacted = [
+                        "api_key",
+                        "apikey",
+                        "authorization",
+                        "access_token",
+                        "client_secret",
+                        "credential",
+                        "password",
+                        "refresh_token",
+                        "secret",
+                        "token",
+                    ]
+                    .contains(&normalized.as_str());
+                    (
+                        key.clone(),
+                        if redacted {
+                            Value::String("[REDACTED]".into())
+                        } else {
+                            redacted_value(value)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.iter().map(redacted_value).collect()),
+        _ => value.clone(),
+    }
+}
+
+impl ProviderConfig {
+    pub fn validate(&self) -> Result<(), ProviderConfigError> {
+        if self.provider_type.trim().is_empty() {
+            return Err(ProviderConfigError::Invalid(
+                "provider type cannot be empty".into(),
+            ));
+        }
+        if let Some(endpoint) = &self.endpoint {
+            let parsed = url::Url::parse(endpoint)
+                .map_err(|error| ProviderConfigError::Invalid(error.to_string()))?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(ProviderConfigError::Invalid(
+                    "provider endpoint must use HTTP(S)".into(),
+                ));
+            }
+        }
+        match &self.auth {
+            ProviderAuth::ApiKey { secret } if secret.trim().is_empty() => Err(
+                ProviderConfigError::Invalid("API key cannot be empty".into()),
+            ),
+            ProviderAuth::ChatGptOAuth { access_token, .. } if access_token.trim().is_empty() => {
+                Err(ProviderConfigError::Invalid(
+                    "OAuth access token cannot be empty".into(),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ProviderConfigError {
+    #[error("invalid provider configuration id {0:?}")]
+    InvalidId(String),
+    #[error("provider configuration {0} already exists")]
+    Duplicate(ProviderConfigId),
+    #[error("provider configuration {0} is not registered")]
+    Unknown(ProviderConfigId),
+    #[error("provider type {0:?} is not installed")]
+    UnknownType(String),
+    #[error("provider configuration is invalid: {0}")]
+    Invalid(String),
+    #[error("provider configuration authentication failed: {0}")]
+    Authentication(String),
+}
+
+/// Component-side factory boundary. Authentication, endpoint interpretation,
+/// refresh, and provider-specific options stay behind this socket.
+pub trait ProviderComponent: Send + Sync {
+    fn provider_type(&self) -> &str;
+    fn configure(
+        &self,
+        config: &ProviderConfig,
+    ) -> Result<Arc<dyn ModelProvider>, ProviderConfigError>;
+
+    fn configure_with_resource_resolver(
+        &self,
+        config: &ProviderConfig,
+        _resolver: Option<Arc<dyn ResourceResolver>>,
+    ) -> Result<Arc<dyn ModelProvider>, ProviderConfigError> {
+        self.configure(config)
+    }
+
+    fn authenticator(&self, _config: &ProviderConfig) -> Option<Arc<dyn ProviderAuthenticator>> {
+        None
+    }
+}
+
+/// Authentication behavior belongs to the provider component that owns the
+/// scheme. The daemon stores only the selected configuration identity and
+/// never receives a provider-specific refresh implementation.
+#[async_trait::async_trait]
+pub trait ProviderAuthenticator: Send + Sync {
+    async fn refresh(&self, auth: &ProviderAuth) -> Result<ProviderAuth, ProviderError>;
+}
+
+/// Provider types restored as component identities. The catalogue contains
+/// identities and truthful baseline capabilities; network implementations are
+/// installed by components, with OpenAI supplied by this crate.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ProviderKind {
+    Anthropic,
+    AzureOpenAi,
+    ChatGpt,
+    Cohere,
+    GitHubCopilot,
+    DeepSeek,
+    Gemini,
+    Groq,
+    HuggingFace,
+    Hyperbolic,
+    Llamafile,
+    MiniMax,
+    Mira,
+    Mistral,
+    Moonshot,
+    Ollama,
+    OpenAi,
+    OpenRouter,
+    Perplexity,
+    Together,
+    Xai,
+    XiaomiMiMo,
+    Zai,
+}
+
+impl ProviderKind {
+    pub const ALL: [Self; 23] = [
+        Self::Anthropic,
+        Self::AzureOpenAi,
+        Self::ChatGpt,
+        Self::Cohere,
+        Self::GitHubCopilot,
+        Self::DeepSeek,
+        Self::Gemini,
+        Self::Groq,
+        Self::HuggingFace,
+        Self::Hyperbolic,
+        Self::Llamafile,
+        Self::MiniMax,
+        Self::Mira,
+        Self::Mistral,
+        Self::Moonshot,
+        Self::Ollama,
+        Self::OpenAi,
+        Self::OpenRouter,
+        Self::Perplexity,
+        Self::Together,
+        Self::Xai,
+        Self::XiaomiMiMo,
+        Self::Zai,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::AzureOpenAi => "azure_openai",
+            Self::ChatGpt => "chatgpt",
+            Self::Cohere => "cohere",
+            Self::GitHubCopilot => "github_copilot",
+            Self::DeepSeek => "deepseek",
+            Self::Gemini => "gemini",
+            Self::Groq => "groq",
+            Self::HuggingFace => "huggingface",
+            Self::Hyperbolic => "hyperbolic",
+            Self::Llamafile => "llamafile",
+            Self::MiniMax => "minimax",
+            Self::Mira => "mira",
+            Self::Mistral => "mistral",
+            Self::Moonshot => "moonshot",
+            Self::Ollama => "ollama",
+            Self::OpenAi => "openai",
+            Self::OpenRouter => "openrouter",
+            Self::Perplexity => "perplexity",
+            Self::Together => "together",
+            Self::Xai => "xai",
+            Self::XiaomiMiMo => "xiaomi_mimo",
+            Self::Zai => "zai",
+        }
+    }
+}
+
 #[derive(Debug, Error, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ProviderError {
     #[error("provider authentication failed: {message}")]
@@ -171,6 +470,8 @@ pub enum ProviderError {
     Request { message: String },
     #[error("provider returned an invalid response: {message}")]
     InvalidResponse { message: String },
+    #[error("provider context limit exceeded: {message}")]
+    ContextLimit { message: String },
     #[error("provider operation was cancelled")]
     Cancelled,
     #[error("provider does not support {feature}")]
@@ -213,6 +514,8 @@ pub enum ProviderRegistryError {
 #[derive(Default)]
 pub struct ProviderRegistry {
     providers: RwLock<BTreeMap<String, Arc<dyn ModelProvider>>>,
+    configurations: RwLock<BTreeMap<ProviderConfigId, ProviderConfig>>,
+    configured_providers: RwLock<BTreeMap<ProviderConfigId, Arc<dyn ModelProvider>>>,
 }
 
 impl ProviderRegistry {
@@ -237,6 +540,67 @@ impl ProviderRegistry {
 
     pub fn names(&self) -> Vec<String> {
         self.providers.read().unwrap().keys().cloned().collect()
+    }
+
+    pub fn register_configuration(
+        &self,
+        config: ProviderConfig,
+        provider: Arc<dyn ModelProvider>,
+    ) -> Result<(), ProviderConfigError> {
+        config.validate()?;
+        let mut configurations = self.configurations.write().unwrap();
+        if configurations.contains_key(&config.id) {
+            return Err(ProviderConfigError::Duplicate(config.id));
+        }
+        let id = config.id.clone();
+        configurations.insert(id.clone(), config);
+        drop(configurations);
+        // Keep the stable configuration identity separate from the
+        // provider-type index: multiple configured accounts may share one
+        // display/provider name.
+        self.configured_providers
+            .write()
+            .unwrap()
+            .insert(id, Arc::clone(&provider));
+        self.providers
+            .write()
+            .unwrap()
+            .entry(provider.provider_name().to_owned())
+            .or_insert(provider);
+        Ok(())
+    }
+
+    pub fn configuration(
+        &self,
+        id: &ProviderConfigId,
+    ) -> Result<ProviderConfig, ProviderConfigError> {
+        self.configurations
+            .read()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ProviderConfigError::Unknown(id.clone()))
+    }
+
+    pub fn configuration_ids(&self) -> Vec<ProviderConfigId> {
+        self.configurations
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    pub fn get_configured(
+        &self,
+        id: &ProviderConfigId,
+    ) -> Result<Arc<dyn ModelProvider>, ProviderConfigError> {
+        self.configured_providers
+            .read()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ProviderConfigError::Unknown(id.clone()))
     }
 }
 
@@ -278,6 +642,7 @@ mod tests {
             temperature: None,
             max_output_tokens: Some(128),
             metadata: serde_json::json!({"request_id": "r1"}),
+            structured_output: None,
         };
         let encoded = serde_json::to_string(&request).unwrap();
         assert_eq!(

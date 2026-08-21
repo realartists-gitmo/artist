@@ -24,7 +24,8 @@ pub struct FindRequest {
     pub uri: String,
     pub query: String,
     pub limit: Option<u32>,
-    pub cursor: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -43,7 +44,7 @@ pub struct FindResult {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct FindResponse {
     pub results: Vec<FindResult>,
-    pub next_cursor: Option<String>,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,7 +52,6 @@ pub enum FindError {
     InvalidUri(String),
     UnsupportedNamespace(String),
     InvalidQuery(String),
-    InvalidCursor(String),
     OutsideRoot(String),
     Backend(String),
 }
@@ -64,7 +64,6 @@ impl std::fmt::Display for FindError {
                 write!(f, "find does not support namespace: {value}")
             }
             Self::InvalidQuery(value) => write!(f, "invalid find query: {value}"),
-            Self::InvalidCursor(value) => write!(f, "invalid find cursor: {value}"),
             Self::OutsideRoot(value) => write!(f, "find URI is outside the indexed root: {value}"),
             Self::Backend(value) => write!(f, "find backend failed: {value}"),
         }
@@ -79,15 +78,29 @@ pub trait FindBackend: Send + Sync {
         &self,
         root: &ResourceUri,
         query: &str,
-        offset: usize,
         limit: usize,
     ) -> Result<FindPage, FindError>;
+
+    async fn find_with_mode(
+        &self,
+        root: &ResourceUri,
+        query: &str,
+        limit: usize,
+        mode: &str,
+    ) -> Result<FindPage, FindError> {
+        if mode != "fuzzy" {
+            return Err(FindError::Backend(format!(
+                "find mode {mode:?} is not supported by this resource backend"
+            )));
+        }
+        self.find(root, query, limit).await
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FindPage {
     pub results: Vec<FindResult>,
-    pub next_offset: Option<usize>,
+    pub truncated: bool,
 }
 
 pub struct FindVerb<B> {
@@ -123,14 +136,14 @@ impl<B: FindBackend + 'static> VerbTool<FindRequest, FindResponse> for FindVerb<
                 if request.query.trim().is_empty() {
                     return Err(FindError::InvalidQuery("query must not be empty".into()));
                 }
-                let offset = parse_cursor(request.cursor.as_deref())?;
+                let (mode, query) = normalize_query(request.mode.as_deref(), &request.query)?;
                 let page = self
                     .backend
-                    .find(&root, &request.query, offset, limit)
+                    .find_with_mode(&root, &query, limit, &mode)
                     .await?;
                 Ok(FindResponse {
                     results: page.results,
-                    next_cursor: page.next_offset.map(|value| value.to_string()),
+                    truncated: page.truncated,
                 })
             }
             .await
@@ -141,13 +154,38 @@ impl<B: FindBackend + 'static> VerbTool<FindRequest, FindResponse> for FindVerb<
     }
 }
 
+fn normalize_query(mode: Option<&str>, query: &str) -> Result<(String, String), FindError> {
+    let (prefix_mode, query) = [
+        ("glob:", "glob"),
+        ("lit:", "literal"),
+        ("literal:", "literal"),
+        ("fuzzy:", "fuzzy"),
+    ]
+    .into_iter()
+    .find_map(|(prefix, mode)| query.strip_prefix(prefix).map(|query| (mode, query)))
+    .map_or((None, query), |(mode, query)| (Some(mode), query));
+    let mode = mode.or(prefix_mode).unwrap_or_else(|| {
+        if has_wildcards(query) {
+            "glob"
+        } else {
+            "fuzzy"
+        }
+    });
+    if !matches!(mode, "literal" | "glob" | "fuzzy") {
+        return Err(FindError::InvalidQuery(format!(
+            "unsupported find mode {mode:?}"
+        )));
+    }
+    if query.trim().is_empty() {
+        return Err(FindError::InvalidQuery("query must not be empty".into()));
+    }
+    Ok((mode.to_owned(), query.to_owned()))
+}
+
 fn parse_search_root(value: &str) -> Result<ResourceUri, FindError> {
     let uri = value
         .parse::<ResourceUri>()
         .map_err(|error| FindError::InvalidUri(error.to_string()))?;
-    if uri.scheme() != "file" || !uri.authority().is_empty() {
-        return Err(FindError::UnsupportedNamespace(value.into()));
-    }
     if uri.query().is_some() || uri.fragment().is_some() {
         return Err(FindError::InvalidUri(
             "find roots cannot contain queries or fragments".into(),
@@ -156,19 +194,11 @@ fn parse_search_root(value: &str) -> Result<ResourceUri, FindError> {
     Ok(uri)
 }
 
-fn parse_cursor(value: Option<&str>) -> Result<usize, FindError> {
-    value
-        .unwrap_or("0")
-        .parse()
-        .map_err(|_| FindError::InvalidCursor(value.unwrap_or_default().into()))
-}
-
 fn map_error(error: FindError) -> VerbError {
     match error {
         FindError::InvalidUri(_)
         | FindError::UnsupportedNamespace(_)
         | FindError::InvalidQuery(_)
-        | FindError::InvalidCursor(_)
         | FindError::OutsideRoot(_) => VerbError::InvalidArgument,
         FindError::Backend(_) => VerbError::Internal,
     }
@@ -244,8 +274,22 @@ impl FindBackend for FffFindIndex {
         &self,
         root: &ResourceUri,
         query: &str,
-        offset: usize,
         limit: usize,
+    ) -> Result<FindPage, FindError> {
+        let mode = if has_wildcards(query) {
+            "glob"
+        } else {
+            "fuzzy"
+        };
+        self.find_with_mode(root, query, limit, mode).await
+    }
+
+    async fn find_with_mode(
+        &self,
+        root: &ResourceUri,
+        query: &str,
+        limit: usize,
+        mode: &str,
     ) -> Result<FindPage, FindError> {
         let relative_root = self.relative_root(root)?;
         let guard = self
@@ -256,25 +300,35 @@ impl FindBackend for FffFindIndex {
             .as_ref()
             .ok_or_else(|| FindError::Backend("FFF index is not initialized".into()))?;
 
-        let fff_query = if has_wildcards(query) {
-            FFFQuery {
+        let fff_query = match mode {
+            "glob" => FFFQuery {
                 raw_query: query,
                 constraints: vec![Constraint::Glob(query)],
                 fuzzy_query: FuzzyQuery::Empty,
                 location: None,
-            }
-        } else {
-            FFFQuery {
+            },
+            "literal" => FFFQuery {
+                raw_query: query,
+                constraints: vec![Constraint::Text(query)],
+                fuzzy_query: FuzzyQuery::Empty,
+                location: None,
+            },
+            "fuzzy" => FFFQuery {
                 raw_query: query,
                 constraints: vec![],
                 fuzzy_query: FuzzyQuery::Text(query),
                 location: None,
+            },
+            other => {
+                return Err(FindError::InvalidQuery(format!(
+                    "unsupported find mode {other:?}"
+                )));
             }
         };
 
-        let mut backend_offset = offset;
+        let mut backend_offset = 0;
         let mut results = Vec::with_capacity(limit);
-        let mut next_offset = None;
+        let mut truncated = false;
         while results.len() < limit {
             let raw = picker.fuzzy_search_mixed(
                 &fff_query,
@@ -290,7 +344,7 @@ impl FindBackend for FffFindIndex {
             let raw_len = raw.items.len();
             let raw_total = raw.total_matched;
             let mut consumed = 0usize;
-            for (item, score) in raw.items.into_iter().zip(raw.scores.into_iter()) {
+            for (item, score) in raw.items.into_iter().zip(raw.scores) {
                 consumed += 1;
                 let (relative, kind) = match item {
                     MixedItemRef::File(file) => (file.relative_path(picker), FindKind::File),
@@ -303,19 +357,19 @@ impl FindBackend for FffFindIndex {
                 let result_uri = uri_for_relative(root, relative, relative_root)?;
                 results.push((result_uri, kind, score.total));
                 if results.len() == limit {
+                    truncated = true;
                     break;
                 }
             }
             backend_offset = backend_offset.saturating_add(consumed);
             if consumed < raw_len {
-                next_offset = Some(backend_offset);
+                truncated = true;
                 break;
             }
             if raw_len < limit || backend_offset >= raw_total {
-                next_offset = None;
                 break;
             }
-            next_offset = Some(backend_offset);
+            truncated = true;
         }
 
         results.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
@@ -324,7 +378,7 @@ impl FindBackend for FffFindIndex {
                 .into_iter()
                 .map(|(uri, kind, _score)| FindResult { uri, kind })
                 .collect(),
-            next_offset,
+            truncated,
         })
     }
 }
@@ -369,7 +423,6 @@ mod tests {
             &self,
             root: &ResourceUri,
             query: &str,
-            _offset: usize,
             _limit: usize,
         ) -> Result<FindPage, FindError> {
             Ok(FindPage {
@@ -377,24 +430,24 @@ mod tests {
                     uri: format!("{root}/main.rs"),
                     kind: FindKind::File,
                 }],
-                next_offset: if query == "again" { Some(1) } else { None },
+                truncated: query == "again",
             })
         }
     }
 
     #[tokio::test]
-    async fn find_preserves_request_order_and_opaque_cursor() {
+    async fn find_reports_truncation_without_a_cursor() {
         let verb = FindVerb::new(Fake);
         let results = verb
             .call(vec![FindRequest {
                 uri: "src".into(),
                 query: "again".into(),
                 limit: Some(10),
-                cursor: None,
+                mode: None,
             }])
             .await;
         let response = results[0].as_ref().unwrap();
-        assert_eq!(response.next_cursor.as_deref(), Some("1"));
+        assert!(response.truncated);
     }
 
     #[test]
@@ -425,7 +478,7 @@ mod tests {
         assert!(index.wait_for_scan(Duration::from_secs(10)));
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let page = runtime
-            .block_on(index.find(&ResourceUri::from_path("src").unwrap(), "*.rs", 0, 20))
+            .block_on(index.find(&ResourceUri::from_path("src").unwrap(), "*.rs", 20))
             .unwrap();
 
         assert!(page.results.iter().any(|result| {
@@ -441,7 +494,7 @@ mod tests {
                 .any(|result| result.uri == "file:///README.md")
         );
         let directories = runtime
-            .block_on(index.find(&ResourceUri::from_path("src").unwrap(), "nested", 0, 20))
+            .block_on(index.find(&ResourceUri::from_path("src").unwrap(), "nested", 20))
             .unwrap();
         assert!(directories.results.iter().any(|result| {
             result.uri == "file:///src/nested" && result.kind == FindKind::Directory

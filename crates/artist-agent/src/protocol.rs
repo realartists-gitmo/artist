@@ -80,10 +80,12 @@ impl RpcFrame {
     }
 
     pub fn to_line(&self) -> Result<String, FrameError> {
-        if let Self::Response { result, error, .. } = self {
-            if result.is_some() == error.is_some() {
-                return Err(FrameError::InvalidResponse);
-            }
+        let invalid_response = match self {
+            Self::Response { result, error, .. } => result.is_some() == error.is_some(),
+            _ => false,
+        };
+        if invalid_response {
+            return Err(FrameError::InvalidResponse);
         }
         Ok(format!("{}\n", serde_json::to_string(self)?))
     }
@@ -97,10 +99,12 @@ impl RpcFrame {
             return Err(FrameError::MultipleLines);
         }
         let frame: Self = serde_json::from_str(trimmed)?;
-        if let Self::Response { result, error, .. } = &frame {
-            if result.is_some() == error.is_some() {
-                return Err(FrameError::InvalidResponse);
-            }
+        let invalid_response = match &frame {
+            Self::Response { result, error, .. } => result.is_some() == error.is_some(),
+            _ => false,
+        };
+        if invalid_response {
+            return Err(FrameError::InvalidResponse);
         }
         Ok(frame)
     }

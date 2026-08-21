@@ -85,7 +85,18 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
         .expect("default prompt composition includes tool summary");
     assert!(tools.content.contains("read: read a file"));
 
-    let registered = ["edit", "find", "grep", "move", "read", "write"];
+    let (initial_read, ok) = runner
+        .call_toon("read", "uri: src/main.rs\nrange: -1..+2\n")
+        .await
+        .unwrap();
+    assert!(ok);
+    let initial_read = decode(&initial_read);
+    let first_anchor = initial_read["response"]["lines"][0]["anchor"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let registered = ["find", "grep", "move", "read", "write"];
     for verb in registered {
         let (listed, _) = runner
             .call_toon(
@@ -94,9 +105,6 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
                     "read" => "uri: src/main.rs\nrange: -1..+0\n",
                     "find" | "grep" => "uri: src\nquery: main\nlimit: 1\n",
                     "write" => "uri: registered.txt\ncontent: registered\n",
-                    "edit" => {
-                        "uri: src/main.rs\nchanges[1]{anchor,content}:\n  line:0,fn main() {\n"
-                    }
                     "move" => "source: missing\ndestination: missing2\n",
                     _ => unreachable!(),
                 },
@@ -106,25 +114,26 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
         assert!(!listed.is_empty());
     }
 
-    let (read, ok) = runner
-        .call_toon("read", "uri: src/main.rs\nrange: -1..+2\n")
-        .await
-        .unwrap();
-    assert!(ok);
-    let read = decode(&read);
-    assert_eq!(read["ok"], true);
-    assert_eq!(read["response"]["uri"], "file:///src/main.rs");
-    assert_eq!(read["response"]["lines"][0]["anchor"], "line:0");
+    assert_eq!(initial_read["ok"], true);
+    assert_eq!(initial_read["response"]["uri"], "file:///src/main.rs");
+    assert!(
+        initial_read["response"]["lines"][0]["anchor"]
+            .as_str()
+            .unwrap()
+            .starts_with("teca:v1:")
+    );
 
-    let (anchored, ok) = runner
-        .call_toon("read", "uri: \"src/main.rs#line:1\"\nrange: -1..+1\n")
-        .await
-        .unwrap();
+    let anchored_uri = format!("uri: \"src/main.rs#{first_anchor}\"\nrange: -1..+1\n");
+    let (anchored, ok) = runner.call_toon("read", &anchored_uri).await.unwrap();
     assert!(ok);
     let anchored = decode(&anchored);
-    assert_eq!(anchored["response"]["position"], "line:1");
-    assert_eq!(anchored["response"]["lines"][0]["anchor"], "line:0");
-    assert_eq!(anchored["response"]["lines"][1]["anchor"], "line:1");
+    assert_eq!(anchored["response"]["position"], first_anchor);
+    assert!(
+        anchored["response"]["lines"][0]["anchor"]
+            .as_str()
+            .unwrap()
+            .starts_with("teca:v1:")
+    );
 
     let (find, ok) = runner
         .call_toon("find", "uri: src\nquery: \"**/*.rs\"\nlimit: 20\n")
@@ -151,7 +160,18 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
     let grep = decode(&grep);
     let matches = grep["response"]["matches"].as_array().unwrap();
     assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0]["uri"], "file:///src/main.rs#2");
+    assert!(
+        matches[0]["uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("file:///src/main.rs#teca:v1:")
+    );
+    assert!(
+        matches[0]["anchor"]
+            .as_str()
+            .unwrap()
+            .starts_with("teca:v1:")
+    );
     assert!(matches[0]["content"].as_str().unwrap().contains("println"));
 
     let (grep_page, ok) = runner
@@ -164,7 +184,7 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
         grep_page["response"]["matches"].as_array().unwrap().len(),
         1
     );
-    assert!(grep_page["response"].get("next_cursor").is_some());
+    assert_eq!(grep_page["response"]["truncated"], true);
 
     let (first_page, ok) = runner
         .call_toon("find", "uri: src\nquery: \"**/*.rs\"\nlimit: 1\n")
@@ -176,7 +196,7 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
         first_page["response"]["results"].as_array().unwrap().len(),
         1
     );
-    assert!(first_page["response"].get("next_cursor").is_some());
+    assert_eq!(first_page["response"]["truncated"], true);
 
     let (written, ok) = runner
         .call_toon("write", "uri: created.txt\ncontent: \"first\"\n")
@@ -185,13 +205,12 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
     assert!(ok);
     assert_eq!(decode(&written)["ok"], true);
 
-    let (edited, ok) = runner
-        .call_toon(
-            "edit",
-            "uri: src/main.rs\nchanges[1]{anchor,content}:\n  line:1,    println!(\"changed\");\n",
-        )
-        .await
-        .unwrap();
+    let edit_payload = toon_format::encode_default(&serde_json::json!({
+        "uri": "src/main.rs",
+        "changes": [{"anchor": first_anchor, "content": "fn changed() {"}]
+    }))
+    .unwrap();
+    let (edited, ok) = runner.call_toon("edit", &edit_payload).await.unwrap();
     assert!(ok);
     assert_eq!(decode(&edited)["ok"], true);
     assert!(

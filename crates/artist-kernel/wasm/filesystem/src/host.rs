@@ -27,12 +27,13 @@ use crate::error::{FilesystemError, vfs_error_to_code};
 use crate::streams::{ReadDirProducer, ReadStreamProducer};
 
 type FsResult<T> = Result<T, FilesystemError>;
+type PendingWrite = Pin<Box<dyn Future<Output = Result<u32, ErrorCode>> + Send + 'static>>;
 
 struct WriteConsumer {
     vfs: Arc<dyn Vfs>,
     ino: artist_kernel::vfs::Ino,
     offset: u64,
-    pending: Option<Pin<Box<dyn Future<Output = Result<u32, ErrorCode>> + Send + 'static>>>,
+    pending: Option<PendingWrite>,
     pending_len: usize,
     result: Option<oneshot::Sender<Result<(), ErrorCode>>>,
 }

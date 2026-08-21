@@ -12,5 +12,6 @@ crate-type = ["cdylib"]
 wit-bindgen = "0.60.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
+regex = "1"
 toon-format = { version = "0.5", default-features = false }
-

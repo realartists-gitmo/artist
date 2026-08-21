@@ -26,7 +26,7 @@ pub use master::{
     UnavailableComponentLoader, add_to_linker as add_master_to_linker,
 };
 pub use runtime::{
-    ComponentRuntime, ExtensionDependency, ExtensionManager, ExtensionMetadata, GenerationHandle,
-    GenerationLease, HostEnvironment, KernelHostEnvironment, PreparedGeneration, Runtime,
-    RuntimeStore,
+    ComponentRuntime, EventRoleActivator, ExtensionDependency, ExtensionManager, ExtensionMetadata,
+    GenerationHandle, GenerationLease, HostEnvironment, KernelHostEnvironment, PreparedGeneration,
+    Runtime, RuntimeStore,
 };

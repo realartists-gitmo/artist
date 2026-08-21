@@ -166,6 +166,17 @@ pub trait ResourceProvider: Send + Sync {
         ))
     }
 
+    /// Replace the complete contents of a resource. Providers with an atomic
+    /// commit primitive should override this operation; the verb layer falls
+    /// back to truncate/write only when this operation is explicitly
+    /// unsupported.
+    async fn replace_all(&self, _uri: &ResourceUri, _data: &[u8]) -> Result<u64, ResourceError> {
+        Err(ResourceError::new(
+            ResourceErrorCode::Unsupported,
+            "provider does not support atomic URI replacement",
+        ))
+    }
+
     /// Create an empty regular resource at the exact destination URI.
     async fn create_file(&self, _uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
         Err(ResourceError::new(
@@ -346,6 +357,15 @@ impl ResourceProvider for LayeredResourceProvider {
         self.provider(layer).set_size(uri, size).await
     }
 
+    async fn replace_all(&self, uri: &ResourceUri, data: &[u8]) -> Result<u64, ResourceError> {
+        let layer = match self.visible(uri).await {
+            Ok(layer) => layer,
+            Err(error) if error.code == ResourceErrorCode::NotFound => Layer::Local,
+            Err(error) => return Err(error),
+        };
+        self.provider(layer).replace_all(uri, data).await
+    }
+
     async fn create_file(&self, uri: &ResourceUri) -> Result<ProviderAttrs, ResourceError> {
         self.local.create_file(uri).await
     }
@@ -360,13 +380,13 @@ impl ResourceProvider for LayeredResourceProvider {
         destination: &ResourceUri,
     ) -> Result<(), ResourceError> {
         let source_layer = self.visible(source).await?;
-        if let Ok(destination_layer) = self.visible(destination).await {
-            if std::mem::discriminant(&source_layer) != std::mem::discriminant(&destination_layer) {
-                return Err(ResourceError::new(
-                    ResourceErrorCode::Conflict,
-                    "layered move crosses local and global sources",
-                ));
-            }
+        if let Ok(destination_layer) = self.visible(destination).await
+            && std::mem::discriminant(&source_layer) != std::mem::discriminant(&destination_layer)
+        {
+            return Err(ResourceError::new(
+                ResourceErrorCode::Conflict,
+                "layered move crosses local and global sources",
+            ));
         }
         self.provider(source_layer)
             .move_resource(source, destination)

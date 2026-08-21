@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use artist_component::PermissionRegistry;
+use artist_component::ToolResultEnvelope;
 use artist_component::{ComponentToolRegistry, CompositionUpdate, ToolError};
 use artist_session::EventLog;
 use llm_provider::{Message, Role, ToolDefinition};
@@ -21,7 +22,32 @@ pub enum ToolSurfaceEvent {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct HarnessPolicy {
+    pub yield_schema: serde_json::Value,
+    pub allow_fork: bool,
+    pub allow_handoff: bool,
+}
+
+impl Default for HarnessPolicy {
+    fn default() -> Self {
+        Self {
+            yield_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "complete": {"type": "boolean"},
+                    "remaining": {"type": "string"}
+                },
+                "required": ["complete"],
+                "additionalProperties": false
+            }),
+            allow_fork: false,
+            allow_handoff: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ToolSurfaceError {
     Duplicate(String),
     Unknown(String),
@@ -50,7 +76,8 @@ pub struct ToolSurface {
     disabled: Arc<RwLock<BTreeSet<String>>>,
     pending_messages: Arc<Mutex<Vec<Message>>>,
     log: Option<Arc<EventLog>>,
-    permissions: Option<(String, PermissionRegistry)>,
+    permissions: Arc<RwLock<Option<(String, PermissionRegistry)>>>,
+    harness: Arc<RwLock<BTreeMap<String, ToolDefinition>>>,
 }
 
 impl std::fmt::Debug for ToolSurface {
@@ -71,7 +98,8 @@ impl ToolSurface {
             disabled: Arc::new(RwLock::new(BTreeSet::new())),
             pending_messages: Arc::new(Mutex::new(Vec::new())),
             log: None,
-            permissions: None,
+            permissions: Arc::new(RwLock::new(None)),
+            harness: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -81,16 +109,107 @@ impl ToolSurface {
     }
 
     pub fn with_permissions(
-        mut self,
+        self,
         profile: impl Into<String>,
         permissions: PermissionRegistry,
     ) -> Self {
-        self.permissions = Some((profile.into(), permissions));
+        *self.permissions.write().unwrap() = Some((profile.into(), permissions));
         self
+    }
+
+    /// Replace the active profile authorization without replacing the shared
+    /// component registry. Handoff and live profile updates use this seam.
+    pub fn set_permissions(&self, profile: impl Into<String>, permissions: PermissionRegistry) {
+        *self.permissions.write().unwrap() = Some((profile.into(), permissions));
+        self.recompute_enabled();
+    }
+
+    pub fn clear_permissions(&self) {
+        *self.permissions.write().unwrap() = None;
+        self.recompute_enabled();
+    }
+
+    /// Replace the profile's static tool contract while preserving dynamic
+    /// composition exports. Every definition is checked against the component
+    /// registry before it becomes active.
+    pub fn replace_static_definitions(
+        &self,
+        definitions: Vec<ToolDefinition>,
+    ) -> Result<(), ToolSurfaceError> {
+        for definition in &definitions {
+            if !self
+                .registry
+                .all_names()
+                .iter()
+                .any(|name| name == &definition.name)
+            {
+                return Err(ToolSurfaceError::Unknown(definition.name.clone()));
+            }
+        }
+        self.static_definitions.write().unwrap().clear();
+        for definition in definitions {
+            self.static_definitions
+                .write()
+                .unwrap()
+                .insert(definition.name.clone(), definition);
+        }
+        self.recompute_enabled();
+        Ok(())
     }
 
     pub fn registry(&self) -> &ComponentToolRegistry {
         &self.registry
+    }
+
+    /// Install the profile-derived harness surface. Harness verbs are
+    /// capability components at the model boundary, not kernel commands.
+    pub fn configure_harness(&self, policy: HarnessPolicy) {
+        let old_names: Vec<String> = self.harness.read().unwrap().keys().cloned().collect();
+        for name in old_names {
+            self.disabled.write().unwrap().remove(&name);
+        }
+        let mut harness = self.harness.write().unwrap();
+        harness.clear();
+        harness.insert(
+            "yield".into(),
+            ToolDefinition {
+                name: "yield".into(),
+                description: Some("Report completion state to the harness".into()),
+                input_schema: policy.yield_schema,
+            },
+        );
+        if policy.allow_fork {
+            harness.insert(
+                "fork".into(),
+                ToolDefinition {
+                    name: "fork".into(),
+                    description: Some("Run independent task briefs concurrently".into()),
+                    input_schema: serde_json::json!({
+                        "type":"object",
+                        "properties":{"tasks":{"type":"array","items":{"type":"string"}}},
+                        "required":["tasks"],
+                        "additionalProperties":false
+                    }),
+                },
+            );
+        }
+        if policy.allow_handoff {
+            harness.insert(
+                "handoff".into(),
+                ToolDefinition {
+                    name: "handoff".into(),
+                    description: Some("Switch to another profile with a brief".into()),
+                    input_schema: serde_json::json!({
+                        "type":"object",
+                        "properties":{"profile":{"type":"string"},"brief":{"type":"string"}},
+                        "required":["profile","brief"],
+                        "additionalProperties":false
+                    }),
+                },
+            );
+        }
+        drop(harness);
+        self.recompute_enabled();
     }
 
     pub fn register_initial(&self, definition: ToolDefinition) -> Result<(), ToolSurfaceError> {
@@ -106,7 +225,6 @@ impl ToolSurface {
             self.disable(&name);
         } else {
             self.disabled.write().unwrap().remove(&name);
-            self.registry.enable(&name);
         }
         Ok(())
     }
@@ -142,7 +260,6 @@ impl ToolSurface {
                 }
                 if self.allowed(&name) {
                     self.disabled.write().unwrap().remove(&name);
-                    self.registry.enable(&name);
                     self.pending_messages
                         .lock()
                         .unwrap()
@@ -175,14 +292,42 @@ impl ToolSurface {
     }
 
     fn allowed(&self, name: &str) -> bool {
+        // Harness verbs are supplied by the active profile policy itself.
+        // A profile's component-tool allow-list must not accidentally remove
+        // the yield/fork/handoff controls that the same profile explicitly
+        // enabled.
+        if self.harness.read().unwrap().contains_key(name) {
+            return true;
+        }
         self.permissions
+            .read()
+            .unwrap()
             .as_ref()
             .is_none_or(|(profile, permissions)| permissions.authorize(profile, name, ""))
     }
 
+    fn recompute_enabled(&self) {
+        let names: Vec<String> = self
+            .harness
+            .read()
+            .unwrap()
+            .keys()
+            .chain(self.static_definitions.read().unwrap().keys())
+            .chain(self.dynamic_definitions.read().unwrap().keys())
+            .cloned()
+            .collect();
+        let mut disabled = self.disabled.write().unwrap();
+        for name in names {
+            if self.allowed(&name) {
+                disabled.remove(&name);
+            } else {
+                disabled.insert(name.clone());
+            }
+        }
+    }
+
     fn disable(&self, name: &str) {
         self.disabled.write().unwrap().insert(name.to_owned());
-        self.registry.disable(name);
     }
 
     fn record(&self, event: ToolSurfaceEvent) -> Result<(), ToolSurfaceError> {
@@ -236,10 +381,11 @@ impl ToolSurface {
     /// intentionally do not appear here; they are announced inline.
     pub fn formal_definitions(&self) -> Vec<ToolDefinition> {
         let disabled = self.disabled.read().unwrap();
-        self.static_definitions
+        self.harness
             .read()
             .unwrap()
             .values()
+            .chain(self.static_definitions.read().unwrap().values())
             .filter(|definition| {
                 !disabled.contains(&definition.name) && self.allowed(&definition.name)
             })
@@ -250,10 +396,11 @@ impl ToolSurface {
     /// All currently enabled model-facing definitions, including dynamic ones.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let disabled = self.disabled.read().unwrap();
-        self.static_definitions
+        self.harness
             .read()
             .unwrap()
             .values()
+            .chain(self.static_definitions.read().unwrap().values())
             .chain(self.dynamic_definitions.read().unwrap().values())
             .filter(|definition| {
                 !disabled.contains(&definition.name) && self.allowed(&definition.name)
@@ -265,6 +412,104 @@ impl ToolSurface {
     pub fn take_messages(&self) -> Vec<Message> {
         std::mem::take(&mut *self.pending_messages.lock().unwrap())
     }
+
+    fn invoke_harness(
+        &self,
+        call: &llm_provider::ToolCall,
+    ) -> Result<Option<llm_provider::ToolResult>, crate::ToolError> {
+        if !self.harness.read().unwrap().contains_key(&call.name) {
+            return Ok(None);
+        }
+        if !self.allowed(&call.name) || self.disabled.read().unwrap().contains(&call.name) {
+            let envelope = ToolResultEnvelope {
+                ok: false,
+                output: None,
+                error: Some(artist_component::ToolFailure {
+                    code: "permission_denied".into(),
+                    message: format!("permission denied: {}", call.name),
+                    details: None,
+                }),
+            };
+            return Ok(Some(llm_provider::ToolResult {
+                call_id: call.id.clone(),
+                content: vec![llm_provider::ContentPart::Text {
+                    text: serde_json::to_string(&envelope).map_err(|error| {
+                        crate::ToolError::Failed {
+                            message: error.to_string(),
+                        }
+                    })?,
+                }],
+                is_error: true,
+            }));
+        }
+        let (event_type, payload) = match call.name.as_str() {
+            "yield" => {
+                let complete = call
+                    .arguments
+                    .get("complete")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| crate::ToolError::Failed {
+                        message: "yield.complete must be a boolean".into(),
+                    })?;
+                (
+                    "harness.yield",
+                    serde_json::json!({
+                        "complete": complete,
+                        "remaining": call.arguments.get("remaining"),
+                        "payload": call.arguments,
+                    }),
+                )
+            }
+            "fork" => {
+                let tasks = call
+                    .arguments
+                    .get("tasks")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| crate::ToolError::Failed {
+                        message: "fork.tasks must be an array".into(),
+                    })?;
+                ("harness.fork", serde_json::json!({"tasks": tasks}))
+            }
+            "handoff" => {
+                let profile = call
+                    .arguments
+                    .get("profile")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| crate::ToolError::Failed {
+                        message: "handoff.profile is required".into(),
+                    })?;
+                let brief = call
+                    .arguments
+                    .get("brief")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| crate::ToolError::Failed {
+                        message: "handoff.brief is required".into(),
+                    })?;
+                (
+                    "harness.handoff",
+                    serde_json::json!({"profile": profile, "brief": brief}),
+                )
+            }
+            _ => return Ok(None),
+        };
+        if let Some(log) = &self.log {
+            log.append(event_type, payload.clone())
+                .map_err(|error| crate::ToolError::Failed {
+                    message: format!("persist harness event: {error}"),
+                })?;
+        }
+        Ok(Some(llm_provider::ToolResult {
+            call_id: call.id.clone(),
+            content: vec![llm_provider::ContentPart::Text {
+                text: serde_json::to_string(&ToolResultEnvelope::success(payload)).map_err(
+                    |error| crate::ToolError::Failed {
+                        message: error.to_string(),
+                    },
+                )?,
+            }],
+            is_error: false,
+        }))
+    }
 }
 
 #[async_trait::async_trait]
@@ -273,51 +518,91 @@ impl crate::ToolInvoker for ToolSurface {
         &self,
         call: llm_provider::ToolCall,
     ) -> Result<llm_provider::ToolResult, crate::ToolError> {
+        if self.disabled.read().unwrap().contains(&call.name) {
+            let error = ToolError::Unavailable(call.name.clone());
+            let envelope = ToolResultEnvelope::failure(&error);
+            return Ok(llm_provider::ToolResult {
+                call_id: call.id,
+                content: vec![llm_provider::ContentPart::Text {
+                    text: serde_json::to_string(&envelope).map_err(|error| {
+                        crate::ToolError::Failed {
+                            message: error.to_string(),
+                        }
+                    })?,
+                }],
+                is_error: true,
+            });
+        }
+        if let Some(result) = self.invoke_harness(&call)? {
+            return Ok(result);
+        }
         let resource = call
             .arguments
             .get("uri")
             .or_else(|| call.arguments.get("source"))
+            .or_else(|| call.arguments.get("target"))
+            .or_else(|| call.arguments.get("process"))
+            .or_else(|| call.arguments.get("working_directory"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        if let Some((profile, permissions)) = &self.permissions {
-            if !permissions.authorize(profile, &call.name, resource) {
-                return Ok(llm_provider::ToolResult {
-                    call_id: call.id,
-                    content: vec![llm_provider::ContentPart::Text {
-                        text: format!("permission denied: {}", call.name),
-                    }],
-                    is_error: true,
+        let denied =
+            self.permissions
+                .read()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(profile, permissions)| {
+                    !permissions.authorize(profile, &call.name, resource)
                 });
-            }
+        if denied {
+            let envelope = ToolResultEnvelope {
+                ok: false,
+                output: None,
+                error: Some(artist_component::ToolFailure {
+                    code: "permission_denied".into(),
+                    message: format!("permission denied: {}", call.name),
+                    details: None,
+                }),
+            };
+            return Ok(llm_provider::ToolResult {
+                call_id: call.id,
+                content: vec![llm_provider::ContentPart::Text {
+                    text: serde_json::to_string(&envelope).map_err(|error| {
+                        crate::ToolError::Failed {
+                            message: error.to_string(),
+                        }
+                    })?,
+                }],
+                is_error: true,
+            });
         }
         let request = toon_format::encode_default(&call.arguments).map_err(|error| {
             crate::ToolError::Failed {
                 message: format!("encode tool request: {error}"),
             }
         })?;
-        let result = self.registry.invoke(&call.name, request.as_bytes()).await;
-        match result {
-            Ok(bytes) => {
-                let text =
-                    std::str::from_utf8(&bytes).map_err(|error| crate::ToolError::Failed {
+        let result = self
+            .registry
+            .invoke_enveloped(&call.name, request.as_bytes())
+            .await;
+        let bytes = result;
+        let text = std::str::from_utf8(&bytes).map_err(|error| crate::ToolError::Failed {
+            message: error.to_string(),
+        })?;
+        let envelope: ToolResultEnvelope =
+            serde_json::from_str(text).map_err(|error| crate::ToolError::Failed {
+                message: error.to_string(),
+            })?;
+        Ok(llm_provider::ToolResult {
+            call_id: call.id,
+            content: vec![llm_provider::ContentPart::Text {
+                text: serde_json::to_string(&envelope).map_err(|error| {
+                    crate::ToolError::Failed {
                         message: error.to_string(),
-                    })?;
-                Ok(llm_provider::ToolResult {
-                    call_id: call.id,
-                    content: vec![llm_provider::ContentPart::Text {
-                        text: text.to_owned(),
-                    }],
-                    is_error: false,
-                })
-            }
-            Err(error) => Ok(llm_provider::ToolResult {
-                call_id: call.id,
-                content: vec![llm_provider::ContentPart::Text {
-                    text: error.to_string(),
-                }],
-                is_error: true,
-            }),
-        }
+                    }
+                })?,
+            }],
+            is_error: !envelope.ok,
+        })
     }
 }
 
@@ -366,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn availability_events_update_both_projections() {
+    fn availability_events_update_surface_projection() {
         let registry = ComponentToolRegistry::new();
         registry.register(Echo).unwrap();
         let surface = ToolSurface::new(registry.clone());
@@ -384,10 +669,6 @@ mod tests {
             })
             .unwrap();
         assert!(surface.definitions().is_empty());
-        assert!(matches!(
-            futures::executor::block_on(registry.invoke("echo", b"x")),
-            Err(ToolError::Unavailable(_))
-        ));
         assert_eq!(surface.take_messages().len(), 1);
         surface
             .apply(ToolSurfaceEvent::Available {

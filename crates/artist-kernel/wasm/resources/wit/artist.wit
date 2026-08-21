@@ -30,6 +30,7 @@ interface provider {
     readdir: func(uri: string) -> result<list<entry>, error>;
     read: func(uri: string, offset: u64, size: u32) -> result<list<u8>, error>;
     write: func(uri: string, offset: u64, data: list<u8>) -> result<u32, error>;
+    replace: func(uri: string, data: list<u8>) -> result<u64, error>;
     move-resource: func(source: string, destination: string) -> result<_, error>;
     delete: func(uri: string) -> result<_, error>;
 }

@@ -7,6 +7,7 @@ wit_bindgen::generate!({
 
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 #[derive(serde::Deserialize)]
 struct Envelope {
@@ -20,6 +21,10 @@ struct ReadResponse {
     position: Option<String>,
     range: String,
     lines: Vec<ReadLine>,
+    partial: bool,
+    binary: bool,
+    mime_type: Option<String>,
+    bytes: Vec<u8>,
 }
 #[derive(Clone, Serialize)]
 struct ReadLine {
@@ -29,7 +34,7 @@ struct ReadLine {
 #[derive(Serialize)]
 struct FindResponse {
     results: Vec<FindMatch>,
-    next_cursor: Option<String>,
+    truncated: bool,
 }
 #[derive(Serialize)]
 struct FindMatch {
@@ -39,15 +44,16 @@ struct FindMatch {
 #[derive(Serialize)]
 struct GrepResponse {
     matches: Vec<GrepMatch>,
-    next_cursor: Option<String>,
+    truncated: bool,
 }
 #[derive(Serialize)]
 struct GrepMatch {
     uri: String,
+    anchor: Option<String>,
     content: String,
 }
 
-type Error = exports::artist::verbs::tool::Error;
+type Error = exports::artist::verbs::tool::Failure;
 
 fn invoke(request: Vec<u8>) -> Result<Vec<u8>, Error> {
     let input: Value =
@@ -61,7 +67,15 @@ fn invoke(request: Vec<u8>) -> Result<Vec<u8>, Error> {
         "move" => move_resource(envelope.request)?,
         "find" => find(envelope.request)?,
         "grep" => grep(envelope.request)?,
-        _ => return Err(Error::Unsupported),
+        _ => {
+            return Err(failure(
+                "unsupported",
+                format!(
+                    "tool {:?} is not exported by the default tool component",
+                    envelope.tool
+                ),
+            ));
+        }
     };
     toon_format::encode_default(&response)
         .map(|value| value.into_bytes())
@@ -71,13 +85,39 @@ fn invoke(request: Vec<u8>) -> Result<Vec<u8>, Error> {
 fn read(request: Value) -> Result<Value, Error> {
     let requested_uri = string(&request, "uri")?;
     let (uri, position) = split_fragment(&requested_uri);
-    let bytes = read_all(&uri)?;
-    let source = std::str::from_utf8(&bytes).map_err(|_| invalid())?;
+    const MAX_READ: usize = 256 * 1024;
+    let bytes = read_bounded(&uri, MAX_READ + 1)?;
+    let partial = bytes.len() > MAX_READ;
+    let bytes = if partial {
+        bytes[..MAX_READ].to_vec()
+    } else {
+        bytes
+    };
+    let source = match std::str::from_utf8(&bytes) {
+        Ok(source) => source,
+        Err(_) => {
+            return serde_json::to_value(ReadResponse {
+                uri: canonical(&uri),
+                position,
+                range: request
+                    .get("range")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-200..+200")
+                    .to_owned(),
+                lines: Vec::new(),
+                partial,
+                binary: true,
+                mime_type: infer_mime_type(&uri),
+                bytes,
+            })
+            .map_err(|_| internal());
+        }
+    };
     let all: Vec<_> = source
         .lines()
         .enumerate()
         .map(|(index, content)| ReadLine {
-            anchor: format!("line:{index}"),
+            anchor: teca_anchor(source, index),
             content: content.to_owned(),
         })
         .collect();
@@ -97,13 +137,17 @@ fn read(request: Value) -> Result<Value, Error> {
         .get(start..end.min(all.len()))
         .unwrap_or_default()
         .to_vec();
-    Ok(serde_json::to_value(ReadResponse {
+    serde_json::to_value(ReadResponse {
         uri: canonical(&uri),
         position,
         range: range.to_owned(),
         lines,
+        partial,
+        binary: false,
+        mime_type: infer_mime_type(&uri),
+        bytes: Vec::new(),
     })
-    .map_err(|_| internal())?)
+    .map_err(|_| internal())
 }
 
 fn write(request: Value) -> Result<Value, Error> {
@@ -112,9 +156,14 @@ fn write(request: Value) -> Result<Value, Error> {
         return Err(invalid());
     }
     let content = string(&request, "content")?;
-    let _ = artist::verbs::resource_api::truncate(&uri, 0);
-    artist::verbs::resource_api::write(&uri, 0, content.as_bytes()).map_err(map_resource)?;
-    Ok(Value::Object(serde_json::Map::new()))
+    let existed = artist::verbs::resource_api::read(&uri, 0, 1).is_ok();
+    let bytes_written =
+        artist::verbs::resource_api::replace(&uri, content.as_bytes()).map_err(map_resource)?;
+    Ok(serde_json::json!({
+        "created": !existed,
+        "replaced": existed,
+        "bytes_written": bytes_written,
+    }))
 }
 
 fn edit(request: Value) -> Result<Value, Error> {
@@ -123,35 +172,45 @@ fn edit(request: Value) -> Result<Value, Error> {
         return Err(invalid());
     }
     let mut source = String::from_utf8(read_all(&uri)?).map_err(|_| invalid())?;
-    let trailing_newline = source.ends_with('\n');
     let changes = request
         .get("changes")
         .and_then(Value::as_array)
         .ok_or_else(invalid)?;
+    let snapshot = teca_lines(&source);
+    let mut resolved = Vec::with_capacity(changes.len());
     for change in changes {
         let anchor = string(change, "anchor")?;
-        let line = anchor
-            .strip_prefix("line:")
-            .and_then(|value| value.parse::<usize>().ok())
-            .ok_or_else(invalid)?;
         let replacement = change
             .get("content")
             .or_else(|| change.get("replacement"))
             .and_then(Value::as_str)
             .ok_or_else(invalid)?;
-        let mut lines: Vec<String> = source.lines().map(ToOwned::to_owned).collect();
-        if line >= lines.len() {
-            return Err(Error::NotFound);
-        }
-        lines[line] = replacement.to_owned();
-        source = lines.join("\n");
-        if trailing_newline && !source.ends_with('\n') {
-            source.push('\n');
-        }
+        let line = snapshot
+            .iter()
+            .find(|line| line.anchor == anchor)
+            .ok_or_else(|| {
+                failure(
+                    "conflict",
+                    format!("TECA address {anchor:?} is stale or ambiguous"),
+                )
+            })?;
+        resolved.push((line.start, line.end, replacement.to_owned()));
     }
-    let _ = artist::verbs::resource_api::truncate(&uri, 0);
-    artist::verbs::resource_api::write(&uri, 0, source.as_bytes()).map_err(map_resource)?;
-    Ok(Value::Object(serde_json::Map::new()))
+    resolved.sort_by_key(|(start, _, _)| *start);
+    if resolved.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return Err(failure(
+            "conflict",
+            "edit changes overlap in the immutable source snapshot",
+        ));
+    }
+    for (start, end, replacement) in resolved.into_iter().rev() {
+        source.replace_range(start..end, &replacement);
+    }
+    artist::verbs::resource_api::replace(&uri, source.as_bytes()).map_err(map_resource)?;
+    Ok(serde_json::json!({
+        "uri": canonical(&uri),
+        "updated_anchors": teca_lines(&source).into_iter().map(|line| line.anchor).collect::<Vec<_>>(),
+    }))
 }
 
 fn split_fragment(uri: &str) -> (String, Option<String>) {
@@ -180,7 +239,7 @@ fn resolve_position(lines: &[ReadLine], position: &str) -> Result<usize, Error> 
                 .ok()
                 .and_then(|line| line.checked_sub(1))
         })
-        .ok_or(Error::NotFound)?;
+        .ok_or_else(|| failure("not_found", format!("position {position:?} was not found")))?;
     Ok((base as i64 + offset).max(0) as usize)
 }
 
@@ -209,7 +268,11 @@ fn move_resource(request: Value) -> Result<Value, Error> {
             .map_err(map_resource)?,
         None => artist::verbs::resource_api::delete(&source).map_err(map_resource)?,
     }
-    Ok(Value::Object(serde_json::Map::new()))
+    Ok(serde_json::json!({
+        "source": canonical(&source),
+        "destination": request.get("destination"),
+        "removed": request.get("destination").is_none(),
+    }))
 }
 
 fn find(request: Value) -> Result<Value, Error> {
@@ -218,23 +281,27 @@ fn find(request: Value) -> Result<Value, Error> {
     if query.trim().is_empty() {
         return Err(invalid());
     }
+    let (mode, query) = find_query(&request, &query)?;
     let limit = request.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
     if limit == 0 || limit > 500 {
         return Err(invalid());
     }
-    let offset = request
-        .get("cursor")
-        .map(|value| value.as_str().ok_or_else(invalid))
-        .transpose()?
-        .unwrap_or("0")
-        .parse::<usize>()
-        .map_err(|_| invalid())?;
     let mut queue = vec![root];
     let mut results = Vec::new();
+    let mut visited = std::collections::BTreeSet::new();
+    let mut truncated = false;
     while let Some(uri) = queue.pop() {
+        if !visited.insert(uri.clone()) || visited.len() > 10_000 {
+            truncated = true;
+            break;
+        }
         for entry in artist::verbs::resource_api::readdir(&uri).map_err(map_resource)? {
             let child = format!("{}/{}", uri.trim_end_matches('/'), entry.name);
-            if wildcard(&entry.name, &query) || wildcard(&child, &query) {
+            if find_matches(&mode, &entry.name, &child, &query) {
+                if results.len() >= limit {
+                    truncated = true;
+                    break;
+                }
                 results.push(FindMatch {
                     uri: canonical(&child),
                     kind: if matches!(entry.kind, artist::verbs::resource_api::Kind::Directory) {
@@ -249,16 +316,67 @@ fn find(request: Value) -> Result<Value, Error> {
             }
         }
     }
-    let more = offset < results.len() && offset.saturating_add(limit) < results.len();
-    let results = results.into_iter().skip(offset).take(limit).collect();
-    Ok(serde_json::to_value(FindResponse {
-        results,
-        next_cursor: more.then(|| offset.saturating_add(limit).to_string()),
-    })
-    .map_err(|_| internal())?)
+    serde_json::to_value(FindResponse { results, truncated }).map_err(|_| internal())
+}
+
+fn find_query(request: &Value, query: &str) -> Result<(String, String), Error> {
+    let (prefix_mode, query) = [
+        ("glob:", "glob"),
+        ("lit:", "literal"),
+        ("literal:", "literal"),
+        ("fuzzy:", "fuzzy"),
+    ]
+    .into_iter()
+    .find_map(|(prefix, mode)| query.strip_prefix(prefix).map(|query| (mode, query)))
+    .map_or((None, query), |(mode, query)| (Some(mode), query));
+    let mode = request
+        .get("mode")
+        .and_then(Value::as_str)
+        .or(prefix_mode)
+        .unwrap_or_else(|| if query.contains('*') { "glob" } else { "fuzzy" });
+    if !matches!(mode, "literal" | "plain" | "glob" | "fuzzy") || query.trim().is_empty() {
+        return Err(invalid());
+    }
+    Ok((
+        if mode == "plain" {
+            "literal".into()
+        } else {
+            mode.into()
+        },
+        query.to_owned(),
+    ))
+}
+
+fn find_matches(mode: &str, name: &str, path: &str, query: &str) -> bool {
+    match mode {
+        "glob" => wildcard(name, query) || wildcard(path, query),
+        "literal" => {
+            let query = query.to_ascii_lowercase();
+            name.to_ascii_lowercase().contains(&query) || path.to_ascii_lowercase().contains(&query)
+        }
+        "fuzzy" => fuzzy(name, query) || fuzzy(path, query),
+        _ => false,
+    }
+}
+
+fn fuzzy(value: &str, query: &str) -> bool {
+    let mut value = value
+        .chars()
+        .map(|character| character.to_ascii_lowercase());
+    for wanted in query
+        .chars()
+        .map(|character| character.to_ascii_lowercase())
+    {
+        let Some(found) = value.find(|character| *character == wanted) else {
+            return false;
+        };
+        let _ = found;
+    }
+    true
 }
 
 fn grep(request: Value) -> Result<Value, Error> {
+    const MAX_GREP_RESOURCE: usize = 8 * 1024 * 1024;
     let root = string(&request, "uri")?;
     let query = string(&request, "query")?;
     if query.trim().is_empty() {
@@ -268,45 +386,67 @@ fn grep(request: Value) -> Result<Value, Error> {
     if limit == 0 || limit > 500 {
         return Err(invalid());
     }
-    let offset = request
-        .get("cursor")
-        .map(|value| value.as_str().ok_or_else(invalid))
-        .transpose()?
-        .unwrap_or("0")
-        .parse::<usize>()
-        .map_err(|_| invalid())?;
+    let mode = request
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("literal");
+    if !matches!(mode, "literal" | "plain" | "regex") {
+        return Err(invalid());
+    }
+    let regex = if mode == "regex" {
+        Some(regex::Regex::new(&query).map_err(|_| invalid())?)
+    } else {
+        None
+    };
     let mut queue = vec![root];
     let mut matches = Vec::new();
+    let mut visited = std::collections::BTreeSet::new();
+    let mut truncated = false;
     while let Some(uri) = queue.pop() {
+        if !visited.insert(uri.clone()) || visited.len() > 10_000 {
+            truncated = true;
+            break;
+        }
         for entry in artist::verbs::resource_api::readdir(&uri).map_err(map_resource)? {
             let child = format!("{}/{}", uri.trim_end_matches('/'), entry.name);
             if matches!(entry.kind, artist::verbs::resource_api::Kind::Directory) {
                 queue.push(child);
-            } else if let Ok(bytes) = read_all(&child) {
-                if let Ok(content) = std::str::from_utf8(&bytes) {
-                    for (line, text) in content.lines().enumerate() {
-                        if text.contains(&query) {
-                            matches.push(GrepMatch {
-                                uri: format!("{}#{}", canonical(&child), line + 1),
-                                content: text.to_owned(),
-                            });
+            } else {
+                let mut bytes = read_bounded(&child, MAX_GREP_RESOURCE + 1)?;
+                if bytes.len() > MAX_GREP_RESOURCE {
+                    truncated = true;
+                    bytes.truncate(MAX_GREP_RESOURCE);
+                }
+                let content = std::str::from_utf8(&bytes).map_err(|_| {
+                    failure(
+                        "unsupported",
+                        format!("cannot grep binary resource {child:?} as UTF-8 text"),
+                    )
+                })?;
+                for (line, text) in content.lines().enumerate() {
+                    if regex.as_ref().is_some_and(|regex| regex.is_match(text))
+                        || (regex.is_none() && text.contains(&query))
+                    {
+                        if matches.len() >= limit {
+                            truncated = true;
+                            break;
                         }
+                        matches.push(GrepMatch {
+                            uri: format!("{}#{}", canonical(&child), teca_anchor(content, line)),
+                            anchor: Some(teca_anchor(content, line)),
+                            content: text.to_owned(),
+                        });
                     }
                 }
             }
         }
     }
-    let more = offset < matches.len() && offset.saturating_add(limit) < matches.len();
-    let matches = matches.into_iter().skip(offset).take(limit).collect();
-    Ok(serde_json::to_value(GrepResponse {
-        matches,
-        next_cursor: more.then(|| offset.saturating_add(limit).to_string()),
-    })
-    .map_err(|_| internal())?)
+    serde_json::to_value(GrepResponse { matches, truncated }).map_err(|_| internal())
 }
 
 fn read_all(uri: &str) -> Result<Vec<u8>, Error> {
     const CHUNK_SIZE: u32 = 64 * 1024;
+    const MAX_EDIT_RESOURCE: usize = 64 * 1024 * 1024;
     let mut offset = 0u64;
     let mut bytes = Vec::new();
     loop {
@@ -315,6 +455,12 @@ fn read_all(uri: &str) -> Result<Vec<u8>, Error> {
         if chunk.is_empty() {
             break;
         }
+        if bytes.len().saturating_add(chunk.len()) > MAX_EDIT_RESOURCE {
+            return Err(failure(
+                "unsupported",
+                format!("edit resource exceeds {MAX_EDIT_RESOURCE} bytes"),
+            ));
+        }
         offset = offset.saturating_add(chunk.len() as u64);
         bytes.extend_from_slice(&chunk);
         if chunk.len() < CHUNK_SIZE as usize {
@@ -322,6 +468,122 @@ fn read_all(uri: &str) -> Result<Vec<u8>, Error> {
         }
     }
     Ok(bytes)
+}
+
+fn read_bounded(uri: &str, limit: usize) -> Result<Vec<u8>, Error> {
+    const CHUNK_SIZE: u32 = 64 * 1024;
+    let mut offset = 0u64;
+    let mut bytes = Vec::new();
+    while bytes.len() < limit {
+        let size = (limit - bytes.len()).min(CHUNK_SIZE as usize) as u32;
+        let chunk = artist::verbs::resource_api::read(uri, offset, size).map_err(map_resource)?;
+        if chunk.is_empty() {
+            break;
+        }
+        offset = offset.saturating_add(chunk.len() as u64);
+        bytes.extend_from_slice(&chunk);
+        if chunk.len() < size as usize {
+            break;
+        }
+    }
+    Ok(bytes)
+}
+
+struct TecaLine {
+    anchor: String,
+    start: usize,
+    end: usize,
+}
+
+fn teca_lines(source: &str) -> Vec<TecaLine> {
+    let mut lines = Vec::new();
+    let mut parents: Vec<(usize, String)> = Vec::new();
+    let mut ranks = std::collections::BTreeMap::<(String, String), usize>::new();
+    let mut start = 0;
+    for raw in source.split_inclusive('\n') {
+        let content = raw.trim_end_matches(['\n', '\r']);
+        let indent = content.len() - content.trim_start_matches([' ', '\t']).len();
+        while parents
+            .last()
+            .is_some_and(|(parent_indent, _)| *parent_indent >= indent)
+        {
+            parents.pop();
+        }
+        let parent = parents
+            .iter()
+            .map(|(_, shape)| shape.as_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        let normalized = teca_normalize(content);
+        let rank = ranks
+            .entry((parent.clone(), normalized.clone()))
+            .or_default();
+        let current_rank = *rank;
+        *rank += 1;
+        let content_hash = teca_digest(&teca_address_bytes(&parent, &normalized, current_rank));
+        let anchor = format!(
+            "teca:v1:{}:{}:{current_rank:x}:{:x}",
+            teca_digest(parent.as_bytes()),
+            content_hash,
+            content.len()
+        );
+        let end = start + content.len();
+        lines.push(TecaLine { anchor, start, end });
+        if raw.trim_end().ends_with('{') {
+            parents.push((indent, teca_normalize(content.trim_end_matches('{').trim())));
+        }
+        start += raw.len();
+    }
+    lines
+}
+
+fn teca_anchor(source: &str, index: usize) -> String {
+    teca_lines(source)
+        .get(index)
+        .map(|line| line.anchor.clone())
+        .unwrap_or_else(|| format!("teca:v1:missing:{index:x}:0:0"))
+}
+
+fn teca_normalize(content: &str) -> String {
+    let mut output = content.trim().to_owned();
+    for keyword in [
+        "fn ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "mod ",
+        "impl ",
+        "class ",
+        "namespace ",
+        "type ",
+        "const ",
+        "let ",
+        "var ",
+    ] {
+        if let Some(start) = output.find(keyword) {
+            let name_start = start + keyword.len();
+            let name_end = output[name_start..]
+                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .map(|offset| name_start + offset)
+                .unwrap_or(output.len());
+            if name_end > name_start {
+                output.replace_range(name_start..name_end, "_");
+            }
+        }
+    }
+    output
+}
+
+fn teca_digest(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// TODO(teca): this temporary byte serialization is not a stable public
+/// contract. Keep all address-hash input behind this function until the
+/// eventual representation is specified.
+fn teca_address_bytes(parent: &str, content: &str, rank: usize) -> Vec<u8> {
+    format!("{parent}\0{content}\0{rank}").into_bytes()
 }
 
 fn wildcard(value: &str, query: &str) -> bool {
@@ -356,6 +618,31 @@ fn canonical(uri: &str) -> String {
     }
 }
 
+fn infer_mime_type(uri: &str) -> Option<String> {
+    let extension = uri
+        .split('?')
+        .next()?
+        .split('#')
+        .next()?
+        .rsplit('/')
+        .next()?
+        .rsplit_once('.')?
+        .1
+        .to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "txt" | "md" | "rs" | "js" | "ts" | "tsx" | "jsx" | "py" | "go" | "java" | "c" | "h"
+        | "cpp" | "toml" | "yaml" | "yml" | "json" | "xml" | "html" | "css" => "text/plain",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "wasm" => "application/wasm",
+        _ => return None,
+    };
+    Some(mime.into())
+}
+
 fn string(value: &Value, key: &str) -> Result<String, Error> {
     value
         .get(key)
@@ -364,20 +651,24 @@ fn string(value: &Value, key: &str) -> Result<String, Error> {
         .ok_or_else(invalid)
 }
 fn invalid() -> Error {
-    Error::InvalidArgument
+    failure("invalid_argument", "invalid tool request")
 }
 fn internal() -> Error {
-    Error::Internal
+    failure("internal", "default tool component failed")
+}
+fn failure(code: impl Into<String>, message: impl Into<String>) -> Error {
+    Error {
+        code: code.into(),
+        message: message.into(),
+        details: None,
+    }
 }
 
-fn map_resource(error: artist::verbs::resource_api::Error) -> Error {
-    match error {
-        artist::verbs::resource_api::Error::InvalidArgument => invalid(),
-        artist::verbs::resource_api::Error::NotFound => Error::NotFound,
-        artist::verbs::resource_api::Error::PermissionDenied => Error::PermissionDenied,
-        artist::verbs::resource_api::Error::Unsupported => Error::Unsupported,
-        artist::verbs::resource_api::Error::Conflict => Error::Conflict,
-        artist::verbs::resource_api::Error::Io => internal(),
+fn map_resource(error: artist::verbs::resource_api::Failure) -> Error {
+    Error {
+        code: error.code,
+        message: error.message,
+        details: error.details,
     }
 }
 

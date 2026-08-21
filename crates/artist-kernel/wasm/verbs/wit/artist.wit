@@ -46,6 +46,10 @@ interface read {
         position: option<string>,
         range: string,
         lines: list<line>,
+        partial: bool,
+        binary: bool,
+        mime-type: option<string>,
+        bytes: list<u8>,
     }
 
     read: func(requests: list<request>) -> list<result<response, error>>;
@@ -59,7 +63,13 @@ interface write {
         content: string,
     }
 
-    write: func(requests: list<request>) -> list<result<_, error>>;
+    record response {
+        created: bool,
+        replaced: bool,
+        bytes-written: u64,
+    }
+
+    write: func(requests: list<request>) -> list<result<response, error>>;
 }
 
 interface move {
@@ -70,7 +80,13 @@ interface move {
         destination: option<string>,
     }
 
-    execute: func(requests: list<request>) -> list<result<_, error>>;
+    record response {
+        source: string,
+        destination: option<string>,
+        removed: bool,
+    }
+
+    execute: func(requests: list<request>) -> list<result<response, error>>;
 }
 
 interface edit {
@@ -101,7 +117,9 @@ interface find {
         uri: string,
         query: string,
         limit: option<u32>,
-        cursor: option<string>,
+        /// One of `literal`, `glob`, or `fuzzy`. If absent, wildcard queries
+        /// are treated as glob patterns and other queries as fuzzy search.
+        mode: option<string>,
     }
 
     record match {
@@ -111,7 +129,7 @@ interface find {
 
     record response {
         results: list<match>,
-        next-cursor: option<string>,
+        truncated: bool,
     }
 
     execute: func(requests: list<request>) -> list<result<response, error>>;
@@ -124,17 +142,18 @@ interface grep {
         uri: string,
         query: string,
         limit: option<u32>,
-        cursor: option<string>,
+        mode: option<string>,
     }
 
     record match {
         uri: string,
+        anchor: option<string>,
         content: string,
     }
 
     record response {
         matches: list<match>,
-        next-cursor: option<string>,
+        truncated: bool,
     }
 
     execute: func(requests: list<request>) -> list<result<response, error>>;
@@ -148,6 +167,12 @@ interface run {
         target: option<string>,
         arguments: list<string>,
         working-directory: option<string>,
+        environment: list<environment>,
+    }
+
+    record environment {
+        name: string,
+        value: string,
     }
 
     record response {
@@ -193,11 +218,28 @@ interface signal {
 
 /// Generic opaque tool ABI used by the model-facing component registry.
 interface tool {
-    use types.{error};
-    invoke: func(request: list<u8>) -> result<list<u8>, error>;
+    /// The model-facing component boundary keeps the original diagnostic
+    /// instead of reducing every failure to a closed enum. The host turns
+    /// this small record into the provider-neutral tool envelope.
+    record failure {
+        code: string,
+        message: string,
+        details: option<string>,
+    }
+
+    invoke: func(request: list<u8>) -> result<list<u8>, failure>;
 }
 
 interface resource-api {
+    /// Resource providers return their original diagnostic at the tool
+    /// boundary; the component host maps this record without flattening it
+    /// into a closed enum.
+    record failure {
+        code: string,
+        message: string,
+        details: option<string>,
+    }
+
     enum kind {
         file,
         directory,
@@ -209,21 +251,15 @@ interface resource-api {
         size: u64,
     }
 
-    enum error {
-        invalid-argument,
-        not-found,
-        permission-denied,
-        unsupported,
-        conflict,
-        io,
-    }
-
-    read: func(uri: string, offset: u64, size: u32) -> result<list<u8>, error>;
-    readdir: func(uri: string) -> result<list<entry>, error>;
-    truncate: func(uri: string, size: u64) -> result<_, error>;
-    write: func(uri: string, offset: u64, data: list<u8>) -> result<u32, error>;
-    move-resource: func(source: string, destination: string) -> result<_, error>;
-    delete: func(uri: string) -> result<_, error>;
+    read: func(uri: string, offset: u64, size: u32) -> result<list<u8>, failure>;
+    readdir: func(uri: string) -> result<list<entry>, failure>;
+    truncate: func(uri: string, size: u64) -> result<_, failure>;
+    /// Replace a complete resource atomically when the backing provider can
+    /// support that operation.
+    replace: func(uri: string, data: list<u8>) -> result<u64, failure>;
+    write: func(uri: string, offset: u64, data: list<u8>) -> result<u32, failure>;
+    move-resource: func(source: string, destination: string) -> result<_, failure>;
+    delete: func(uri: string) -> result<_, failure>;
 }
 
 /// Generic dynamic invocation for extensions that want to consume another

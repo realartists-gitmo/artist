@@ -17,6 +17,13 @@ pub struct MoveRequest {
     pub destination: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct MoveResponse {
+    pub source: String,
+    pub destination: Option<String>,
+    pub removed: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MoveError {
     InvalidUri(String),
@@ -79,7 +86,7 @@ impl ResourceMover for KernelMover {
 pub async fn move_resource<M: ResourceMover>(
     mover: &M,
     request: MoveRequest,
-) -> Result<(), MoveError> {
+) -> Result<MoveResponse, MoveError> {
     let source = parse_mutation_uri(&request.source)?;
     match request.destination {
         Some(destination) => {
@@ -88,14 +95,22 @@ pub async fn move_resource<M: ResourceMover>(
                 .move_resource(&source, &destination_uri)
                 .await
                 .map_err(MoveError::Resource)?;
-            Ok(())
+            Ok(MoveResponse {
+                source: source.to_string(),
+                destination: Some(destination_uri.to_string()),
+                removed: false,
+            })
         }
         None => {
             mover
                 .delete_resource(&source)
                 .await
                 .map_err(MoveError::Resource)?;
-            Ok(())
+            Ok(MoveResponse {
+                source: source.to_string(),
+                destination: None,
+                removed: true,
+            })
         }
     }
 }
@@ -111,12 +126,12 @@ impl<M> MoveVerb<M> {
 }
 
 #[async_trait]
-impl<M: ResourceMover + 'static> VerbTool<MoveRequest, ()> for MoveVerb<M> {
+impl<M: ResourceMover + 'static> VerbTool<MoveRequest, MoveResponse> for MoveVerb<M> {
     fn name(&self) -> &str {
         "move"
     }
 
-    async fn call(&self, requests: Vec<MoveRequest>) -> Vec<Result<(), VerbError>> {
+    async fn call(&self, requests: Vec<MoveRequest>) -> Vec<Result<MoveResponse, VerbError>> {
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
             results.push(move_resource(&self.mover, request).await.map_err(map_error));

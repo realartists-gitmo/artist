@@ -68,6 +68,7 @@ pub enum ContextEvent {
     Replace { contribution: Contribution },
     Remove { id: String },
     Append { contribution: Contribution },
+    Reset { snapshot: Snapshot },
 }
 
 impl ContextEvent {
@@ -76,7 +77,7 @@ impl ContextEvent {
             Self::Replace { contribution } | Self::Append { contribution } => {
                 contribution.source.as_deref()
             }
-            Self::Remove { .. } => None,
+            Self::Remove { .. } | Self::Reset { .. } => None,
         }
     }
 }
@@ -91,8 +92,10 @@ pub enum ContextError {
     EmptyContributionId,
     EmptySlot,
     DuplicateContribution(String),
+    ConflictingContribution(String),
     MissingContribution(String),
     Log(String),
+    Replay(String),
 }
 
 impl std::fmt::Display for ContextError {
@@ -101,8 +104,12 @@ impl std::fmt::Display for ContextError {
             Self::EmptyContributionId => f.write_str("contribution id cannot be empty"),
             Self::EmptySlot => f.write_str("contribution slot cannot be empty"),
             Self::DuplicateContribution(id) => write!(f, "contribution already exists: {id}"),
+            Self::ConflictingContribution(id) => {
+                write!(f, "contribution update conflicts with existing id: {id}")
+            }
             Self::MissingContribution(id) => write!(f, "contribution does not exist: {id}"),
             Self::Log(error) => write!(f, "could not persist context event: {error}"),
+            Self::Replay(error) => write!(f, "could not replay context event: {error}"),
         }
     }
 }
@@ -122,24 +129,36 @@ impl ContextState {
         match event {
             ContextEvent::Replace { contribution } => {
                 validate(&contribution)?;
-                if !self.contributions.contains_key(&contribution.id) {
-                    return Err(ContextError::MissingContribution(contribution.id));
+                match self.contributions.get(&contribution.id) {
+                    Some(current) if current == &contribution => {}
+                    Some(_) => {
+                        self.contributions
+                            .insert(contribution.id.clone(), contribution);
+                    }
+                    None => return Err(ContextError::MissingContribution(contribution.id)),
                 }
-                self.contributions
-                    .insert(contribution.id.clone(), contribution);
             }
             ContextEvent::Remove { id } => {
-                if self.contributions.remove(&id).is_none() {
-                    return Err(ContextError::MissingContribution(id));
-                }
+                // Removal is idempotent so a duplicated composition event
+                // cannot turn a valid replay into a failure.
+                self.contributions.remove(&id);
             }
             ContextEvent::Append { contribution } => {
                 validate(&contribution)?;
-                if self.contributions.contains_key(&contribution.id) {
-                    return Err(ContextError::DuplicateContribution(contribution.id));
+                match self.contributions.get(&contribution.id) {
+                    Some(current) if current == &contribution => {}
+                    Some(_) => {
+                        return Err(ContextError::ConflictingContribution(contribution.id));
+                    }
+                    None => {
+                        self.contributions
+                            .insert(contribution.id.clone(), contribution);
+                    }
                 }
-                self.contributions
-                    .insert(contribution.id.clone(), contribution);
+            }
+            ContextEvent::Reset { snapshot } => {
+                let replacement = ContextState::from_snapshot(snapshot)?;
+                self.contributions = replacement.contributions;
             }
         }
         Ok(())
@@ -182,17 +201,78 @@ impl ContextController {
         })
     }
 
+    /// Restore the durable context projection. The first snapshot is itself
+    /// recorded so reopening a session never has to guess which initial
+    /// composition was used. Later mutations are replayed from their
+    /// self-contained event payloads.
+    pub fn restore(snapshot: Snapshot, log: Arc<EventLog>) -> Result<Self, ContextError> {
+        let records = log
+            .records()
+            .map_err(|error| ContextError::Log(error.to_string()))?;
+        let initial = records
+            .iter()
+            .find(|record| record.event_type == "context.initial")
+            .map(|record| {
+                serde_json::from_value::<Snapshot>(
+                    record.payload.get("snapshot").cloned().ok_or_else(|| {
+                        ContextError::Replay("context.initial lacks snapshot".into())
+                    })?,
+                )
+                .map_err(|error| ContextError::Replay(error.to_string()))
+            })
+            .transpose()?
+            .unwrap_or(snapshot);
+        let state = ContextState::from_snapshot(initial.clone())?;
+        let controller = Self {
+            state: Mutex::new(state),
+            log: Arc::clone(&log),
+        };
+
+        if !records
+            .iter()
+            .any(|record| record.event_type == "context.initial")
+            && !log.is_closed()
+        {
+            log.append("context.initial", serde_json::json!({"snapshot": initial}))
+                .map_err(|error| ContextError::Log(error.to_string()))?;
+        }
+
+        for record in records {
+            let Some(event) = (match record.event_type.as_str() {
+                "context.replace" | "context.remove" | "context.append" | "context.reset" => record
+                    .payload
+                    .get("event")
+                    .cloned()
+                    .map(|value| {
+                        serde_json::from_value::<ContextEvent>(value)
+                            .map_err(|error| ContextError::Replay(error.to_string()))
+                    })
+                    .transpose()?,
+                _ => None,
+            }) else {
+                continue;
+            };
+            controller.apply_replayed(event)?;
+        }
+        Ok(controller)
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.state.lock().unwrap().snapshot()
     }
 
     pub fn apply(&self, event: ContextEvent) -> Result<(), ContextError> {
-        let mut next = self.state.lock().unwrap().clone();
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
         next.apply(event.clone())?;
+        if *state == next {
+            return Ok(());
+        }
         let event_type = match event {
             ContextEvent::Replace { .. } => "context.replace",
             ContextEvent::Remove { .. } => "context.remove",
             ContextEvent::Append { .. } => "context.append",
+            ContextEvent::Reset { .. } => "context.reset",
         };
         let (target, revision, content) = match &event {
             ContextEvent::Replace { contribution } | ContextEvent::Append { contribution } => (
@@ -201,6 +281,7 @@ impl ContextController {
                 Some(contribution.content.clone()),
             ),
             ContextEvent::Remove { id } => (Some(id.clone()), None, None),
+            ContextEvent::Reset { .. } => (None, None, None),
         };
         let payload = serde_json::json!({
             "kind": event_type,
@@ -213,8 +294,20 @@ impl ContextController {
         self.log
             .append(event_type, payload)
             .map_err(|error| ContextError::Log(error.to_string()))?;
-        *self.state.lock().unwrap() = next;
+        *state = next;
         Ok(())
+    }
+
+    /// Replace the active composed context while retaining the durable
+    /// transcript. Handoff uses this boundary to reset provider-facing
+    /// context without erasing historical events.
+    pub fn reset(&self, snapshot: Snapshot) -> Result<(), ContextError> {
+        self.apply(ContextEvent::Reset { snapshot })
+    }
+
+    fn apply_replayed(&self, event: ContextEvent) -> Result<(), ContextError> {
+        let mut state = self.state.lock().unwrap();
+        state.apply(event)
     }
 
     pub fn log(&self) -> &Arc<EventLog> {
@@ -307,5 +400,67 @@ mod tests {
             .unwrap();
         assert_eq!(controller.snapshot().contributions.len(), 1);
         assert_eq!(log.records().unwrap()[0].event_type, "context.append");
+    }
+
+    #[test]
+    fn restore_replays_replacements_removals_and_reset_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let log = Arc::new(EventLog::open(&path, "session").unwrap());
+        let initial = Snapshot::new([
+            Contribution::new("system", "system", "old"),
+            Contribution::new("stale", "profile", "remove me"),
+        ]);
+        let controller = ContextController::restore(initial.clone(), Arc::clone(&log)).unwrap();
+        controller
+            .apply(ContextEvent::Replace {
+                contribution: Contribution::new("system", "system", "new").with_revision(2),
+            })
+            .unwrap();
+        controller
+            .apply(ContextEvent::Remove { id: "stale".into() })
+            .unwrap();
+        controller
+            .apply(ContextEvent::Append {
+                contribution: Contribution::new("extra", "profile", "extra"),
+            })
+            .unwrap();
+        let expected = controller.snapshot();
+        drop(controller);
+
+        let reopened = ContextController::restore(initial, Arc::clone(&log)).unwrap();
+        assert_eq!(reopened.snapshot(), expected);
+        reopened
+            .apply(ContextEvent::Replace {
+                contribution: Contribution::new("system", "system", "new").with_revision(2),
+            })
+            .unwrap();
+        assert_eq!(reopened.snapshot(), expected);
+
+        let reset = Snapshot::new([Contribution::new("handoff", "profile", "brief")]);
+        reopened.reset(reset.clone()).unwrap();
+        drop(reopened);
+        let restored = ContextController::restore(expected, log).unwrap();
+        assert_eq!(restored.snapshot(), reset);
+    }
+
+    #[test]
+    fn closed_logs_restore_read_only_context_and_reject_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(EventLog::open(dir.path().join("session.jsonl"), "session").unwrap());
+        let initial = Snapshot::new([Contribution::new("system", "system", "stable")]);
+        log.close().unwrap();
+
+        let controller = ContextController::restore(initial.clone(), Arc::clone(&log)).unwrap();
+        assert_eq!(controller.snapshot(), initial);
+        assert!(log.records().unwrap().is_empty());
+
+        let error = controller
+            .apply(ContextEvent::Append {
+                contribution: Contribution::new("new", "profile", "must not persist"),
+            })
+            .unwrap_err();
+        assert!(matches!(error, ContextError::Log(message) if message.contains("closed")));
+        assert_eq!(controller.snapshot(), initial);
     }
 }

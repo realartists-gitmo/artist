@@ -18,26 +18,27 @@ pub struct GrepRequest {
     pub uri: String,
     pub query: String,
     pub limit: Option<u32>,
-    pub cursor: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct GrepMatch {
     pub uri: String,
+    pub anchor: Option<String>,
     pub content: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct GrepResponse {
     pub matches: Vec<GrepMatch>,
-    pub next_cursor: Option<String>,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GrepError {
     InvalidUri(String),
     InvalidQuery(String),
-    InvalidCursor(String),
     OutsideRoot(String),
     Backend(String),
 }
@@ -47,7 +48,6 @@ impl std::fmt::Display for GrepError {
         match self {
             Self::InvalidUri(value) => write!(f, "invalid grep URI: {value}"),
             Self::InvalidQuery(value) => write!(f, "invalid grep query: {value}"),
-            Self::InvalidCursor(value) => write!(f, "invalid grep cursor: {value}"),
             Self::OutsideRoot(value) => write!(f, "grep URI is outside the indexed root: {value}"),
             Self::Backend(value) => write!(f, "grep backend failed: {value}"),
         }
@@ -59,7 +59,7 @@ impl std::error::Error for GrepError {}
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GrepPage {
     pub matches: Vec<GrepMatch>,
-    pub next_offset: Option<usize>,
+    pub truncated: bool,
 }
 
 #[async_trait]
@@ -68,9 +68,23 @@ pub trait GrepBackend: Send + Sync {
         &self,
         root: &ResourceUri,
         query: &str,
-        offset: usize,
         limit: usize,
     ) -> Result<GrepPage, GrepError>;
+
+    async fn grep_with_mode(
+        &self,
+        root: &ResourceUri,
+        query: &str,
+        limit: usize,
+        mode: &str,
+    ) -> Result<GrepPage, GrepError> {
+        if !matches!(mode, "literal" | "plain") {
+            return Err(GrepError::InvalidQuery(format!(
+                "grep mode {mode:?} is not supported by this resource backend"
+            )));
+        }
+        self.grep(root, query, limit).await
+    }
 }
 
 pub struct GrepVerb<B> {
@@ -106,19 +120,19 @@ impl<B: GrepBackend + 'static> VerbTool<GrepRequest, GrepResponse> for GrepVerb<
                         "limit must be between 1 and 500".into(),
                     ));
                 }
-                let offset = request
-                    .cursor
-                    .as_deref()
-                    .unwrap_or("0")
-                    .parse()
-                    .map_err(|_| GrepError::InvalidCursor(request.cursor.unwrap_or_default()))?;
+                let mode = request.mode.as_deref().unwrap_or("literal");
+                if !matches!(mode, "literal" | "plain" | "regex") {
+                    return Err(GrepError::InvalidQuery(format!(
+                        "unsupported grep mode {mode:?}"
+                    )));
+                }
                 let page = self
                     .backend
-                    .grep(&root, &request.query, offset, limit)
+                    .grep_with_mode(&root, &request.query, limit, mode)
                     .await?;
                 Ok(GrepResponse {
                     matches: page.matches,
-                    next_cursor: page.next_offset.map(|value| value.to_string()),
+                    truncated: page.truncated,
                 })
             }
             .await
@@ -133,9 +147,6 @@ fn parse_root(value: &str) -> Result<ResourceUri, GrepError> {
     let uri = value
         .parse::<ResourceUri>()
         .map_err(|error| GrepError::InvalidUri(error.to_string()))?;
-    if uri.scheme() != "file" || !uri.authority().is_empty() {
-        return Err(GrepError::InvalidUri(value.into()));
-    }
     if uri.query().is_some() || uri.fragment().is_some() {
         return Err(GrepError::InvalidUri(
             "grep roots cannot contain selectors".into(),
@@ -146,10 +157,9 @@ fn parse_root(value: &str) -> Result<ResourceUri, GrepError> {
 
 fn map_error(error: GrepError) -> VerbError {
     match error {
-        GrepError::InvalidUri(_)
-        | GrepError::InvalidQuery(_)
-        | GrepError::InvalidCursor(_)
-        | GrepError::OutsideRoot(_) => VerbError::InvalidArgument,
+        GrepError::InvalidUri(_) | GrepError::InvalidQuery(_) | GrepError::OutsideRoot(_) => {
+            VerbError::InvalidArgument
+        }
         GrepError::Backend(_) => VerbError::Internal,
     }
 }
@@ -160,8 +170,17 @@ impl GrepBackend for FffFindIndex {
         &self,
         root: &ResourceUri,
         query: &str,
-        offset: usize,
         limit: usize,
+    ) -> Result<GrepPage, GrepError> {
+        self.grep_with_mode(root, query, limit, "literal").await
+    }
+
+    async fn grep_with_mode(
+        &self,
+        root: &ResourceUri,
+        query: &str,
+        limit: usize,
+        mode: &str,
     ) -> Result<GrepPage, GrepError> {
         let requested_root = relative_root(root, &self.uri_root)?;
         let guard = self
@@ -174,8 +193,16 @@ impl GrepBackend for FffFindIndex {
         let result = picker.grep_raw(
             query,
             &GrepSearchOptions {
-                mode: GrepMode::PlainText,
-                file_offset: offset,
+                mode: match mode {
+                    "literal" | "plain" => GrepMode::PlainText,
+                    "regex" => GrepMode::Regex,
+                    other => {
+                        return Err(GrepError::InvalidQuery(format!(
+                            "unsupported grep mode {other:?}"
+                        )));
+                    }
+                },
+                file_offset: 0,
                 page_limit: limit,
                 ..Default::default()
             },
@@ -187,18 +214,31 @@ impl GrepBackend for FffFindIndex {
                 continue;
             }
             let uri = uri_for_relative(root, &relative, requested_root)?;
+            let anchor = std::fs::read_to_string(self.host_root.join(&relative))
+                .ok()
+                .and_then(|source| {
+                    crate::teca::TecaSnapshot::from_source(&source)
+                        .lines()
+                        .get(item.line_number.saturating_sub(1) as usize)
+                        .map(|line| line.anchor.clone())
+                });
             matches.push(GrepMatch {
                 uri: uri
                     .parse::<ResourceUri>()
                     .map_err(|error| GrepError::Backend(error.to_string()))?
-                    .with_fragment(item.line_number.to_string())
+                    .with_fragment(
+                        anchor
+                            .clone()
+                            .unwrap_or_else(|| item.line_number.to_string()),
+                    )
                     .to_string(),
+                anchor,
                 content: item.line_content,
             });
         }
         Ok(GrepPage {
             matches,
-            next_offset: (result.next_file_offset != 0).then_some(result.next_file_offset),
+            truncated: result.next_file_offset != 0,
         })
     }
 }

@@ -9,8 +9,52 @@ use std::sync::{Arc, RwLock};
 use anyhow::anyhow;
 use artist_wasm_verbs::component::{ToolError as WasmToolError, WasmTool};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The intentionally small provider-neutral envelope used at the model
+/// tool boundary. Provider adapters translate this value into their native
+/// tool-output item; the component layer never needs to know that syntax.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ToolResultEnvelope {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ToolFailure>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ToolFailure {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+impl ToolResultEnvelope {
+    pub fn success(output: Value) -> Self {
+        Self {
+            ok: true,
+            output: Some(output),
+            error: None,
+        }
+    }
+
+    pub fn failure(error: &ToolError) -> Self {
+        Self {
+            ok: false,
+            output: None,
+            error: Some(ToolFailure {
+                code: error.code(),
+                message: error.to_string(),
+                details: error.details(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ToolError {
     InvalidArgument(String),
     NotFound(String),
@@ -20,6 +64,34 @@ pub enum ToolError {
     Aborted(String),
     Unavailable(String),
     Internal(String),
+    Detailed {
+        code: String,
+        message: String,
+        details: Value,
+    },
+}
+
+impl ToolError {
+    pub fn code(&self) -> String {
+        match self {
+            Self::InvalidArgument(_) => "invalid_argument".into(),
+            Self::NotFound(_) => "not_found".into(),
+            Self::Unsupported(_) => "unsupported".into(),
+            Self::PermissionDenied(_) => "permission_denied".into(),
+            Self::Conflict(_) => "conflict".into(),
+            Self::Aborted(_) => "aborted".into(),
+            Self::Unavailable(_) => "unavailable".into(),
+            Self::Internal(_) => "internal".into(),
+            Self::Detailed { code, .. } => code.clone(),
+        }
+    }
+
+    pub fn details(&self) -> Option<Value> {
+        match self {
+            Self::Detailed { details, .. } => Some(details.clone()),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for ToolError {
@@ -33,6 +105,7 @@ impl std::fmt::Display for ToolError {
             | Self::Aborted(value)
             | Self::Unavailable(value)
             | Self::Internal(value) => value,
+            Self::Detailed { message, .. } => message,
         };
         f.write_str(message)
     }
@@ -84,6 +157,43 @@ impl ComponentToolRegistry {
         self.tools.write().unwrap().remove(name).is_some()
     }
 
+    /// Replace one complete extension generation atomically. Validation is
+    /// performed while the registry is still unchanged, so a bad candidate
+    /// cannot remove the last valid model-facing tool surface.
+    pub fn replace_generation(
+        &self,
+        remove: &std::collections::BTreeSet<String>,
+        additions: Vec<(String, Arc<dyn ToolComponent>)>,
+    ) -> Result<(), ToolError> {
+        let mut tools = self.tools.write().unwrap();
+        let mut names = std::collections::BTreeSet::new();
+        for (name, _) in &additions {
+            if !names.insert(name.clone()) {
+                return Err(ToolError::Conflict(format!(
+                    "tool generation declares {name:?} more than once"
+                )));
+            }
+            if tools.contains_key(name) && !remove.contains(name) {
+                return Err(ToolError::Conflict(format!(
+                    "tool already registered outside this generation: {name}"
+                )));
+            }
+        }
+        for name in remove {
+            tools.remove(name);
+        }
+        for (name, component) in additions {
+            tools.insert(
+                name,
+                RegisteredTool {
+                    component,
+                    enabled: true,
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// Temporarily remove a tool from the executable surface while retaining
     /// its component generation for a later availability transition.
     pub fn disable(&self, name: &str) -> bool {
@@ -132,6 +242,18 @@ impl ComponentToolRegistry {
         }
         component.invoke(request).await
     }
+
+    pub async fn invoke_enveloped(&self, name: &str, request: &[u8]) -> Vec<u8> {
+        let envelope = match self.invoke(name, request).await {
+            Ok(bytes) => {
+                let output = serde_json::from_slice::<Value>(&bytes)
+                    .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned().into());
+                ToolResultEnvelope::success(output)
+            }
+            Err(error) => ToolResultEnvelope::failure(&error),
+        };
+        serde_json::to_vec(&envelope).expect("tool result envelope is serializable")
+    }
 }
 
 /// Adapts a live WASM tool generation into the session registry.
@@ -169,7 +291,18 @@ fn map_wasm_error(error: WasmToolError) -> ToolError {
         WasmToolError::Conflict => ToolError::Conflict("tool operation conflicted".into()),
         WasmToolError::Aborted => ToolError::Aborted("tool operation aborted".into()),
         WasmToolError::Internal => ToolError::Internal("tool component failed".into()),
-        WasmToolError::Unavailable => ToolError::NotFound("tool component unavailable".into()),
+        WasmToolError::Unavailable => ToolError::Unavailable("tool component unavailable".into()),
+        WasmToolError::Detailed {
+            code,
+            message,
+            details,
+        } => ToolError::Detailed {
+            code,
+            message,
+            details: details
+                .and_then(|details| serde_json::from_str(&details).ok())
+                .unwrap_or(Value::Null),
+        },
     }
 }
 

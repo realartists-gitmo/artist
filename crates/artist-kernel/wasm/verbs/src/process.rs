@@ -5,6 +5,7 @@
 //! supervises processes.
 
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 
 use crate::host::{VerbError, VerbTool};
 
@@ -15,6 +16,8 @@ pub struct RunRequest {
     #[serde(default)]
     pub arguments: Vec<String>,
     pub working_directory: Option<String>,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]

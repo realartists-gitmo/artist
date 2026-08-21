@@ -4,8 +4,9 @@
 //! the stable artifact boundary consumed by the runtime.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
@@ -23,15 +24,20 @@ use sha2::{Digest, Sha256};
 use wasmtime::Engine;
 
 pub mod bootstrap;
+pub mod compaction;
 pub mod composition;
 pub mod composition_extension;
 pub mod identity;
 pub mod policy;
+pub mod process;
 pub mod profile;
 pub mod tools;
 
 pub use artist_wasm_composition::types::SessionInput as CompositionInput;
 pub use bootstrap::ComponentHost;
+pub use compaction::{
+    CompactionComponent, CompactionError, CompactionRequest, CompactionResponse, CompactionSocket,
+};
 pub use composition::{
     CompositionWatcher, PackageComponentLoader, UrlComposition, UrlCompositionSource,
 };
@@ -41,8 +47,12 @@ pub use policy::{
     DirectoryResourceProvider, PermissionEffect, PermissionRegistry, PermissionRule,
     install_profile_view, install_prompt_view,
 };
-pub use profile::ProfileDocument;
-pub use tools::{ComponentToolRegistry, ToolComponent, ToolError, WasmToolComponent};
+pub use process::ProcessRegistry;
+pub use profile::{FileProfileComponent, ProfileComponent, ProfileDocument, ProfileSocket};
+pub use tools::{
+    ComponentToolRegistry, ToolComponent, ToolError, ToolFailure, ToolResultEnvelope,
+    WasmToolComponent,
+};
 
 /// Session-bound composition source. The agent loop calls this at each model
 /// boundary and applies the returned provider-neutral events to its
@@ -66,6 +76,11 @@ const PACKAGE_README: &str = "README.md";
 pub struct ExtensionManifest {
     pub name: String,
     pub version: String,
+    /// Optional declarations are checked against the component's actual
+    /// exported Artist contract families. Omitting the field preserves the
+    /// package format for older manifests while never allowing a false claim.
+    #[serde(default)]
+    pub roles: Vec<String>,
     #[serde(default)]
     pub route_hints: Vec<String>,
     #[serde(default)]
@@ -93,6 +108,24 @@ impl ExtensionManifest {
                 })
                 .collect(),
         }
+    }
+
+    fn validate_roles(&self, class: ExtensionClass) -> anyhow::Result<()> {
+        for role in &self.roles {
+            let present = match role.as_str() {
+                "noun" => class.noun,
+                "verb" => class.verb,
+                "event" => class.event,
+                "composition" => class.composition,
+                other => return Err(anyhow!("unknown extension role {other:?}")),
+            };
+            if !present {
+                return Err(anyhow!(
+                    "extension declares role {role:?} but its WIT exports do not provide it"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -137,9 +170,9 @@ impl ExtensionCatalog {
         package: &ExtensionPackage,
         runtime: &Runtime,
     ) -> anyhow::Result<artist_wasm::GenerationHandle> {
-        self.publish(package);
         let prepared = package.prepare(runtime)?;
         let handle = runtime.activate(prepared).await?;
+        self.publish(package);
         if handle.class().noun {
             let kernel = self
                 .kernel
@@ -278,18 +311,22 @@ impl ResourceProvider for ExtensionCatalog {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, ResourceError> {
+        const MAX_CATALOG_READ: u32 = 64 * 1024 * 1024;
         let Some(path) = self.target(uri)? else {
             return Err(ResourceError::new(
                 ResourceErrorCode::IsDir,
                 "cannot read resource catalog root",
             ));
         };
-        let bytes = std::fs::read(&path).map_err(|error| Self::io_error(uri, error))?;
-        Ok(bytes
-            .into_iter()
-            .skip(offset as usize)
-            .take(size as usize)
-            .collect())
+        let mut file = std::fs::File::open(&path).map_err(|error| Self::io_error(uri, error))?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|error| Self::io_error(uri, error))?;
+        let mut bytes = vec![0_u8; size.min(MAX_CATALOG_READ) as usize];
+        let count = file
+            .read(&mut bytes)
+            .map_err(|error| Self::io_error(uri, error))?;
+        bytes.truncate(count);
+        Ok(bytes)
     }
 }
 
@@ -316,6 +353,7 @@ impl ExtensionPackage {
         require_package_directory(root, PACKAGE_SOURCE)?;
 
         let artifact = ComponentArtifact::from_file(engine, root.join(PACKAGE_ARTIFACT))?;
+        manifest.validate_roles(artifact.class())?;
         Ok(Self {
             root: root.to_path_buf(),
             manifest,
@@ -453,6 +491,7 @@ impl Default for BuildLimits {
 pub struct CommandBuildService {
     engine: Engine,
     limits: BuildLimits,
+    cache: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
 }
 
 impl CommandBuildService {
@@ -461,7 +500,11 @@ impl CommandBuildService {
     }
 
     pub fn with_limits(engine: Engine, limits: BuildLimits) -> Self {
-        Self { engine, limits }
+        Self {
+            engine,
+            limits,
+            cache: Arc::new(Mutex::new(BTreeMap::new())),
+        }
     }
 }
 
@@ -469,6 +512,17 @@ impl CommandBuildService {
 impl SourceBuildService for CommandBuildService {
     async fn build(&self, request: BuildRequest) -> Result<BuildOutput, BuildError> {
         request.validate().map_err(BuildError::Invalid)?;
+        let cache_key = build_cache_key(&request).map_err(BuildError::Invalid)?;
+        if let Some(bytes) = self.cache.lock().unwrap().get(&cache_key).cloned() {
+            let artifact =
+                ComponentArtifact::from_bytes(&self.engine, bytes).map_err(BuildError::Artifact)?;
+            return Ok(BuildOutput {
+                artifact,
+                metadata: request.metadata,
+                stdout: b"component build cache hit\n".to_vec(),
+                stderr: Vec::new(),
+            });
+        }
         let output = tokio::time::timeout(
             self.limits.timeout,
             tokio::process::Command::new(&request.program)
@@ -504,6 +558,10 @@ impl SourceBuildService for CommandBuildService {
         }
         let artifact =
             ComponentArtifact::from_bytes(&self.engine, bytes).map_err(BuildError::Artifact)?;
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(cache_key, artifact.bytes().to_vec());
         Ok(BuildOutput {
             artifact,
             metadata: request.metadata,
@@ -511,6 +569,46 @@ impl SourceBuildService for CommandBuildService {
             stderr: output.stderr,
         })
     }
+}
+
+fn build_cache_key(request: &BuildRequest) -> anyhow::Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(request.program.as_bytes());
+    for arg in &request.args {
+        hasher.update([0]);
+        hasher.update(arg.as_bytes());
+    }
+    hasher.update(request.current_dir.to_string_lossy().as_bytes());
+    hasher.update(request.artifact_path.to_string_lossy().as_bytes());
+    hasher.update(request.metadata.name.as_bytes());
+    hasher.update(request.metadata.version.as_bytes());
+    for route in &request.metadata.route_hints {
+        hasher.update(route.as_bytes());
+    }
+    for dependency in &request.metadata.dependencies {
+        hasher.update(dependency.name.as_bytes());
+        hasher.update(dependency.version.as_bytes());
+    }
+    if request.current_dir.is_dir() {
+        let mut files = Vec::new();
+        for entry in walkdir::WalkDir::new(&request.current_dir) {
+            let entry = entry?;
+            if !entry.file_type().is_file() || entry.path() == request.artifact_path {
+                continue;
+            }
+            files.push(entry.into_path());
+        }
+        files.sort();
+        for path in files {
+            hasher.update(
+                path.strip_prefix(&request.current_dir)?
+                    .to_string_lossy()
+                    .as_bytes(),
+            );
+            hasher.update(std::fs::read(path)?);
+        }
+    }
+    Ok(hex_digest(&hasher.finalize()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -654,7 +752,7 @@ version = ">=1.0.0"
         assert_eq!(loaded.manifest().name, "demo");
         assert_eq!(loaded.manifest().dependencies[0].name, "base");
         assert_eq!(loaded.source_root(), package.path().join("src"));
-        assert_eq!(loaded.artifact().class().noun, true);
+        assert!(loaded.artifact().class().noun);
     }
 
     #[tokio::test]

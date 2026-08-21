@@ -124,17 +124,8 @@ impl ToolRunner {
     }
 }
 
-fn format_invocation_error(error: ToolError) -> &'static str {
-    match error {
-        ToolError::InvalidArgument(_) => "invalid_argument",
-        ToolError::NotFound(_) => "not_found",
-        ToolError::Unsupported(_) => "unsupported",
-        ToolError::PermissionDenied(_) => "permission_denied",
-        ToolError::Conflict(_) => "conflict",
-        ToolError::Aborted(_) => "aborted",
-        ToolError::Unavailable(_) => "unavailable",
-        ToolError::Internal(_) => "internal",
-    }
+fn format_invocation_error(error: ToolError) -> String {
+    error.code()
 }
 
 pub fn validate_root(root: &Path) -> anyhow::Result<()> {
@@ -144,17 +135,18 @@ pub fn validate_root(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn extension_root() -> anyhow::Result<PathBuf> {
+pub(crate) fn extension_root() -> anyhow::Result<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(path) = std::env::var_os("ARTIST_EXTENSIONS_DIR") {
         candidates.push(PathBuf::from(path));
     }
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(parent) = executable.parent() {
+    if let Some(parent) = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf))
+    {
+        candidates.push(parent.join("extensions"));
+        if let Some(parent) = parent.parent() {
             candidates.push(parent.join("extensions"));
-            if let Some(parent) = parent.parent() {
-                candidates.push(parent.join("extensions"));
-            }
         }
     }
     if let Ok(current) = std::env::current_dir() {

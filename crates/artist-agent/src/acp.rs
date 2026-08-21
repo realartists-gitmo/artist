@@ -133,6 +133,49 @@ impl AcpAdapter {
                         .into(),
                 },
             },
+            "agent.model_event" => match payload.pointer("/event/type").and_then(Value::as_str) {
+                Some("text_delta") => AcpSessionUpdate::AgentMessageChunk {
+                    content: AcpContentChunk {
+                        kind: "text".into(),
+                        text: payload
+                            .pointer("/event/text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                    },
+                },
+                Some("reasoning_delta") => AcpSessionUpdate::AgentThoughtChunk {
+                    content: AcpContentChunk {
+                        kind: "text".into(),
+                        text: payload
+                            .pointer("/event/text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                    },
+                },
+                Some("tool_call_delta") => AcpSessionUpdate::ToolCall {
+                    tool_call_id: payload
+                        .pointer("/event/id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .into(),
+                    title: payload
+                        .pointer("/event/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool")
+                        .into(),
+                    status: "in_progress".into(),
+                    raw_input: payload
+                        .pointer("/event/arguments_delta")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                },
+                _ => AcpSessionUpdate::ArtistEvent {
+                    event_type: event_type.clone(),
+                    payload: payload.clone(),
+                },
+            },
             "agent.tool_requested" => AcpSessionUpdate::ToolCall {
                 tool_call_id: payload
                     .pointer("/call/id")

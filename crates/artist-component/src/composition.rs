@@ -6,6 +6,7 @@
 //! the candidate set, and hands lifecycle operations to the component runtime.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,7 +23,7 @@ use async_trait::async_trait;
 use notify::{RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
-use crate::{ComponentToolRegistry, WasmToolComponent};
+use crate::{ComponentToolRegistry, ToolComponent, WasmToolComponent};
 use crate::{ExtensionCatalog, ExtensionPackage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -241,6 +242,15 @@ impl UrlComposition {
         for root in roots.values() {
             packages.push(ExtensionPackage::open(&self.engine, root)?);
         }
+        let composition_count = packages
+            .iter()
+            .filter(|package| package.artifact().class().composition)
+            .count();
+        if composition_count != 1 {
+            return Err(anyhow!(
+                "a valid composition must contain exactly one composition extension; found {composition_count}"
+            ));
+        }
 
         let mut bundle = Vec::with_capacity(packages.len());
         for package in &packages {
@@ -262,11 +272,50 @@ impl UrlComposition {
             bundle.push((package.artifact().bytes().to_vec(), metadata));
         }
 
-        let mut claimed_tools = BTreeSet::new();
+        let claims = UrlClaimRegistry::default();
         for package in &packages {
             for name in &package.manifest().route_hints {
-                if !claimed_tools.insert(name.clone()) {
-                    return Err(anyhow!("duplicate extension route hint: {name}"));
+                // The manifest also serves the model-tool registry, whose
+                // stable public names are deliberately bare (`read`,
+                // `grep`, ...).  Turn that shorthand into a real namespace
+                // claim at the URL boundary; explicit URI claims remain
+                // untouched and are validated by the URL registry itself.
+                let claim = if name.contains("://") {
+                    name.clone()
+                } else {
+                    format!("tool://{name}")
+                };
+                claims
+                    .register(&claim)
+                    .map_err(|error| anyhow!("extension namespace claim {name:?}: {error}"))?;
+            }
+        }
+
+        // Validate the model-facing tool namespace before activating a new
+        // runtime generation. Existing tools from this composition may be
+        // replaced; tools owned by another component (notably process tools)
+        // are a deterministic conflict.
+        let old_tools = self.active_tools.lock().unwrap().clone();
+        let mut candidate_tool_names = BTreeSet::new();
+        for package in &packages {
+            for name in package
+                .manifest()
+                .route_hints
+                .iter()
+                .filter_map(|name| bare_tool_name(name))
+            {
+                if !candidate_tool_names.insert(name.to_owned()) {
+                    return Err(anyhow!("duplicate tool route claim {name:?}"));
+                }
+                if self
+                    .tools
+                    .as_ref()
+                    .is_some_and(|tools| tools.all_names().iter().any(|existing| existing == name))
+                    && !old_tools.contains(name)
+                {
+                    return Err(anyhow!(
+                        "tool route {name:?} conflicts with an active non-composition tool"
+                    ));
                 }
             }
         }
@@ -285,17 +334,12 @@ impl UrlComposition {
             .cloned()
             .collect();
         for name in old {
-            if let Some(tools) = &self.tools {
-                tools.unregister(&name);
-            }
+            self.catalog.unpublish(&name);
             self.manager.retire(&name).await;
         }
         if let Some(tools) = &self.tools {
-            let old_tools = std::mem::take(&mut *self.active_tools.lock().unwrap());
-            for name in old_tools {
-                tools.unregister(&name);
-            }
-            let mut current_tools = self.active_tools.lock().unwrap();
+            let mut additions: Vec<(String, Arc<dyn ToolComponent>)> = Vec::new();
+            let mut current_tools = BTreeSet::new();
             for handle in &handles {
                 if !handle.class().verb {
                     continue;
@@ -309,18 +353,29 @@ impl UrlComposition {
                 let names = if package.manifest().route_hints.is_empty() {
                     vec![package.manifest().name.clone()]
                 } else {
-                    package.manifest().route_hints.clone()
+                    package
+                        .manifest()
+                        .route_hints
+                        .iter()
+                        .filter_map(|name| bare_tool_name(name).map(str::to_owned))
+                        .collect()
                 };
                 for name in names {
-                    tools
-                        .register(WasmToolComponent::new(WasmTool::new(
-                            name.clone(),
+                    let tool_name = name.clone();
+                    current_tools.insert(name.clone());
+                    additions.push((
+                        name,
+                        Arc::new(WasmToolComponent::new(WasmTool::new(
+                            tool_name,
                             handle.clone(),
-                        )))
-                        .map_err(|error| anyhow!(error.to_string()))?;
-                    current_tools.insert(name);
+                        ))) as Arc<dyn ToolComponent>,
+                    ));
                 }
             }
+            tools
+                .replace_generation(&old_tools, additions)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            *self.active_tools.lock().unwrap() = current_tools;
         }
         *self.active.lock().unwrap() = desired;
         Ok(handles)
@@ -330,6 +385,18 @@ impl UrlComposition {
     /// The watcher keeps the last valid composition when a write is partial or
     /// invalid; the next filesystem event retries the candidate.
     pub fn watch(self: Arc<Self>) -> anyhow::Result<CompositionWatcher> {
+        self.watch_with(|_| async {})
+    }
+
+    /// Watch and report only complete, valid replacement generations. The
+    /// callback runs after `reload` has atomically prepared the candidate, so
+    /// host-side adapters can move to the same generation without exposing a
+    /// partially written composition.
+    pub fn watch_with<F, Fut>(self: Arc<Self>, callback: F) -> anyhow::Result<CompositionWatcher>
+    where
+        F: Fn(Vec<GenerationHandle>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut watcher = notify::recommended_watcher(move |event| {
             let _ = sender.send(event);
@@ -345,7 +412,9 @@ impl UrlComposition {
             while receiver.recv().await.is_some() {
                 tokio::time::sleep(Duration::from_millis(75)).await;
                 while receiver.try_recv().is_ok() {}
-                let _ = self.reload().await;
+                if let Ok(handles) = self.reload().await {
+                    callback(handles).await;
+                }
             }
         });
         Ok(CompositionWatcher { task })
@@ -382,6 +451,15 @@ fn package_roots(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     }
     roots.sort();
     Ok(roots)
+}
+
+fn bare_tool_name(value: &str) -> Option<&str> {
+    (!value.trim().is_empty()
+        && !value.contains("://")
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains('\0'))
+    .then_some(value)
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ use artist_kernel::{Kernel, ResourceError, ResourceErrorCode, ResourceUri};
 use async_trait::async_trait;
 
 use crate::host::{VerbError, VerbTool};
+use crate::teca::{TecaError, TecaSnapshot};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct EditChange {
@@ -23,11 +24,18 @@ pub struct EditRequest {
     pub changes: Vec<EditChange>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct EditResponse {
+    pub uri: String,
+    pub updated_anchors: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditError {
     InvalidUri(String),
     InvalidChanges(String),
     StaleAnchor(String),
+    AmbiguousAnchor(String),
     InvalidUtf8,
     Resource(ResourceError),
 }
@@ -38,6 +46,7 @@ impl std::fmt::Display for EditError {
             Self::InvalidUri(value) => write!(f, "invalid edit URI: {value}"),
             Self::InvalidChanges(value) => write!(f, "invalid edit changes: {value}"),
             Self::StaleAnchor(value) => write!(f, "stale edit anchor: {value}"),
+            Self::AmbiguousAnchor(value) => write!(f, "ambiguous edit anchor: {value}"),
             Self::InvalidUtf8 => write!(f, "edit target is not valid UTF-8"),
             Self::Resource(error) => write!(f, "edit failed: {error}"),
         }
@@ -84,16 +93,53 @@ impl ResourceEditor for KernelEditor {
     }
 
     async fn replace_all(&self, uri: &ResourceUri, content: &[u8]) -> Result<(), ResourceError> {
-        self.kernel.set_size_uri(uri, 0).await?;
-        if !content.is_empty() {
-            self.kernel.write_uri(uri, 0, content).await?;
+        match self.kernel.replace_uri(uri, content).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.code == ResourceErrorCode::Unsupported => {
+                self.kernel.set_size_uri(uri, 0).await?;
+                if !content.is_empty() {
+                    let written = self.kernel.write_uri(uri, 0, content).await?;
+                    if written as usize != content.len() {
+                        return Err(ResourceError::new(
+                            ResourceErrorCode::Io,
+                            format!("short replacement write: {written}/{}", content.len()),
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
-        Ok(())
     }
 }
 
 pub trait AnchorResolver: Send + Sync {
     fn resolve(&self, source: &str, anchor: &str) -> Result<(usize, usize), EditError>;
+
+    fn updated_anchors(&self, _source: &str) -> Result<Vec<String>, EditError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Stateless TECA resolver used by the production text-edit path.
+pub struct TecaAnchorResolver;
+
+impl AnchorResolver for TecaAnchorResolver {
+    fn resolve(&self, source: &str, anchor: &str) -> Result<(usize, usize), EditError> {
+        TecaSnapshot::from_source(source)
+            .resolve(anchor)
+            .map(|span| (span.start, span.end))
+            .map_err(|error| match error {
+                TecaError::Ambiguous(value) => EditError::AmbiguousAnchor(value),
+                TecaError::Stale(value) | TecaError::InvalidAddress(value) => {
+                    EditError::StaleAnchor(value)
+                }
+            })
+    }
+
+    fn updated_anchors(&self, source: &str) -> Result<Vec<String>, EditError> {
+        Ok(TecaSnapshot::from_source(source).anchors())
+    }
 }
 
 /// Temporary line resolver. Exact anchors win; decimal values are 1-based.
@@ -138,14 +184,14 @@ impl<E, R> EditVerb<E, R> {
 }
 
 #[async_trait]
-impl<E: ResourceEditor + 'static, R: AnchorResolver + 'static> VerbTool<EditRequest, ()>
+impl<E: ResourceEditor + 'static, R: AnchorResolver + 'static> VerbTool<EditRequest, EditResponse>
     for EditVerb<E, R>
 {
     fn name(&self) -> &str {
         "edit"
     }
 
-    async fn call(&self, requests: Vec<EditRequest>) -> Vec<Result<(), VerbError>> {
+    async fn call(&self, requests: Vec<EditRequest>) -> Vec<Result<EditResponse, VerbError>> {
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
             results.push(
@@ -162,7 +208,7 @@ pub async fn edit_resource<E: ResourceEditor, R: AnchorResolver>(
     editor: &E,
     resolver: &R,
     request: EditRequest,
-) -> Result<(), EditError> {
+) -> Result<EditResponse, EditError> {
     let uri = request
         .uri
         .parse::<ResourceUri>()
@@ -194,10 +240,15 @@ pub async fn edit_resource<E: ResourceEditor, R: AnchorResolver>(
     for (start, end, replacement) in spans.into_iter().rev() {
         output.replace_range(start..end, &replacement);
     }
+    let updated_anchors = resolver.updated_anchors(&output)?;
     editor
         .replace_all(&uri, output.as_bytes())
         .await
-        .map_err(EditError::Resource)
+        .map_err(EditError::Resource)?;
+    Ok(EditResponse {
+        uri: uri.to_string(),
+        updated_anchors,
+    })
 }
 
 fn map_error(error: EditError) -> VerbError {
@@ -205,7 +256,7 @@ fn map_error(error: EditError) -> VerbError {
         EditError::InvalidUri(_) | EditError::InvalidChanges(_) | EditError::InvalidUtf8 => {
             VerbError::InvalidArgument
         }
-        EditError::StaleAnchor(_) => VerbError::Conflict,
+        EditError::StaleAnchor(_) | EditError::AmbiguousAnchor(_) => VerbError::Conflict,
         EditError::Resource(error) => match error.code {
             ResourceErrorCode::NotFound => VerbError::NotFound,
             ResourceErrorCode::PermissionDenied => VerbError::PermissionDenied,

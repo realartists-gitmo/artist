@@ -17,12 +17,20 @@ pub struct WriteRequest {
     pub content: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct WriteResponse {
+    pub created: bool,
+    pub replaced: bool,
+    pub bytes_written: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WriteError {
     InvalidUri(String),
     SelectorNotAllowed(String),
     Resource(ResourceError),
     TooLarge,
+    ShortWrite { expected: usize, actual: usize },
 }
 
 impl std::fmt::Display for WriteError {
@@ -34,6 +42,9 @@ impl std::fmt::Display for WriteError {
             }
             Self::Resource(error) => write!(f, "write failed: {error}"),
             Self::TooLarge => write!(f, "write content exceeds the kernel write capacity"),
+            Self::ShortWrite { expected, actual } => {
+                write!(f, "resource accepted only {actual} of {expected} bytes")
+            }
         }
     }
 }
@@ -47,6 +58,15 @@ pub trait ResourceWriter: Send + Sync {
     async fn create_file(&self, uri: &ResourceUri) -> Result<(), ResourceError>;
     async fn set_size(&self, uri: &ResourceUri, size: u64) -> Result<(), ResourceError>;
     async fn write(&self, uri: &ResourceUri, content: &[u8]) -> Result<u32, ResourceError>;
+
+    /// Providers may commit the complete replacement atomically. The default
+    /// fallback is deliberately explicit and is used only for Unsupported.
+    async fn replace_all(&self, _uri: &ResourceUri, _content: &[u8]) -> Result<u64, ResourceError> {
+        Err(ResourceError::new(
+            ResourceErrorCode::Unsupported,
+            "writer does not support atomic replacement",
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -80,6 +100,10 @@ impl ResourceWriter for KernelWriter {
     async fn write(&self, uri: &ResourceUri, content: &[u8]) -> Result<u32, ResourceError> {
         self.kernel.write_uri(uri, 0, content).await
     }
+
+    async fn replace_all(&self, uri: &ResourceUri, content: &[u8]) -> Result<u64, ResourceError> {
+        self.kernel.replace_uri(uri, content).await
+    }
 }
 
 pub struct WriteVerb<W> {
@@ -93,12 +117,12 @@ impl<W> WriteVerb<W> {
 }
 
 #[async_trait]
-impl<W: ResourceWriter + 'static> VerbTool<WriteRequest, ()> for WriteVerb<W> {
+impl<W: ResourceWriter + 'static> VerbTool<WriteRequest, WriteResponse> for WriteVerb<W> {
     fn name(&self) -> &str {
         "write"
     }
 
-    async fn call(&self, requests: Vec<WriteRequest>) -> Vec<Result<(), VerbError>> {
+    async fn call(&self, requests: Vec<WriteRequest>) -> Vec<Result<WriteResponse, VerbError>> {
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
             results.push(
@@ -114,14 +138,14 @@ impl<W: ResourceWriter + 'static> VerbTool<WriteRequest, ()> for WriteVerb<W> {
 pub async fn write_resource<W: ResourceWriter>(
     writer: &W,
     request: WriteRequest,
-) -> Result<(), WriteError> {
+) -> Result<WriteResponse, WriteError> {
     let uri = parse_uri(&request.uri)?;
     let content = request.content.into_bytes();
     if content.len() > u32::MAX as usize {
         return Err(WriteError::TooLarge);
     }
 
-    match writer.attrs(&uri).await {
+    let (created, replaced) = match writer.attrs(&uri).await {
         Ok(attrs) => {
             if attrs.kind == NodeKind::Directory {
                 return Err(WriteError::Resource(ResourceError::new(
@@ -129,25 +153,50 @@ pub async fn write_resource<W: ResourceWriter>(
                     "cannot write a directory",
                 )));
             }
+            (false, true)
+        }
+        Err(error) if error.code == ResourceErrorCode::NotFound => {
             writer
-                .set_size(&uri, 0)
+                .create_file(&uri)
                 .await
                 .map_err(WriteError::Resource)?;
+            (true, false)
         }
-        Err(error) if error.code == ResourceErrorCode::NotFound => writer
-            .create_file(&uri)
-            .await
-            .map_err(WriteError::Resource)?,
         Err(error) => return Err(WriteError::Resource(error)),
-    }
+    };
 
-    if !content.is_empty() {
-        writer
-            .write(&uri, &content)
-            .await
-            .map_err(WriteError::Resource)?;
-    }
-    Ok(())
+    let bytes_written = match writer.replace_all(&uri, &content).await {
+        Ok(written) => written,
+        Err(error) if error.code == ResourceErrorCode::Unsupported => {
+            if replaced {
+                writer
+                    .set_size(&uri, 0)
+                    .await
+                    .map_err(WriteError::Resource)?;
+            }
+            if content.is_empty() {
+                0
+            } else {
+                let written = writer
+                    .write(&uri, &content)
+                    .await
+                    .map_err(WriteError::Resource)?;
+                if written as usize != content.len() {
+                    return Err(WriteError::ShortWrite {
+                        expected: content.len(),
+                        actual: written as usize,
+                    });
+                }
+                u64::from(written)
+            }
+        }
+        Err(error) => return Err(WriteError::Resource(error)),
+    };
+    Ok(WriteResponse {
+        created,
+        replaced,
+        bytes_written,
+    })
 }
 
 fn parse_uri(value: &str) -> Result<ResourceUri, WriteError> {
@@ -162,9 +211,10 @@ fn parse_uri(value: &str) -> Result<ResourceUri, WriteError> {
 
 fn map_error(error: WriteError) -> VerbError {
     match error {
-        WriteError::InvalidUri(_) | WriteError::SelectorNotAllowed(_) | WriteError::TooLarge => {
-            VerbError::InvalidArgument
-        }
+        WriteError::InvalidUri(_)
+        | WriteError::SelectorNotAllowed(_)
+        | WriteError::TooLarge
+        | WriteError::ShortWrite { .. } => VerbError::InvalidArgument,
         WriteError::Resource(error) => match error.code {
             ResourceErrorCode::NotFound => VerbError::NotFound,
             ResourceErrorCode::PermissionDenied => VerbError::PermissionDenied,
