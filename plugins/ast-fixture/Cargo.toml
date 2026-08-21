@@ -1,0 +1,12 @@
+[package]
+name = "artist-ast-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.46.0", default-features = false, features = ["macros", "realloc", "std"] }
+serde_json = "1"

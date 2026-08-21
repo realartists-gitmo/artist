@@ -1,63 +1,32 @@
 [workspace]
-members = [
-    "crates/artist-kernel",
-    "crates/artist-kernel/vfs",
-    "crates/artist-kernel/vfs/windows",
-    "crates/artist-kernel/wasm",
-    "crates/artist-kernel/wasm/nouns",
-    "crates/artist-kernel/wasm/resources",
-    "crates/artist-kernel/wasm/url",
-    "crates/artist-default-tools",
-    "crates/artist-default-prompt",
-    "crates/artist-root",
-    "crates/artist-kernel/wasm/verbs",
-    "crates/artist-kernel/wasm/events",
-    "crates/artist-kernel/wasm/composition",
-    "crates/artist-kernel/wasm/filesystem",
-    "crates/artist-ast",
-    "crates/llm-provider",
-    "crates/artist-cli",
-    "crates/artist-agent",
-    "crates/artist-session",
-    "crates/artist-component",
-    "crates/artist-teca",
-]
+members = ["crates/*"]
 resolver = "3"
-exclude = ["vendor/fff"]
 
 [workspace.package]
 edition = "2024"
-license = "MIT OR Apache-2.0"
-rust-version = "1.97"
+license = "MIT"
+rust-version = "1.89"
 
-[profile.dev]
-split-debuginfo = "unpacked"
-
-[profile.release]
-# Incremental release artifacts can produce missing LLVM-local symbols when
-# combined with parallel backend codegen, particularly in Wasmtime-heavy crates.
-incremental = false
-split-debuginfo = "unpacked"
-
-[profile.profiler]
-inherits = "release"
-opt-level = 3
-overflow-checks = false
-debug = "line-tables-only"
-split-debuginfo = "unpacked"
-strip = false
-
-[profile.product]
-inherits = "release"
-opt-level = 3
-incremental = false
-overflow-checks = false
-strip = true
-lto = "fat"
-codegen-units = 1
-
-# Profiling builds: release codegen + debug symbols, separate cache so samply
-# runs never invalidate the plain release artifacts.
-[profile.release-debug]
-inherits = "release"
-debug = true
+[workspace.dependencies]
+async-stream = "0.3.6"
+async-trait = "0.1.89"
+fff-search = "=0.10.5"
+fuser = { version = "0.17", default-features = false, features = ["abi-7-31"] }
+futures = "0.3.31"
+globset = "0.4.16"
+libc = "0.2.175"
+percent-encoding = "2.3.2"
+regex = "1.11.2"
+rig-agent = { version = "0.42.0", default-features = false }
+rig-core = { version = "0.42.0", default-features = false }
+rig-memory = "0.42.0"
+rig-tap = "0.3.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+url = { version = "2.5.7", features = ["serde"] }
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
+tempfile = "3.21.0"
+wasmtime = { version = "38.0.4", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "38.0.4", default-features = false, features = ["p2"] }

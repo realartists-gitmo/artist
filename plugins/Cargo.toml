@@ -1,0 +1,3 @@
+[workspace]
+members = ["default", "ast-fixture", "tool-fixture"]
+resolver = "3"
