@@ -73,6 +73,30 @@ pub enum ResourceErrorCode {
     PermissionDenied,
 }
 
+/// A generic signal directed at a resource. Resource implementations decide
+/// which signal names they support; the kernel only routes the request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceSignal {
+    pub name: String,
+    pub payload: Option<Vec<u8>>,
+}
+
+impl ResourceSignal {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            payload: None,
+        }
+    }
+
+    pub fn with_payload(name: impl Into<String>, payload: Vec<u8>) -> Self {
+        Self {
+            name: name.into(),
+            payload: Some(payload),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceError {
     pub code: ResourceErrorCode,
@@ -212,6 +236,19 @@ pub trait ResourceProvider: Send + Sync {
         Err(ResourceError::new(
             ResourceErrorCode::Unsupported,
             "provider does not support URI deletion",
+        ))
+    }
+
+    /// Deliver a generic control signal to a resource. Signal names are
+    /// interpreted by the selected resource component, not by the kernel.
+    async fn signal(
+        &self,
+        _uri: &ResourceUri,
+        _signal: ResourceSignal,
+    ) -> Result<(), ResourceError> {
+        Err(ResourceError::new(
+            ResourceErrorCode::Unsupported,
+            "provider does not support resource signals",
         ))
     }
 }

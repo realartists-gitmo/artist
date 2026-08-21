@@ -125,7 +125,12 @@ impl ToolRunner {
 }
 
 fn format_invocation_error(error: ToolError) -> String {
-    error.code()
+    let code = error.code();
+    let message = error.to_string();
+    match error.details() {
+        Some(details) => format!("{code}: {message} ({details})"),
+        None => format!("{code}: {message}"),
+    }
 }
 
 pub fn validate_root(root: &Path) -> anyhow::Result<()> {

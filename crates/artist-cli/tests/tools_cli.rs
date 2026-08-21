@@ -45,6 +45,7 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
         .compose_initial(CompositionInput {
             identity: "tester".into(),
             profile: None,
+            profile_resource: None,
             system: None,
             agent_instructions: None,
             profile_content: None,
@@ -66,6 +67,7 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
         .compose_initial(CompositionInput {
             identity: "tester".into(),
             profile: None,
+            profile_resource: None,
             system: Some("system".into()),
             agent_instructions: Some("instructions".into()),
             profile_content: None,
@@ -233,7 +235,10 @@ async fn cli_runner_executes_read_find_and_move_as_toon() {
         .await
         .unwrap();
     assert!(!ok);
-    assert_eq!(decode(&rejected)["error"], "invalid_argument");
+    let rejected = decode(&rejected);
+    let error = rejected["error"].as_str().expect("diagnostic error string");
+    assert!(error.starts_with("invalid_argument: "));
+    assert!(error.contains("invalid tool request"));
 
     let (moved, ok) = runner
         .call_toon("move", "source: old.txt\ndestination: renamed.txt\n")

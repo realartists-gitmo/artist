@@ -5,7 +5,6 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 
-use crate::agents::{AgentProcess, AgentTranscript, AgentsProvider};
 use crate::contracts::{ContractRegistry, ExtensionContract};
 use crate::namespace::Namespace;
 use crate::native::FilesNamespace;
@@ -143,6 +142,17 @@ impl ProviderSlot {
             Self::Resource(provider) => provider.delete(uri).await,
         }
     }
+
+    async fn signal(
+        &self,
+        uri: &ResourceUri,
+        signal: crate::provider::ResourceSignal,
+    ) -> Result<(), ResourceError> {
+        match self {
+            Self::Namespace(provider) => ResourceProvider::signal(&**provider, uri, signal).await,
+            Self::Resource(provider) => provider.signal(uri, signal).await,
+        }
+    }
 }
 
 struct Registry {
@@ -157,7 +167,6 @@ struct Registry {
 pub struct Kernel {
     registry: RwLock<Registry>,
     next_ino: AtomicU64,
-    agents: Arc<AgentsProvider>,
     contracts: Arc<ContractRegistry>,
 }
 
@@ -178,20 +187,6 @@ impl Kernel {
     pub fn with_url() -> Self {
         let kernel = Self::empty();
         kernel.register(UrlNamespace::new());
-        kernel
-    }
-
-    /// Explicitly opt a kernel into the agent transcript/process provider.
-    /// Agent resources are not part of the resource bootstrap surface.
-    pub fn with_agents() -> Self {
-        let kernel = Self::with_url();
-        let agents: Arc<dyn ResourceProvider> = kernel.agents.clone();
-        kernel
-            .registry
-            .write()
-            .unwrap()
-            .providers
-            .push(ProviderSlot::Resource(agents));
         kernel
     }
 
@@ -218,7 +213,6 @@ impl Kernel {
 
     /// Construct a kernel without native registrations.
     pub fn empty() -> Self {
-        let agents = Arc::new(AgentsProvider::new());
         let contracts = Arc::new(ContractRegistry::new());
         Self {
             registry: RwLock::new(Registry {
@@ -226,7 +220,6 @@ impl Kernel {
                 providers: Vec::new(),
             }),
             next_ino: AtomicU64::new(Ino::ROOT.0 + 1),
-            agents,
             contracts,
         }
     }
@@ -249,6 +242,13 @@ impl Kernel {
     /// to the VFS. This is the path used by WASM resource components.
     pub fn register_resource_provider<P: ResourceProvider + 'static>(&self, provider: P) {
         let provider: Arc<dyn ResourceProvider> = Arc::new(provider);
+        self.register_shared_resource_provider(provider);
+    }
+
+    /// Publish an already shared provider instance. Component sockets use
+    /// this when the same selected implementation must also receive direct
+    /// registrations (for example live agent transcripts).
+    pub fn register_shared_resource_provider(&self, provider: Arc<dyn ResourceProvider>) {
         let name = provider.provider_name().to_owned();
         let mut registry = self.registry.write().unwrap();
         // Provider identity is the replacement boundary. Keeping two live
@@ -284,47 +284,6 @@ impl Kernel {
         G: ResourceProvider + 'static,
     {
         self.register_resource_provider(LayeredResourceProvider::new(name, local, global));
-    }
-
-    /// Publish an append-only transcript at
-    /// `agent://<agent>/transcript`.
-    pub fn register_agent_transcript<T: AgentTranscript + 'static>(
-        &self,
-        agent: impl Into<String>,
-        transcript: T,
-    ) -> Result<(), ResourceError> {
-        self.agents.register(agent, transcript)
-    }
-
-    pub async fn append_agent_event(
-        &self,
-        uri: &ResourceUri,
-        event_type: &str,
-        payload: serde_json::Value,
-    ) -> Result<(), ResourceError> {
-        self.agents.append(uri, event_type, payload).await
-    }
-
-    pub async fn close_agent_transcript(&self, uri: &ResourceUri) -> Result<(), ResourceError> {
-        self.agents.close(uri).await
-    }
-
-    /// Publish the live process channels at `agent://<agent>/stdin` and
-    /// `agent://<agent>/stdout`.
-    pub fn register_agent_process<T: AgentProcess + 'static>(
-        &self,
-        agent: impl Into<String>,
-        process: T,
-    ) -> Result<(), ResourceError> {
-        self.agents.register_process(agent, process)
-    }
-
-    pub async fn write_agent_stdin(
-        &self,
-        uri: &ResourceUri,
-        data: &[u8],
-    ) -> Result<u32, ResourceError> {
-        self.agents.write_stdin(uri, data).await
     }
 
     /// Register an opaque extension-defined contract. The kernel does not
@@ -482,6 +441,18 @@ impl Kernel {
     pub async fn delete_uri(&self, uri: &ResourceUri) -> Result<(), ResourceError> {
         let base = uri.without_fragment();
         self.provider_for_uri(&base).await?.delete(&base).await
+    }
+
+    pub async fn signal_uri(
+        &self,
+        uri: &ResourceUri,
+        signal: crate::provider::ResourceSignal,
+    ) -> Result<(), ResourceError> {
+        let base = uri.without_fragment();
+        self.provider_for_uri(&base)
+            .await?
+            .signal(&base, signal)
+            .await
     }
 
     pub async fn attrs_str(&self, uri: &str) -> Result<ProviderAttrs, ResourceError> {

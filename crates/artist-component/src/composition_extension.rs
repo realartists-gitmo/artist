@@ -5,14 +5,22 @@ use artist_wasm::{GenerationHandle, HostEnvironment, RuntimeStore};
 use artist_wasm_composition::{extension, resource_host, types};
 use wasmtime::component::Linker;
 
+use crate::{HarnessPolicy, PermissionRegistry};
+
 #[derive(Clone)]
 pub struct WasmComposition {
     generation: GenerationHandle,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CompositionUpdate {
     Context(artist_session::ContextEvent),
+    Profile {
+        profile_id: String,
+        permissions: PermissionRegistry,
+        harness: HarnessPolicy,
+        required_tools: Vec<String>,
+    },
     ToolAvailable {
         name: String,
         description: Option<String>,

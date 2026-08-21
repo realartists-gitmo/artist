@@ -206,6 +206,23 @@ impl ContextController {
     /// composition was used. Later mutations are replayed from their
     /// self-contained event payloads.
     pub fn restore(snapshot: Snapshot, log: Arc<EventLog>) -> Result<Self, ContextError> {
+        Self::restore_with_event_hook(snapshot, log, |_| Ok(None))
+    }
+
+    /// Restore the context while allowing an owning higher-level subsystem to
+    /// contribute durable replacement events that live outside the generic
+    /// context event vocabulary. The hook is evaluated in log order, so a
+    /// later ordinary context mutation still applies after an external
+    /// replacement. The hook never writes to the log; its event is already the
+    /// authoritative transaction boundary owned by the caller.
+    pub fn restore_with_event_hook<F>(
+        snapshot: Snapshot,
+        log: Arc<EventLog>,
+        mut event_hook: F,
+    ) -> Result<Self, ContextError>
+    where
+        F: FnMut(&crate::LogRecord) -> Result<Option<Snapshot>, ContextError>,
+    {
         let records = log
             .records()
             .map_err(|error| ContextError::Log(error.to_string()))?;
@@ -238,6 +255,10 @@ impl ContextController {
         }
 
         for record in records {
+            if let Some(snapshot) = event_hook(&record)? {
+                controller.apply_replayed(ContextEvent::Reset { snapshot })?;
+                continue;
+            }
             let Some(event) = (match record.event_type.as_str() {
                 "context.replace" | "context.remove" | "context.append" | "context.reset" => record
                     .payload
@@ -303,6 +324,16 @@ impl ContextController {
     /// context without erasing historical events.
     pub fn reset(&self, snapshot: Snapshot) -> Result<(), ContextError> {
         self.apply(ContextEvent::Reset { snapshot })
+    }
+
+    /// Replace the in-memory projection for a higher-level transaction whose
+    /// durable event already contains the replacement. This intentionally
+    /// does not append a second context event: the owning transaction remains
+    /// the sole durable authority.
+    pub fn reset_without_log(&self, snapshot: Snapshot) -> Result<(), ContextError> {
+        let replacement = ContextState::from_snapshot(snapshot)?;
+        *self.state.lock().unwrap() = replacement;
+        Ok(())
     }
 
     fn apply_replayed(&self, event: ContextEvent) -> Result<(), ContextError> {

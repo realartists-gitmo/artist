@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use gray_matter::{Matter, engine::YAML};
 use serde::Deserialize;
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::{PermissionEffect, PermissionRegistry, PermissionRule};
 
@@ -115,7 +115,7 @@ impl ProfileComponent for FileProfileComponent {
 
 #[derive(Clone, Default)]
 pub struct ProfileSocket {
-    components: Arc<std::collections::BTreeMap<String, Arc<dyn ProfileComponent>>>,
+    components: Arc<RwLock<std::collections::BTreeMap<String, Arc<dyn ProfileComponent>>>>,
 }
 
 impl ProfileSocket {
@@ -125,26 +125,61 @@ impl ProfileSocket {
             values.insert(component.resource_id().to_owned(), component);
         }
         Self {
-            components: Arc::new(values),
+            components: Arc::new(RwLock::new(values)),
         }
+    }
+
+    pub fn replace(&self, components: impl IntoIterator<Item = Arc<dyn ProfileComponent>>) {
+        let mut values = std::collections::BTreeMap::new();
+        for component in components {
+            values.insert(component.resource_id().to_owned(), component);
+        }
+        *self.components.write().unwrap() = values;
+    }
+
+    /// Install the profile implementations claimed by the active URL graph.
+    /// The host supplies only the two filesystem roots; it does not construct
+    /// or select a concrete profile implementation itself.
+    pub fn refresh_from_routes(
+        &self,
+        routes: &std::collections::BTreeSet<String>,
+        global_root: impl Into<PathBuf>,
+        local_root: impl Into<PathBuf>,
+    ) {
+        let mut components: Vec<Arc<dyn ProfileComponent>> = Vec::new();
+        if routes.contains("profile://filesystem") {
+            components.push(Arc::new(FileProfileComponent::new(
+                "profile://filesystem",
+                global_root,
+                local_root,
+            )));
+        }
+        self.replace(components);
     }
 
     pub fn selected(
         &self,
         resource: Option<&str>,
     ) -> anyhow::Result<Option<Arc<dyn ProfileComponent>>> {
-        let Some(resource) = resource else {
-            return Ok(None);
-        };
-        self.components
-            .get(resource)
-            .cloned()
-            .map(Some)
-            .ok_or_else(|| anyhow!("profile component {resource:?} is unavailable"))
+        let components = self.components.read().unwrap();
+        match resource {
+            Some(resource) => components
+                .get(resource)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| anyhow!("profile component {resource:?} is unavailable")),
+            None => match components.values().next().cloned() {
+                None => Ok(None),
+                Some(component) if components.len() == 1 => Ok(Some(component)),
+                Some(_) => Err(anyhow!(
+                    "multiple profile components are active; select a profile resource URI"
+                )),
+            },
+        }
     }
 
     pub fn resource_ids(&self) -> Vec<String> {
-        self.components.keys().cloned().collect()
+        self.components.read().unwrap().keys().cloned().collect()
     }
 }
 

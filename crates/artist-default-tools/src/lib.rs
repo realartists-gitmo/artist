@@ -5,9 +5,9 @@ wit_bindgen::generate!({
     world: "tool-extension",
 });
 
+use artist_teca::{TecaLine, TecaSnapshot};
 use serde::Serialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 #[derive(serde::Deserialize)]
 struct Envelope {
@@ -24,7 +24,13 @@ struct ReadResponse {
     partial: bool,
     binary: bool,
     mime_type: Option<String>,
-    bytes: Vec<u8>,
+    resource: Option<ReadResource>,
+}
+#[derive(Serialize)]
+struct ReadResource {
+    uri: String,
+    mime_type: Option<String>,
+    size: usize,
 }
 #[derive(Clone, Serialize)]
 struct ReadLine {
@@ -85,14 +91,12 @@ fn invoke(request: Vec<u8>) -> Result<Vec<u8>, Error> {
 fn read(request: Value) -> Result<Value, Error> {
     let requested_uri = string(&request, "uri")?;
     let (uri, position) = split_fragment(&requested_uri);
-    const MAX_READ: usize = 256 * 1024;
-    let bytes = read_bounded(&uri, MAX_READ + 1)?;
-    let partial = bytes.len() > MAX_READ;
-    let bytes = if partial {
-        bytes[..MAX_READ].to_vec()
-    } else {
-        bytes
-    };
+    // TECA addresses are structural, so resolving a fragment requires a
+    // complete bounded snapshot. Read in provider-sized chunks rather than
+    // pretending the first 256 KiB is the whole file.
+    const MAX_READ: usize = 64 * 1024 * 1024;
+    let bytes = read_all_bounded(&uri, MAX_READ)?;
+    let partial = false;
     let source = match std::str::from_utf8(&bytes) {
         Ok(source) => source,
         Err(_) => {
@@ -108,7 +112,11 @@ fn read(request: Value) -> Result<Value, Error> {
                 partial,
                 binary: true,
                 mime_type: infer_mime_type(&uri),
-                bytes,
+                resource: Some(ReadResource {
+                    uri: canonical(&uri),
+                    mime_type: infer_mime_type(&uri),
+                    size: bytes.len(),
+                }),
             })
             .map_err(|_| internal());
         }
@@ -145,7 +153,7 @@ fn read(request: Value) -> Result<Value, Error> {
         partial,
         binary: false,
         mime_type: infer_mime_type(&uri),
-        bytes: Vec::new(),
+        resource: None,
     })
     .map_err(|_| internal())
 }
@@ -445,8 +453,12 @@ fn grep(request: Value) -> Result<Value, Error> {
 }
 
 fn read_all(uri: &str) -> Result<Vec<u8>, Error> {
-    const CHUNK_SIZE: u32 = 64 * 1024;
     const MAX_EDIT_RESOURCE: usize = 64 * 1024 * 1024;
+    read_all_bounded(uri, MAX_EDIT_RESOURCE)
+}
+
+fn read_all_bounded(uri: &str, limit: usize) -> Result<Vec<u8>, Error> {
+    const CHUNK_SIZE: u32 = 64 * 1024;
     let mut offset = 0u64;
     let mut bytes = Vec::new();
     loop {
@@ -455,10 +467,10 @@ fn read_all(uri: &str) -> Result<Vec<u8>, Error> {
         if chunk.is_empty() {
             break;
         }
-        if bytes.len().saturating_add(chunk.len()) > MAX_EDIT_RESOURCE {
+        if bytes.len().saturating_add(chunk.len()) > limit {
             return Err(failure(
                 "unsupported",
-                format!("edit resource exceeds {MAX_EDIT_RESOURCE} bytes"),
+                format!("resource exceeds {limit} bytes"),
             ));
         }
         offset = offset.saturating_add(chunk.len() as u64);
@@ -489,101 +501,16 @@ fn read_bounded(uri: &str, limit: usize) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-struct TecaLine {
-    anchor: String,
-    start: usize,
-    end: usize,
-}
-
 fn teca_lines(source: &str) -> Vec<TecaLine> {
-    let mut lines = Vec::new();
-    let mut parents: Vec<(usize, String)> = Vec::new();
-    let mut ranks = std::collections::BTreeMap::<(String, String), usize>::new();
-    let mut start = 0;
-    for raw in source.split_inclusive('\n') {
-        let content = raw.trim_end_matches(['\n', '\r']);
-        let indent = content.len() - content.trim_start_matches([' ', '\t']).len();
-        while parents
-            .last()
-            .is_some_and(|(parent_indent, _)| *parent_indent >= indent)
-        {
-            parents.pop();
-        }
-        let parent = parents
-            .iter()
-            .map(|(_, shape)| shape.as_str())
-            .collect::<Vec<_>>()
-            .join("/");
-        let normalized = teca_normalize(content);
-        let rank = ranks
-            .entry((parent.clone(), normalized.clone()))
-            .or_default();
-        let current_rank = *rank;
-        *rank += 1;
-        let content_hash = teca_digest(&teca_address_bytes(&parent, &normalized, current_rank));
-        let anchor = format!(
-            "teca:v1:{}:{}:{current_rank:x}:{:x}",
-            teca_digest(parent.as_bytes()),
-            content_hash,
-            content.len()
-        );
-        let end = start + content.len();
-        lines.push(TecaLine { anchor, start, end });
-        if raw.trim_end().ends_with('{') {
-            parents.push((indent, teca_normalize(content.trim_end_matches('{').trim())));
-        }
-        start += raw.len();
-    }
-    lines
+    TecaSnapshot::from_source(source).lines().to_vec()
 }
 
 fn teca_anchor(source: &str, index: usize) -> String {
-    teca_lines(source)
+    TecaSnapshot::from_source(source)
+        .lines()
         .get(index)
         .map(|line| line.anchor.clone())
         .unwrap_or_else(|| format!("teca:v1:missing:{index:x}:0:0"))
-}
-
-fn teca_normalize(content: &str) -> String {
-    let mut output = content.trim().to_owned();
-    for keyword in [
-        "fn ",
-        "struct ",
-        "enum ",
-        "trait ",
-        "mod ",
-        "impl ",
-        "class ",
-        "namespace ",
-        "type ",
-        "const ",
-        "let ",
-        "var ",
-    ] {
-        if let Some(start) = output.find(keyword) {
-            let name_start = start + keyword.len();
-            let name_end = output[name_start..]
-                .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
-                .map(|offset| name_start + offset)
-                .unwrap_or(output.len());
-            if name_end > name_start {
-                output.replace_range(name_start..name_end, "_");
-            }
-        }
-    }
-    output
-}
-
-fn teca_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// TODO(teca): this temporary byte serialization is not a stable public
-/// contract. Keep all address-hash input behind this function until the
-/// eventual representation is specified.
-fn teca_address_bytes(parent: &str, content: &str, rank: usize) -> Vec<u8> {
-    format!("{parent}\0{content}\0{rank}").into_bytes()
 }
 
 fn wildcard(value: &str, query: &str) -> bool {

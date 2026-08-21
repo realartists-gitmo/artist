@@ -34,6 +34,10 @@ pub struct PollRequest {
     pub target: String,
     pub r#match: Option<String>,
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub stdout_offset: Option<u64>,
+    #[serde(default)]
+    pub stderr_offset: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -42,6 +46,19 @@ pub struct PollResponse {
     pub event: String,
     pub matched: bool,
     pub content: Option<String>,
+    #[serde(default)]
+    pub stdout_offset: u64,
+    #[serde(default)]
+    pub stderr_offset: u64,
+    #[serde(default)]
+    pub chunks: Vec<PollChunk>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PollChunk {
+    pub stream: String,
+    pub offset: u64,
+    pub content: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]

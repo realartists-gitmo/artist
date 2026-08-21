@@ -6,9 +6,8 @@
 //! the generic agent state machine.
 
 use std::collections::BTreeMap;
-use std::env;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use artist_agent::daemon::{
     EngineTurnRunner, SessionRuntimeFactory, SessionTurnRunner, SharedProvider,
@@ -19,19 +18,19 @@ use artist_agent::{
 };
 use artist_component::{
     CompactionComponent, ComponentHost, ComponentToolRegistry, CompositionInput,
-    PermissionRegistry, ProfileDocument, UrlCompositionSource,
+    EventLogTranscript, PermissionRegistry, ProfileDocument, ProviderSocket, UrlCompositionSource,
 };
-use artist_kernel::{FilesNamespace, Kernel, ResourceUri};
-use artist_session::{EventLog, EventLogTranscript, Workspace};
+use artist_kernel::{FilesNamespace, Kernel, ResourceSignal, ResourceUri};
+use artist_session::{EventLog, Workspace};
 use async_trait::async_trait;
 use llm_provider::{
-    Message, ModelProvider, ProviderAuth, ProviderCatalog, ProviderConfig, ProviderConfigError,
-    ProviderConfigId, ProviderError, ResolvedResource, ResourceResolver, Role, ToolDefinition,
+    Message, ModelProvider, ProviderConfig, ProviderConfigError, ProviderError, ResolvedResource,
+    ResourceResolver, Role, ToolDefinition,
 };
 
 pub struct ComponentRuntimeFactory {
     extension_root: PathBuf,
-    configurations: Arc<RwLock<BTreeMap<String, ProviderConfig>>>,
+    providers: Arc<ProviderSocket>,
     hosts: tokio::sync::Mutex<BTreeMap<String, Arc<ComponentHost>>>,
 }
 
@@ -67,6 +66,9 @@ impl ComponentForkExecutor {
             .join(".artist/forks")
             .join(format!("{fork_id}.jsonl"));
         let log = Arc::new(EventLog::open(log_path, fork_id.clone())?);
+        if let Some(result) = completed_fork_from_log(&log)? {
+            return Ok(result);
+        }
         let surface = ToolSurface::new(self.tools.clone())
             .with_log(Arc::clone(&log))
             .with_permissions(self.profile_id.clone(), self.permissions.clone());
@@ -115,11 +117,14 @@ impl ComponentForkExecutor {
                 let yielded = engine.replay_events()?.into_iter().any(|event| {
                     matches!(
                         event,
-                        artist_agent::AgentEvent::Yielded { payload }
-                            if payload
-                                .get("complete")
-                                .and_then(serde_json::Value::as_bool)
-                                .unwrap_or(false)
+                        artist_agent::AgentEvent::HarnessCompleted {
+                            operation: Some(artist_component::HarnessOperation::Yield {
+                                complete: true,
+                                ..
+                            }),
+                            result,
+                            ..
+                        } if !result.is_error
                     )
                 });
                 if !yielded {
@@ -144,6 +149,35 @@ impl ComponentForkExecutor {
             })),
         }
     }
+}
+
+fn completed_fork_from_log(log: &EventLog) -> Result<Option<serde_json::Value>, AgentError> {
+    let mut yielded = false;
+    let mut response = None;
+    for record in log.records()? {
+        let event: artist_agent::AgentEvent = match record.event_type.as_str() {
+            value if value.starts_with("agent.") => serde_json::from_value(record.payload)
+                .map_err(|error| AgentError::Context(error.to_string()))?,
+            _ => continue,
+        };
+        match event {
+            artist_agent::AgentEvent::HarnessCompleted {
+                operation: Some(artist_component::HarnessOperation::Yield { complete: true, .. }),
+                result,
+                ..
+            } if !result.is_error => yielded = true,
+            artist_agent::AgentEvent::TurnCompleted { response: value } => response = Some(value),
+            _ => {}
+        }
+    }
+    Ok(yielded.then(|| {
+        serde_json::json!({
+            "status": "completed",
+            "response": response,
+            "usage": llm_provider::Usage::default(),
+            "tool_rounds": 0,
+        })
+    }))
 }
 
 #[async_trait]
@@ -182,44 +216,26 @@ impl ComponentRuntimeFactory {
     pub fn new(extension_root: impl Into<PathBuf>) -> Self {
         Self {
             extension_root: extension_root.into(),
-            configurations: Arc::new(RwLock::new(BTreeMap::new())),
+            providers: Arc::new(ProviderSocket::builtins()),
             hosts: tokio::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
-    /// Install a provider configuration by stable identity. The secret stays
-    /// in this process-local component configuration and is never copied into
-    /// session metadata or event payloads.
+    /// Install a provider configuration through the provider configuration
+    /// component. The secret never enters session metadata or event payloads.
     pub fn register_provider_config(
         &self,
         config: ProviderConfig,
     ) -> Result<(), ProviderConfigError> {
-        config.validate()?;
-        let id = config.id.to_string();
-        let mut configurations = self.configurations.write().unwrap();
-        if configurations.contains_key(&id) {
-            return Err(ProviderConfigError::Duplicate(config.id));
-        }
-        configurations.insert(id, config);
-        Ok(())
+        self.providers.register(config)
     }
 
     pub fn from_environment(extension_root: impl Into<PathBuf>) -> Self {
-        let factory = Self::new(extension_root);
-        let Ok(secret) = env::var("OPENAI_API_KEY") else {
-            return factory;
-        };
-        let id = ProviderConfigId::new("openai-default").expect("static provider id is valid");
-        let config = ProviderConfig {
-            id,
-            provider_type: "openai".into(),
-            endpoint: env::var("ARTIST_OPENAI_ENDPOINT").ok(),
-            default_model: env::var("ARTIST_MODEL").ok(),
-            options: serde_json::Value::Null,
-            auth: ProviderAuth::ApiKey { secret },
-        };
-        let _ = factory.register_provider_config(config);
-        factory
+        Self {
+            extension_root: extension_root.into(),
+            providers: Arc::new(ProviderSocket::from_environment()),
+            hosts: tokio::sync::Mutex::new(BTreeMap::new()),
+        }
     }
 
     async fn host_for(&self, workspace: &Workspace) -> Result<Arc<ComponentHost>, AgentError> {
@@ -234,7 +250,7 @@ impl ComponentRuntimeFactory {
                 self.extension_root.display()
             )));
         }
-        let kernel = Arc::new(Kernel::with_agents());
+        let kernel = Arc::new(Kernel::with_url());
         kernel.register(FilesNamespace::new(workspace.root.clone()));
         let local_root = workspace.root.join(".artist");
         artist_component::install_prompt_view(
@@ -252,7 +268,7 @@ impl ComponentRuntimeFactory {
             workspace.root.join(".artist/url"),
         );
         let host = Arc::new(
-            ComponentHost::start(kernel, source)
+            ComponentHost::start_with_provider_socket(kernel, source, (*self.providers).clone())
                 .await
                 .map_err(|error| AgentError::Composition(error.to_string()))?,
         );
@@ -261,48 +277,13 @@ impl ComponentRuntimeFactory {
     }
 
     fn provider_config(
-        &self,
+        providers: &ProviderSocket,
         requested: Option<&str>,
         provider_type: Option<&str>,
     ) -> Result<ProviderConfig, AgentError> {
-        let configurations = self.configurations.read().unwrap();
-        let id = if let Some(requested) = requested {
-            requested.to_owned()
-        } else {
-            let candidates: Vec<_> = configurations
-                .iter()
-                .filter(|(_, config)| {
-                    provider_type.is_none_or(|provider_type| config.provider_type == provider_type)
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-            match candidates.as_slice() {
-                [id] => id.clone(),
-                [] => {
-                    return Err(AgentError::ProviderSelection(
-                        provider_type
-                            .map(|provider_type| {
-                                format!(
-                                    "profile selected provider type {provider_type:?}, but no configuration is installed"
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                "no provider configuration is selected; configure a stable provider id"
-                                    .into()
-                            }),
-                    ));
-                }
-                _ => {
-                    return Err(AgentError::ProviderSelection(
-                        "multiple provider configurations match; select a stable provider id"
-                            .into(),
-                    ));
-                }
-            }
-        };
-        configurations.get(&id).cloned().ok_or_else(|| {
-            AgentError::ProviderSelection(format!("provider configuration {id:?} is unavailable"))
-        })
+        providers
+            .select(requested, provider_type)
+            .map_err(|error| AgentError::ProviderSelection(error.to_string()))
     }
 
     async fn profile(
@@ -313,13 +294,14 @@ impl ComponentRuntimeFactory {
         let Some(profile_id) = profile_id else {
             return Ok(None);
         };
-        let resource_id = resource_id.unwrap_or("profile://filesystem");
         let component = host
             .profiles()
-            .selected(Some(resource_id))
+            .selected(resource_id)
             .map_err(|error| AgentError::Composition(error.to_string()))?
             .ok_or_else(|| {
-                AgentError::Composition(format!("profile component {resource_id:?} is unavailable"))
+                AgentError::Composition(format!(
+                    "no profile component is selected for {profile_id:?}"
+                ))
             })?;
         component
             .resolve(profile_id)
@@ -329,15 +311,7 @@ impl ComponentRuntimeFactory {
     }
 
     fn definitions(host: &ComponentHost) -> Vec<ToolDefinition> {
-        host.tools()
-            .all_names()
-            .into_iter()
-            .map(|name| ToolDefinition {
-                description: Some(format!("Component-provided {name} operation")),
-                input_schema: schema_for(&name),
-                name,
-            })
-            .collect()
+        host.tools().definitions()
     }
 
     async fn build_runtime(
@@ -348,12 +322,11 @@ impl ComponentRuntimeFactory {
     ) -> Result<Arc<dyn SessionTurnRunner>, AgentError> {
         let metadata = metadata_after_profile_changes(metadata, &log)?;
         let host = self.host_for(&workspace).await?;
-        host.kernel()
-            .register_agent_transcript(
-                metadata.session_id.clone(),
-                EventLogTranscript::new(Arc::clone(&log)),
-            )
-            .map_err(|error| AgentError::Context(error.to_string()))?;
+        host.register_agent_transcript(
+            metadata.session_id.clone(),
+            EventLogTranscript::new(Arc::clone(&log)),
+        )
+        .map_err(|error| AgentError::Context(error.to_string()))?;
         let profile = Self::profile(
             &host,
             metadata.profile_resource_id.as_deref(),
@@ -369,18 +342,6 @@ impl ComponentRuntimeFactory {
             .map(|profile| profile.permissions.clone())
             .unwrap_or_default();
         let definitions = Self::definitions(&host);
-        if let Some(profile) = &profile {
-            for required in &profile.required_tools {
-                if !definitions
-                    .iter()
-                    .any(|definition| &definition.name == required)
-                {
-                    return Err(AgentError::ToolSurface(format!(
-                        "profile requires unavailable tool {required:?}"
-                    )));
-                }
-            }
-        }
         let policy = HarnessPolicy {
             yield_schema: profile
                 .as_ref()
@@ -398,6 +359,20 @@ impl ComponentRuntimeFactory {
             .replace_static_definitions(definitions.clone())
             .map_err(|error| AgentError::ToolSurface(error.to_string()))?;
         surface.configure_harness(policy.clone());
+        if let Some(profile) = &profile {
+            let enabled = surface
+                .definitions()
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect::<std::collections::BTreeSet<_>>();
+            for required in &profile.required_tools {
+                if !enabled.contains(required) {
+                    return Err(AgentError::ToolSurface(format!(
+                        "profile requires unavailable or denied tool {required:?}"
+                    )));
+                }
+            }
+        }
 
         let identity = profile
             .as_ref()
@@ -407,6 +382,7 @@ impl ComponentRuntimeFactory {
         let composition_input = CompositionInput {
             identity,
             profile: metadata.profile_id.clone(),
+            profile_resource: metadata.profile_resource_id.clone(),
             system: None,
             agent_instructions: profile
                 .as_ref()
@@ -423,7 +399,8 @@ impl ComponentRuntimeFactory {
             .await
             .map_err(|error| AgentError::Composition(error.to_string()))?;
 
-        let config = self.provider_config(
+        let config = Self::provider_config(
+            host.providers(),
             metadata.provider_config_id.as_deref().or_else(|| {
                 profile
                     .as_ref()
@@ -437,24 +414,18 @@ impl ComponentRuntimeFactory {
             kernel: Arc::clone(host.kernel()),
         });
         let provider = host
-            .provider_catalog()
-            .configure_refreshed_with_resource_resolver(
-                &config,
-                Some(Arc::clone(&resource_resolver)),
-            )
+            .providers()
+            .configure(&config, Some(Arc::clone(&resource_resolver)))
             .await
             .map_err(|error| AgentError::ProviderSelection(error.to_string()))?;
         let provider_resolver = Arc::new(ConfigProviderResolver {
-            catalog: host.provider_catalog().clone(),
-            configurations: Arc::clone(&self.configurations),
+            providers: host.providers().clone(),
             resource_resolver,
         });
         let handoff = Arc::new(ProfileHandoffHandler {
             host: Arc::clone(&host),
-            configurations: Arc::clone(&self.configurations),
-            resource_id: metadata
-                .profile_resource_id
-                .unwrap_or_else(|| "profile://filesystem".into()),
+            providers: host.providers().clone(),
+            resource_id: metadata.profile_resource_id,
             identity: metadata
                 .identity
                 .unwrap_or_else(|| metadata.session_id.clone()),
@@ -516,6 +487,46 @@ impl SessionRuntimeFactory for ComponentRuntimeFactory {
         // daemon restart observe the same active state.
         self.build_runtime(workspace, metadata, log).await
     }
+
+    async fn write_resource(
+        &self,
+        workspace: Workspace,
+        uri: ResourceUri,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<u32, AgentError> {
+        let host = self.host_for(&workspace).await?;
+        host.kernel()
+            .write_uri(&uri, offset, &data)
+            .await
+            .map_err(|error| AgentError::Context(error.to_string()))
+    }
+
+    async fn signal_resource(
+        &self,
+        workspace: Workspace,
+        uri: ResourceUri,
+        signal: ResourceSignal,
+    ) -> Result<(), AgentError> {
+        let host = self.host_for(&workspace).await?;
+        host.kernel()
+            .signal_uri(&uri, signal)
+            .await
+            .map_err(|error| AgentError::Context(error.to_string()))
+    }
+
+    async fn move_resource(
+        &self,
+        workspace: Workspace,
+        source: ResourceUri,
+        destination: ResourceUri,
+    ) -> Result<(), AgentError> {
+        let host = self.host_for(&workspace).await?;
+        host.kernel()
+            .move_uri(&source, &destination)
+            .await
+            .map_err(|error| AgentError::Context(error.to_string()))
+    }
 }
 
 fn metadata_after_profile_changes(
@@ -523,7 +534,10 @@ fn metadata_after_profile_changes(
     log: &Arc<EventLog>,
 ) -> Result<artist_agent::daemon::SessionMetadata, AgentError> {
     for record in log.records()? {
-        if record.event_type != "agent.profile_changed" {
+        if !matches!(
+            record.event_type.as_str(),
+            "agent.profile_changed" | "agent.handoff" | "agent.harness_completed"
+        ) {
             continue;
         }
         let event: artist_agent::AgentEvent =
@@ -546,14 +560,43 @@ fn metadata_after_profile_changes(
             if model.is_some() {
                 metadata.model = model;
             }
+        } else if let artist_agent::AgentEvent::Handoff { profile_id, .. } = event {
+            // Legacy logs used a separate handoff projection. New logs use
+            // HarnessCompleted as the sole transaction record below.
+            metadata.profile_id = Some(profile_id);
+        } else if let artist_agent::AgentEvent::HarnessCompleted {
+            operation: Some(artist_component::HarnessOperation::Handoff { profile, .. }),
+            result,
+            ..
+        } = event
+        {
+            if result.is_error {
+                continue;
+            }
+            metadata.profile_id = Some(profile);
+            let output = result.content.iter().find_map(|part| match part {
+                llm_provider::ContentPart::Text { text } => {
+                    serde_json::from_str::<artist_component::ToolResultEnvelope>(text)
+                        .ok()
+                        .and_then(|envelope| envelope.output)
+                }
+                _ => None,
+            });
+            if let Some(output) = output {
+                if let Some(provider) = output.get("provider").and_then(serde_json::Value::as_str) {
+                    metadata.provider_config_id = Some(provider.to_owned());
+                }
+                if let Some(model) = output.get("model").and_then(serde_json::Value::as_str) {
+                    metadata.model = Some(model.to_owned());
+                }
+            }
         }
     }
     Ok(metadata)
 }
 
 struct ConfigProviderResolver {
-    catalog: ProviderCatalog,
-    configurations: Arc<RwLock<BTreeMap<String, ProviderConfig>>>,
+    providers: ProviderSocket,
     resource_resolver: Arc<dyn ResourceResolver>,
 }
 
@@ -564,21 +607,11 @@ impl ProviderResolver for ConfigProviderResolver {
         provider_config_id: &str,
     ) -> Result<Arc<dyn ModelProvider>, AgentError> {
         let config = self
-            .configurations
-            .read()
-            .unwrap()
-            .get(provider_config_id)
-            .cloned()
-            .ok_or_else(|| {
-                AgentError::ProviderSelection(format!(
-                    "provider configuration {provider_config_id:?} is unavailable"
-                ))
-            })?;
-        self.catalog
-            .configure_refreshed_with_resource_resolver(
-                &config,
-                Some(Arc::clone(&self.resource_resolver)),
-            )
+            .providers
+            .configuration(provider_config_id)
+            .map_err(|error| AgentError::ProviderSelection(error.to_string()))?;
+        self.providers
+            .configure(&config, Some(Arc::clone(&self.resource_resolver)))
             .await
             .map_err(|error| AgentError::ProviderSelection(error.to_string()))
     }
@@ -647,26 +680,43 @@ fn mime_for_uri(path: &str) -> Option<String> {
 
 struct ProfileHandoffHandler {
     host: Arc<ComponentHost>,
-    configurations: Arc<RwLock<BTreeMap<String, ProviderConfig>>>,
-    resource_id: String,
+    providers: ProviderSocket,
+    resource_id: Option<String>,
     identity: String,
 }
 
 #[async_trait]
 impl HandoffHandler for ProfileHandoffHandler {
     async fn resolve(&self, profile_id: &str, brief: &str) -> Result<HandoffPlan, AgentError> {
-        let profile =
-            ComponentRuntimeFactory::profile(&self.host, Some(&self.resource_id), Some(profile_id))
-                .await?
-                .ok_or_else(|| AgentError::Composition("handoff profile is unavailable".into()))?;
+        let profile = ComponentRuntimeFactory::profile(
+            &self.host,
+            self.resource_id.as_deref(),
+            Some(profile_id),
+        )
+        .await?
+        .ok_or_else(|| AgentError::Composition("handoff profile is unavailable".into()))?;
         let definitions = ComponentRuntimeFactory::definitions(&self.host);
+        let permissions = profile.permissions.clone();
+        let policy = HarnessPolicy {
+            yield_schema: profile.yield_schema(),
+            allow_fork: profile.allow_fork,
+            allow_handoff: profile.allow_handoff,
+        };
+        let validation_surface = ToolSurface::new(self.host.tools())
+            .with_permissions(profile_id.to_owned(), permissions.clone());
+        validation_surface
+            .replace_static_definitions(definitions.clone())
+            .map_err(|error| AgentError::ToolSurface(error.to_string()))?;
+        validation_surface.configure_harness(policy.clone());
+        let enabled = validation_surface
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<std::collections::BTreeSet<_>>();
         for required in &profile.required_tools {
-            if !definitions
-                .iter()
-                .any(|definition| &definition.name == required)
-            {
+            if !enabled.contains(required) {
                 return Err(AgentError::ToolSurface(format!(
-                    "profile requires unavailable tool {required:?}"
+                    "profile requires unavailable or denied tool {required:?}"
                 )));
             }
         }
@@ -676,6 +726,7 @@ impl HandoffHandler for ProfileHandoffHandler {
                 .clone()
                 .unwrap_or_else(|| self.identity.clone()),
             profile: Some(profile_id.into()),
+            profile_resource: self.resource_id.clone(),
             system: None,
             agent_instructions: profile.post_system.clone(),
             profile_content: profile.prompt.clone().into(),
@@ -695,21 +746,15 @@ impl HandoffHandler for ProfileHandoffHandler {
         // same user message from appearing once in the context prefix and
         // again in the replayed conversation.
         let _ = brief;
-        let yield_schema = profile.yield_schema();
-        let permissions = profile.permissions.clone();
         let provider_config_id = select_profile_provider_config(
-            &self.configurations,
+            &self.providers,
             profile.provider_config.as_deref(),
             profile.provider.as_deref(),
         )?;
         let model = profile.model.clone().or_else(|| {
-            provider_config_id.as_deref().and_then(|id| {
-                self.configurations
-                    .read()
-                    .unwrap()
-                    .get(id)
-                    .and_then(|config| config.default_model.clone())
-            })
+            provider_config_id
+                .as_deref()
+                .and_then(|id| self.providers.default_model(id))
         });
         Ok(HandoffPlan {
             profile_id: profile_id.into(),
@@ -719,127 +764,21 @@ impl HandoffHandler for ProfileHandoffHandler {
             provider_config_id,
             tool_definitions: Some(definitions),
             permissions: Some((profile_id.into(), permissions)),
-            harness: Some(HarnessPolicy {
-                yield_schema,
-                allow_fork: profile.allow_fork,
-                allow_handoff: profile.allow_handoff,
-            }),
+            harness: Some(policy),
         })
     }
 }
 
 fn select_profile_provider_config(
-    configurations: &Arc<RwLock<BTreeMap<String, ProviderConfig>>>,
+    providers: &ProviderSocket,
     requested: Option<&str>,
     provider_type: Option<&str>,
 ) -> Result<Option<String>, AgentError> {
-    let configurations = configurations.read().unwrap();
-    if let Some(requested) = requested {
-        if configurations.contains_key(requested) {
-            return Ok(Some(requested.to_owned()));
-        }
-        return Err(AgentError::ProviderSelection(format!(
-            "provider configuration {requested:?} is unavailable"
-        )));
-    }
-    let Some(provider_type) = provider_type else {
+    if requested.is_none() && provider_type.is_none() {
         return Ok(None);
-    };
-    let candidates: Vec<_> = configurations
-        .iter()
-        .filter(|(_, config)| config.provider_type == provider_type)
-        .map(|(id, _)| id.clone())
-        .collect();
-    match candidates.as_slice() {
-        [id] => Ok(Some(id.clone())),
-        [] => Err(AgentError::ProviderSelection(format!(
-            "profile selected provider type {provider_type:?}, but no configuration is installed"
-        ))),
-        _ => Err(AgentError::ProviderSelection(format!(
-            "multiple provider configurations match provider type {provider_type:?}; select a stable provider id"
-        ))),
     }
-}
-
-fn schema_for(name: &str) -> serde_json::Value {
-    match name {
-        "read" => serde_json::json!({
-            "type":"object",
-            "properties":{
-                "uri":{"type":"string"},
-                "range":{"type":"string","description":"Relative line range such as -20..+40"}
-            },
-            "required":["uri"],"additionalProperties":false
-        }),
-        "write" => serde_json::json!({
-            "type":"object","properties":{"uri":{"type":"string"},"content":{"type":"string"}},
-            "required":["uri","content"],"additionalProperties":false
-        }),
-        "move" => serde_json::json!({
-            "type":"object","properties":{"source":{"type":"string"},"destination":{"type":["string","null"]}},
-            "required":["source"],"additionalProperties":false
-        }),
-        "edit" => serde_json::json!({
-            "type":"object",
-            "properties":{
-                "uri":{"type":"string"},
-                "changes":{
-                    "type":"array",
-                    "items":{
-                        "type":"object",
-                        "properties":{"anchor":{"type":"string"},"replacement":{"type":"string"}},
-                        "required":["anchor","replacement"],"additionalProperties":false
-                    }
-                }
-            },
-            "required":["uri","changes"],"additionalProperties":false
-        }),
-        "find" => serde_json::json!({
-            "type":"object",
-            "properties":{
-                "uri":{"type":"string"},
-                "query":{"type":"string"},
-                "limit":{"type":"integer","minimum":1,"maximum":500},
-                "mode":{"type":"string","enum":["literal","glob","fuzzy"]}
-            },
-            "required":["uri","query"],"additionalProperties":false
-        }),
-        "grep" => serde_json::json!({
-            "type":"object",
-            "properties":{
-                "uri":{"type":"string"},
-                "query":{"type":"string"},
-                "limit":{"type":"integer","minimum":1,"maximum":500},
-                "mode":{"type":"string","enum":["literal","plain","regex"]}
-            },
-            "required":["uri","query"],"additionalProperties":false
-        }),
-        "run" => serde_json::json!({
-            "type":"object",
-            "properties":{
-                "executable":{"type":"string"},
-                "target":{"type":"string"},
-                "arguments":{"type":"array","items":{"type":"string"}},
-                "working_directory":{"type":"string"},
-                "environment":{"type":"object","additionalProperties":{"type":"string"}}
-            },
-            "anyOf":[{"required":["executable"]},{"required":["target"]}],
-            "additionalProperties":false
-        }),
-        "poll" => serde_json::json!({
-            "type":"object",
-            "properties":{
-                "target":{"type":"string"},
-                "match":{"type":"string"},
-                "timeout_ms":{"type":"integer","minimum":0,"maximum":60000}
-            },
-            "required":["target","timeout_ms"],"additionalProperties":false
-        }),
-        "signal" => serde_json::json!({
-            "type":"object",
-            "properties":{"process":{"type":"string"},"signal":{"type":"string"}},
-            "required":["process","signal"],"additionalProperties":false
-        }),
-        _ => serde_json::json!({"type":"object"}),
-    }
+    providers
+        .select(requested, provider_type)
+        .map(|config| Some(config.id.to_string()))
+        .map_err(|error| AgentError::ProviderSelection(error.to_string()))
 }

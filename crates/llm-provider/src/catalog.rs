@@ -24,9 +24,12 @@ pub struct ProviderCatalog {
 impl ProviderCatalog {
     pub fn builtins() -> Self {
         let mut catalog = Self::default();
-        for kind in ProviderKind::ALL {
-            catalog.register(Arc::new(BuiltinProviderComponent { kind }));
-        }
+        // Only concrete Artist provider components are registered here. The
+        // stable ProviderKind list is an identity vocabulary, not a claim that
+        // every name has a working transport.
+        catalog.register(Arc::new(BuiltinProviderComponent {
+            kind: ProviderKind::OpenAi,
+        }));
         catalog
     }
 
@@ -311,20 +314,18 @@ mod tests {
     use serde_json::Value;
 
     #[test]
-    fn builtins_have_stable_provider_types_without_false_capabilities() {
+    fn builtins_only_advertise_concrete_provider_components() {
         let catalog = ProviderCatalog::builtins();
-        assert_eq!(catalog.provider_types().len(), ProviderKind::ALL.len());
+        assert_eq!(catalog.provider_types(), vec!["openai"]);
         let id = ProviderConfigId::new("local").unwrap();
-        let provider = catalog
-            .configure(&ProviderConfig {
-                id,
-                provider_type: "ollama".into(),
-                endpoint: None,
-                default_model: None,
-                options: Value::Null,
-                auth: ProviderAuth::None,
-            })
-            .unwrap();
-        assert!(!provider.capabilities("model").streaming);
+        let result = catalog.configure(&ProviderConfig {
+            id,
+            provider_type: "ollama".into(),
+            endpoint: None,
+            default_model: None,
+            options: Value::Null,
+            auth: ProviderAuth::None,
+        });
+        assert!(matches!(result, Err(ProviderConfigError::UnknownType(_))));
     }
 }

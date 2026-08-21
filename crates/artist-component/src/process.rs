@@ -15,10 +15,10 @@ use std::time::{Duration, Instant, SystemTime};
 use artist_kernel::provider::{
     ProviderAttrs, ProviderEntry, ResourceError, ResourceErrorCode, ResourceProvider,
 };
-use artist_kernel::{Kernel, ResourceUri};
+use artist_kernel::{Kernel, ResourceSignal, ResourceUri};
 use artist_wasm_verbs::process::{
-    PollRequest, PollResponse, ProcessError, ProcessLauncher, ProcessPoller, ProcessSignaler,
-    RunRequest, RunResponse, SignalRequest,
+    PollChunk, PollRequest, PollResponse, ProcessError, ProcessLauncher, ProcessPoller,
+    ProcessSignaler, RunRequest, RunResponse, SignalRequest,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -36,6 +36,63 @@ pub struct ProcessRegistry {
     file_root: Option<Arc<PathBuf>>,
 }
 
+/// URL/component selection seam for the ephemeral process implementation.
+/// The host asks this socket to reconcile claims; it does not install a
+/// process provider merely because the daemon happens to start.
+#[derive(Clone, Default)]
+pub struct ProcessSocket {
+    active: Arc<RwLock<Option<ProcessRegistry>>>,
+    installed_tools: Arc<RwLock<Vec<String>>>,
+}
+
+impl ProcessSocket {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reconcile the native process implementation with the active URL graph.
+    /// Removing the route also removes only the process tools this socket
+    /// installed; a separately supplied component with the same public name
+    /// is left intact.
+    pub fn sync_for_routes(
+        &self,
+        routes: &std::collections::BTreeSet<String>,
+        kernel: &Arc<Kernel>,
+        tools: &ComponentToolRegistry,
+        workspace_root: impl Into<PathBuf>,
+    ) -> Result<(), ToolError> {
+        let selected = routes.iter().any(|route| route.starts_with("process://"));
+        let mut active = self.active.write().unwrap();
+        if selected {
+            if active.is_none() {
+                let processes = ProcessRegistry::with_file_root(workspace_root);
+                let installed = processes.install_tools(tools)?;
+                processes.install(kernel);
+                *self.installed_tools.write().unwrap() = installed;
+                *active = Some(processes);
+            }
+        } else if active.take().is_some() {
+            kernel.unregister_resource_provider("component-processes");
+            let installed = std::mem::take(&mut *self.installed_tools.write().unwrap());
+            for name in installed {
+                tools.unregister(&name);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn install_for_routes(
+        routes: &std::collections::BTreeSet<String>,
+        kernel: &Arc<Kernel>,
+        tools: &ComponentToolRegistry,
+        workspace_root: impl Into<PathBuf>,
+    ) -> Result<Option<ProcessRegistry>, ToolError> {
+        let socket = Self::new();
+        socket.sync_for_routes(routes, kernel, tools, workspace_root)?;
+        Ok(socket.active.read().unwrap().clone())
+    }
+}
+
 struct ProcessEntry {
     child: AsyncMutex<Child>,
     stdin: AsyncMutex<Option<ChildStdin>>,
@@ -47,8 +104,56 @@ struct ProcessEntry {
 struct OutputState {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    reported_stdout: usize,
-    reported_stderr: usize,
+    stdout_base: u64,
+    stderr_base: u64,
+    events: Vec<OutputEvent>,
+    event_bytes: usize,
+}
+
+struct OutputEvent {
+    stream: StreamKind,
+    offset: u64,
+    bytes: Vec<u8>,
+}
+
+impl OutputState {
+    fn append(&mut self, stream: StreamKind, mut bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        let (buffer, base) = match stream {
+            StreamKind::Stdout => (&mut self.stdout, &mut self.stdout_base),
+            StreamKind::Stderr => (&mut self.stderr, &mut self.stderr_base),
+        };
+        if bytes.len() > ProcessRegistry::MAX_BUFFER_BYTES {
+            let drop = bytes.len() - ProcessRegistry::MAX_BUFFER_BYTES;
+            *base = base.saturating_add(drop as u64);
+            bytes.drain(..drop);
+        }
+        let overflow = buffer
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(ProcessRegistry::MAX_BUFFER_BYTES);
+        if overflow > 0 {
+            buffer.drain(..overflow.min(buffer.len()));
+            *base = base.saturating_add(overflow as u64);
+        }
+        let offset = base.saturating_add(buffer.len() as u64);
+        buffer.extend_from_slice(&bytes);
+        self.event_bytes = self.event_bytes.saturating_add(bytes.len());
+        self.events.push(OutputEvent {
+            stream,
+            offset,
+            bytes,
+        });
+        while self.event_bytes > ProcessRegistry::MAX_BUFFER_BYTES {
+            let Some(event) = self.events.first() else {
+                break;
+            };
+            self.event_bytes = self.event_bytes.saturating_sub(event.bytes.len());
+            self.events.remove(0);
+        }
+    }
 }
 
 enum OutputChunk {
@@ -62,7 +167,15 @@ enum StreamKind {
     Stderr,
 }
 
+fn stream_name(stream: StreamKind) -> &'static str {
+    match stream {
+        StreamKind::Stdout => "stdout",
+        StreamKind::Stderr => "stderr",
+    }
+}
+
 impl ProcessRegistry {
+    const MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
     pub fn new() -> Self {
         Self::default()
     }
@@ -83,7 +196,8 @@ impl ProcessRegistry {
         kernel.register_resource_provider(self.clone());
     }
 
-    pub fn install_tools(&self, tools: &ComponentToolRegistry) -> Result<(), ToolError> {
+    pub fn install_tools(&self, tools: &ComponentToolRegistry) -> Result<Vec<String>, ToolError> {
+        let mut installed = Vec::new();
         for name in ["run", "poll", "signal"] {
             if !tools
                 .all_names()
@@ -94,9 +208,10 @@ impl ProcessRegistry {
                     name: name.to_owned(),
                     processes: self.clone(),
                 })?;
+                installed.push(name.to_owned());
             }
         }
-        Ok(())
+        Ok(installed)
     }
 
     async fn launch_process(&self, request: RunRequest) -> Result<RunResponse, ProcessError> {
@@ -208,8 +323,8 @@ impl ProcessRegistry {
         let mut output = entry.output.lock().await;
         while let Ok(chunk) = incoming.try_recv() {
             match chunk {
-                OutputChunk::Stdout(bytes) => output.stdout.extend(bytes),
-                OutputChunk::Stderr(bytes) => output.stderr.extend(bytes),
+                OutputChunk::Stdout(bytes) => output.append(StreamKind::Stdout, bytes),
+                OutputChunk::Stderr(bytes) => output.append(StreamKind::Stderr, bytes),
             }
         }
     }
@@ -239,7 +354,11 @@ impl ProcessRegistry {
             StreamKind::Stdout => &output.stdout,
             StreamKind::Stderr => &output.stderr,
         };
-        let start = usize::try_from(offset)
+        let base = match stream {
+            StreamKind::Stdout => output.stdout_base,
+            StreamKind::Stderr => output.stderr_base,
+        };
+        let start = usize::try_from(offset.saturating_sub(base))
             .unwrap_or(usize::MAX)
             .min(bytes.len());
         let end = start.saturating_add(size as usize).min(bytes.len());
@@ -251,9 +370,9 @@ impl ProcessRegistry {
         Self::drain_output(&entry).await;
         let output = entry.output.lock().await;
         Ok(match stream {
-            StreamKind::Stdout => output.stdout.len(),
-            StreamKind::Stderr => output.stderr.len(),
-        } as u64)
+            StreamKind::Stdout => output.stdout_base + output.stdout.len() as u64,
+            StreamKind::Stderr => output.stderr_base + output.stderr.len() as u64,
+        })
     }
 
     async fn status_bytes(&self, id: &str) -> Result<Vec<u8>, ResourceError> {
@@ -299,29 +418,67 @@ impl ProcessRegistry {
         let deadline = Instant::now() + Duration::from_millis(request.timeout_ms.min(60_000));
         loop {
             Self::drain_output(&entry).await;
-            let new_output = {
-                let mut output = entry.output.lock().await;
-                match stream {
-                    Some(StreamKind::Stdout) => {
-                        let bytes = output.stdout[output.reported_stdout..].to_vec();
-                        output.reported_stdout = output.stdout.len();
-                        bytes
+            let (new_output, chunks, stdout_offset, stderr_offset) = {
+                let output = entry.output.lock().await;
+                let stdout_offset = output.stdout_base + output.stdout.len() as u64;
+                let stderr_offset = output.stderr_base + output.stderr.len() as u64;
+                let stdout_from = request.stdout_offset.unwrap_or(output.stdout_base);
+                let stderr_from = request.stderr_offset.unwrap_or(output.stderr_base);
+                let mut chunks = Vec::new();
+                if let Some(stream) = stream {
+                    let from = match stream {
+                        StreamKind::Stdout => stdout_from,
+                        StreamKind::Stderr => stderr_from,
+                    };
+                    let (bytes, base) = match stream {
+                        StreamKind::Stdout => (&output.stdout, output.stdout_base),
+                        StreamKind::Stderr => (&output.stderr, output.stderr_base),
+                    };
+                    let start = usize::try_from(from.saturating_sub(base))
+                        .unwrap_or(usize::MAX)
+                        .min(bytes.len());
+                    if start < bytes.len() {
+                        chunks.push(PollChunk {
+                            stream: stream_name(stream).into(),
+                            offset: base + start as u64,
+                            content: String::from_utf8_lossy(&bytes[start..]).into_owned(),
+                        });
                     }
-                    Some(StreamKind::Stderr) => {
-                        let bytes = output.stderr[output.reported_stderr..].to_vec();
-                        output.reported_stderr = output.stderr.len();
-                        bytes
-                    }
-                    None => {
-                        let stdout = output.stdout[output.reported_stdout..].to_vec();
-                        let stderr = output.stderr[output.reported_stderr..].to_vec();
-                        output.reported_stdout = output.stdout.len();
-                        output.reported_stderr = output.stderr.len();
-                        let mut combined = stdout;
-                        combined.extend(stderr);
-                        combined
+                } else {
+                    for event in &output.events {
+                        let from = match event.stream {
+                            StreamKind::Stdout => stdout_from,
+                            StreamKind::Stderr => stderr_from,
+                        };
+                        if event.offset >= from {
+                            chunks.push(PollChunk {
+                                stream: stream_name(event.stream).into(),
+                                offset: event.offset,
+                                content: String::from_utf8_lossy(&event.bytes).into_owned(),
+                            });
+                        } else {
+                            let skip = usize::try_from(from - event.offset).unwrap_or(usize::MAX);
+                            if skip < event.bytes.len() {
+                                chunks.push(PollChunk {
+                                    stream: stream_name(event.stream).into(),
+                                    offset: from,
+                                    content: String::from_utf8_lossy(&event.bytes[skip..])
+                                        .into_owned(),
+                                });
+                            }
+                        }
                     }
                 }
+                let new_output = chunks
+                    .iter()
+                    .map(|chunk| chunk.content.as_str())
+                    .collect::<String>();
+                (
+                    new_output.into_bytes(),
+                    chunks,
+                    stdout_offset,
+                    stderr_offset,
+                )
             };
             let status = Self::status(&entry).await?;
             let text = String::from_utf8_lossy(&new_output).into_owned();
@@ -342,6 +499,9 @@ impl ProcessRegistry {
                     .into(),
                     matched,
                     content: (!text.is_empty()).then_some(text),
+                    stdout_offset,
+                    stderr_offset,
+                    chunks,
                 });
             }
             if Instant::now() >= deadline {
@@ -350,6 +510,9 @@ impl ProcessRegistry {
                     event: "timeout".into(),
                     matched: false,
                     content: None,
+                    stdout_offset,
+                    stderr_offset,
+                    chunks,
                 });
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -360,15 +523,9 @@ impl ProcessRegistry {
         let id = process_id(&request.process)?;
         let entry = self.entry(&id)?;
         match request.signal.as_str() {
-            "cancel" | "terminate" | "kill" => {
-                entry.child.lock().await.start_kill().map_err(|error| {
-                    ProcessError::Internal(format!("could not terminate process: {error}"))
-                })?;
-                Ok(())
-            }
-            "interrupt" => Err(ProcessError::Unsupported(
-                "interrupt is not portable through this process component".into(),
-            )),
+            "cancel" | "interrupt" => send_child_signal(&entry, SignalKind::Interrupt).await,
+            "terminate" => send_child_signal(&entry, SignalKind::Terminate).await,
+            "kill" => send_child_signal(&entry, SignalKind::Kill).await,
             other => Err(ProcessError::Unsupported(format!(
                 "unsupported process signal {other:?}"
             ))),
@@ -535,6 +692,16 @@ impl ResourceProvider for ProcessRegistry {
         }
         self.write_stream(uri.authority(), data).await
     }
+
+    async fn signal(&self, uri: &ResourceUri, signal: ResourceSignal) -> Result<(), ResourceError> {
+        self.kind(uri)?;
+        self.signal_process(SignalRequest {
+            process: process_uri(uri.authority()),
+            signal: signal.name,
+        })
+        .await
+        .map_err(process_resource_error)
+    }
 }
 
 struct ProcessTool {
@@ -546,6 +713,10 @@ struct ProcessTool {
 impl ToolComponent for ProcessTool {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn definition(&self) -> llm_provider::ToolDefinition {
+        process_tool_definition(&self.name)
     }
 
     async fn invoke(&self, request: &[u8]) -> Result<Vec<u8>, ToolError> {
@@ -581,8 +752,7 @@ impl ToolComponent for ProcessTool {
             "signal" => {
                 let request: SignalRequest = serde_json::from_value(value)
                     .map_err(|error| ToolError::InvalidArgument(error.to_string()))?;
-                self.processes
-                    .signal(request)
+                ProcessSignaler::signal(&self.processes, request)
                     .await
                     .map_err(process_tool_error)?;
                 Ok(Value::Object(Default::default()))
@@ -590,6 +760,45 @@ impl ToolComponent for ProcessTool {
             _ => Err(ToolError::NotFound(self.name.clone())),
         };
         serde_json::to_vec(&output?).map_err(|error| ToolError::Internal(error.to_string()))
+    }
+}
+
+pub fn process_tool_definition(name: &str) -> llm_provider::ToolDefinition {
+    let input_schema = match name {
+        "run" => serde_json::json!({
+            "type":"object",
+            "properties":{
+                "executable":{"type":"string"},
+                "target":{"type":"string"},
+                "arguments":{"type":"array","items":{"type":"string"}},
+                "working_directory":{"type":"string"},
+                "environment":{"type":"object","additionalProperties":{"type":"string"}}
+            },
+            "anyOf":[{"required":["executable"]},{"required":["target"]}],
+            "additionalProperties":false
+        }),
+        "poll" => serde_json::json!({
+            "type":"object",
+            "properties":{
+                "target":{"type":"string"},
+                "match":{"type":"string"},
+                "timeout_ms":{"type":"integer","minimum":0,"maximum":60000},
+                "stdout_offset":{"type":"integer","minimum":0},
+                "stderr_offset":{"type":"integer","minimum":0}
+            },
+            "required":["target","timeout_ms"],"additionalProperties":false
+        }),
+        "signal" => serde_json::json!({
+            "type":"object",
+            "properties":{"process":{"type":"string"},"signal":{"type":"string"}},
+            "required":["process","signal"],"additionalProperties":false
+        }),
+        _ => serde_json::json!({"type":"object"}),
+    };
+    llm_provider::ToolDefinition {
+        name: name.to_owned(),
+        description: Some(format!("Process component operation: {name}")),
+        input_schema,
     }
 }
 
@@ -693,6 +902,44 @@ fn process_tool_error(error: ProcessError) -> ToolError {
     }
 }
 
+enum SignalKind {
+    Interrupt,
+    Terminate,
+    Kill,
+}
+
+async fn send_child_signal(
+    entry: &Arc<ProcessEntry>,
+    signal: SignalKind,
+) -> Result<(), ProcessError> {
+    let child = entry.child.lock().await;
+    let Some(pid) = child.id() else {
+        return Err(ProcessError::Conflict("process has already exited".into()));
+    };
+    #[cfg(unix)]
+    {
+        let signal = match signal {
+            SignalKind::Interrupt => nix::sys::signal::Signal::SIGINT,
+            SignalKind::Terminate => nix::sys::signal::Signal::SIGTERM,
+            SignalKind::Kill => nix::sys::signal::Signal::SIGKILL,
+        };
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), signal).map_err(
+            |error| ProcessError::Internal(format!("could not signal process: {error}")),
+        )?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        match signal {
+            SignalKind::Kill | SignalKind::Terminate | SignalKind::Interrupt => {
+                child.start_kill().map_err(|error| {
+                    ProcessError::Internal(format!("could not terminate process: {error}"))
+                })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,6 +962,8 @@ mod tests {
                 target: response.process.clone(),
                 r#match: Some("hello".into()),
                 timeout_ms: 1_000,
+                stdout_offset: None,
+                stderr_offset: None,
             })
             .await
             .unwrap();
@@ -735,6 +984,8 @@ mod tests {
                 target: stream_response.stdout.clone(),
                 r#match: Some("hello".into()),
                 timeout_ms: 1_000,
+                stdout_offset: None,
+                stderr_offset: None,
             })
             .await
             .unwrap();
@@ -745,7 +996,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_interrupt_is_explicit() {
+    async fn interrupt_and_terminate_have_distinct_signal_paths() {
         let registry = ProcessRegistry::new();
         let response = registry
             .launch(RunRequest {
@@ -757,22 +1008,24 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(matches!(
-            registry
-                .signal(SignalRequest {
-                    process: response.process.clone(),
-                    signal: "interrupt".into(),
-                })
-                .await,
-            Err(ProcessError::Unsupported(_))
-        ));
-        registry
-            .signal(SignalRequest {
+        ProcessSignaler::signal(
+            &registry,
+            SignalRequest {
+                process: response.process.clone(),
+                signal: "interrupt".into(),
+            },
+        )
+        .await
+        .unwrap();
+        ProcessSignaler::signal(
+            &registry,
+            SignalRequest {
                 process: response.process,
                 signal: "terminate".into(),
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -796,6 +1049,8 @@ mod tests {
                 target: response.stdout,
                 r#match: None,
                 timeout_ms: 1_000,
+                stdout_offset: None,
+                stderr_offset: None,
             })
             .await
             .unwrap();

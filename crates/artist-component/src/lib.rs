@@ -23,32 +23,43 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use wasmtime::Engine;
 
+pub mod agents;
 pub mod bootstrap;
 pub mod compaction;
 pub mod composition;
 pub mod composition_extension;
+pub mod harness;
 pub mod identity;
 pub mod policy;
 pub mod process;
 pub mod profile;
+pub mod providers;
 pub mod tools;
 
+pub use agents::{
+    AgentProcess, AgentResourceComponent, AgentResourceSocket, AgentTranscript, EventLogTranscript,
+};
 pub use artist_wasm_composition::types::SessionInput as CompositionInput;
 pub use bootstrap::ComponentHost;
 pub use compaction::{
     CompactionComponent, CompactionError, CompactionRequest, CompactionResponse, CompactionSocket,
+    WasmCompactionComponent,
 };
 pub use composition::{
     CompositionWatcher, PackageComponentLoader, UrlComposition, UrlCompositionSource,
 };
 pub use composition_extension::{CompositionUpdate, WasmComposition};
+pub use harness::{HarnessError, HarnessOperation, HarnessPolicy, HarnessSocket};
 pub use identity::IdentityCatalog;
 pub use policy::{
     DirectoryResourceProvider, PermissionEffect, PermissionRegistry, PermissionRule,
     install_profile_view, install_prompt_view,
 };
-pub use process::ProcessRegistry;
+pub use process::{ProcessRegistry, ProcessSocket};
 pub use profile::{FileProfileComponent, ProfileComponent, ProfileDocument, ProfileSocket};
+pub use providers::{
+    DefaultProviderConfigurationComponent, ProviderConfigurationComponent, ProviderSocket,
+};
 pub use tools::{
     ComponentToolRegistry, ToolComponent, ToolError, ToolFailure, ToolResultEnvelope,
     WasmToolComponent,
@@ -85,12 +96,25 @@ pub struct ExtensionManifest {
     pub route_hints: Vec<String>,
     #[serde(default)]
     pub dependencies: Vec<ManifestDependency>,
+    /// Model-facing contracts supplied by this component package. A bare
+    /// route hint for a verb must have a matching declaration here.
+    #[serde(default)]
+    pub tools: Vec<ToolManifest>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ManifestDependency {
     pub name: String,
     pub version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ToolManifest {
+    pub name: String,
+    pub description: Option<String>,
+    /// JSON Schema encoded as a string so the package manifest remains a
+    /// simple TOML contract while the component layer validates it once.
+    pub input_schema: String,
 }
 
 impl ExtensionManifest {
@@ -375,6 +399,37 @@ impl ExtensionPackage {
 
     pub fn source_root(&self) -> PathBuf {
         self.root.join(PACKAGE_SOURCE)
+    }
+
+    pub fn tool_definitions(
+        &self,
+    ) -> anyhow::Result<BTreeMap<String, llm_provider::ToolDefinition>> {
+        let mut definitions = BTreeMap::new();
+        for tool in &self.manifest.tools {
+            if tool.name.trim().is_empty() {
+                return Err(anyhow!("tool definition name cannot be empty"));
+            }
+            let input_schema = serde_json::from_str(&tool.input_schema).with_context(|| {
+                format!("parse input schema for component tool {:?}", tool.name)
+            })?;
+            if definitions
+                .insert(
+                    tool.name.clone(),
+                    llm_provider::ToolDefinition {
+                        name: tool.name.clone(),
+                        description: tool.description.clone(),
+                        input_schema,
+                    },
+                )
+                .is_some()
+            {
+                return Err(anyhow!(
+                    "duplicate component tool definition {:?}",
+                    tool.name
+                ));
+            }
+        }
+        Ok(definitions)
     }
 
     pub fn readme_path(&self) -> PathBuf {

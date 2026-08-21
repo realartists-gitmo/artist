@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
@@ -145,6 +146,10 @@ pub struct ModelResponse {
     pub refusal: Option<String>,
     #[serde(default)]
     pub incomplete: bool,
+    /// Provider-native output items required to continue a stateless request.
+    /// OpenAI uses this for reasoning items; other adapters may leave it empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continuation_items: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -498,7 +503,30 @@ pub trait ModelProvider: Send + Sync {
         Ok(())
     }
 
+    /// Give a provider the first chance to compact a request when its own
+    /// context limit is reached. The component compaction socket is tried
+    /// separately by the agent when one is selected.
+    fn compact_context<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _model: String,
+        _context_limit: Option<u64>,
+        _metadata: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderCompaction, ProviderError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(ProviderError::Unsupported {
+                feature: "native context compaction".into(),
+            })
+        })
+    }
+
     fn stream<'a>(&'a self, request: ModelRequest) -> ModelEventStream<'a>;
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct ProviderCompaction {
+    pub messages: Vec<Message>,
+    pub metadata: Value,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

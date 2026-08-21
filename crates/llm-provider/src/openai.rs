@@ -266,6 +266,7 @@ impl OpenAiProvider {
                 "input_text"
             };
             let mut parts = Vec::new();
+            let mut continuation_items = Vec::new();
             for part in &message.content {
                 match part {
                     ContentPart::Text { text } => {
@@ -290,7 +291,11 @@ impl OpenAiProvider {
                         }));
                     }
                     ContentPart::ProviderExtension { provider, value } => {
-                        if provider == "openai" && value.is_object() {
+                        if provider == "openai"
+                            && value.get("type").and_then(Value::as_str) == Some("reasoning")
+                        {
+                            continuation_items.push(value.clone());
+                        } else if provider == "openai" && value.is_object() {
                             parts.push(value.clone());
                         } else {
                             parts.push(json!({
@@ -308,6 +313,7 @@ impl OpenAiProvider {
                 }
                 encoded.push(item);
             }
+            encoded.extend(continuation_items);
             for call in &message.tool_calls {
                 let id = required(&call.id, "assistant tool call id")?;
                 let name = required(&call.name, "assistant tool call name")?;
@@ -552,6 +558,12 @@ impl StreamAccumulator {
             if response.refusal.is_none() && !self.refusal.is_empty() {
                 response.refusal = Some(self.refusal.clone());
             }
+            if response.continuation_items.is_empty() && !self.reasoning.is_empty() {
+                response.continuation_items.push(json!({
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": self.reasoning}],
+                }));
+            }
             return Ok(response);
         }
         let mut content = Vec::new();
@@ -591,6 +603,14 @@ impl StreamAccumulator {
             usage: self.usage,
             refusal,
             incomplete: false,
+            continuation_items: (!self.reasoning.is_empty())
+                .then(|| {
+                    vec![json!({
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": self.reasoning}],
+                    })]
+                })
+                .unwrap_or_default(),
         })
     }
 }
@@ -757,11 +777,13 @@ fn parse_response(bytes: &[u8], mode: ToolWireMode) -> Result<ModelResponse, Pro
 fn parse_response_value(value: &Value, mode: ToolWireMode) -> Result<ModelResponse, ProviderError> {
     let mut content = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut continuation_items = Vec::new();
     let mut refusal = String::new();
     let codec = StandardToolPayloadCodec::new(mode);
     if let Some(output) = value.get("output").and_then(Value::as_array) {
         for item in output {
             match item.get("type").and_then(Value::as_str) {
+                Some("reasoning") => continuation_items.push(item.clone()),
                 Some("message") => {
                     if let Some(parts) = item.get("content").and_then(Value::as_array) {
                         for part in parts {
@@ -842,6 +864,7 @@ fn parse_response_value(value: &Value, mode: ToolWireMode) -> Result<ModelRespon
         usage,
         refusal: (!refusal.is_empty()).then_some(refusal),
         incomplete,
+        continuation_items,
     })
 }
 
@@ -1017,6 +1040,47 @@ mod tests {
             parse_response(response.to_string().as_bytes(), ToolWireMode::JsonFunction).unwrap();
         assert_eq!(parsed.refusal.as_deref(), Some("no"));
         assert!(parsed.incomplete);
+    }
+
+    #[test]
+    fn reasoning_output_items_survive_stateless_continuation() {
+        let reasoning = json!({
+            "type": "reasoning",
+            "id": "rs_123",
+            "summary": [{"type": "summary_text", "text": "check the file"}]
+        });
+        let parsed = parse_response(
+            json!({
+                "status": "completed",
+                "output": [
+                    reasoning,
+                    {"type":"message","content":[{"type":"output_text","text":"done"}]}
+                ]
+            })
+            .to_string()
+            .as_bytes(),
+            ToolWireMode::JsonFunction,
+        )
+        .unwrap();
+        assert_eq!(parsed.continuation_items, vec![reasoning.clone()]);
+
+        let provider = OpenAiProvider::new("test-key")
+            .unwrap()
+            .with_tool_mode(ToolWireMode::JsonFunction);
+        let body = provider
+            .request_body(&request(vec![Message {
+                role: Role::Assistant,
+                content: vec![ContentPart::ProviderExtension {
+                    provider: "openai".into(),
+                    value: reasoning,
+                }],
+                name: None,
+                tool_calls: Vec::new(),
+                tool_results: Vec::new(),
+            }]))
+            .unwrap();
+        assert_eq!(body["input"][0]["type"], "reasoning");
+        assert_eq!(body["input"][0]["id"], "rs_123");
     }
 
     #[tokio::test]

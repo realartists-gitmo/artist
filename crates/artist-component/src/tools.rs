@@ -116,6 +116,10 @@ impl std::error::Error for ToolError {}
 #[async_trait]
 pub trait ToolComponent: Send + Sync {
     fn name(&self) -> &str;
+    /// The component owns the model-facing contract. Hosts may filter or
+    /// temporarily disable this definition, but never infer a schema from a
+    /// tool name.
+    fn definition(&self) -> llm_provider::ToolDefinition;
     async fn invoke(&self, request: &[u8]) -> Result<Vec<u8>, ToolError>;
 }
 
@@ -229,6 +233,16 @@ impl ComponentToolRegistry {
         self.tools.read().unwrap().keys().cloned().collect()
     }
 
+    pub fn definitions(&self) -> Vec<llm_provider::ToolDefinition> {
+        self.tools
+            .read()
+            .unwrap()
+            .values()
+            .filter(|tool| tool.enabled)
+            .map(|tool| tool.component.definition())
+            .collect()
+    }
+
     pub async fn invoke(&self, name: &str, request: &[u8]) -> Result<Vec<u8>, ToolError> {
         let (component, enabled) = {
             let tools = self.tools.read().unwrap();
@@ -247,6 +261,14 @@ impl ComponentToolRegistry {
         let envelope = match self.invoke(name, request).await {
             Ok(bytes) => {
                 let output = serde_json::from_slice::<Value>(&bytes)
+                    .or_else(|_| {
+                        std::str::from_utf8(&bytes)
+                            .map_err(|error| anyhow!(error.to_string()))
+                            .and_then(|text| {
+                                toon_format::decode_default(text)
+                                    .map_err(|error| anyhow!(error.to_string()))
+                            })
+                    })
                     .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned().into());
                 ToolResultEnvelope::success(output)
             }
@@ -259,11 +281,12 @@ impl ComponentToolRegistry {
 /// Adapts a live WASM tool generation into the session registry.
 pub struct WasmToolComponent {
     tool: WasmTool,
+    definition: llm_provider::ToolDefinition,
 }
 
 impl WasmToolComponent {
-    pub fn new(tool: WasmTool) -> Self {
-        Self { tool }
+    pub fn new(tool: WasmTool, definition: llm_provider::ToolDefinition) -> Self {
+        Self { tool, definition }
     }
 }
 
@@ -271,6 +294,10 @@ impl WasmToolComponent {
 impl ToolComponent for WasmToolComponent {
     fn name(&self) -> &str {
         self.tool.name()
+    }
+
+    fn definition(&self) -> llm_provider::ToolDefinition {
+        self.definition.clone()
     }
 
     async fn invoke(&self, request: &[u8]) -> Result<Vec<u8>, ToolError> {
@@ -323,8 +350,41 @@ mod tests {
         fn name(&self) -> &str {
             "echo"
         }
+        fn definition(&self) -> llm_provider::ToolDefinition {
+            llm_provider::ToolDefinition {
+                name: "echo".into(),
+                description: None,
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
         async fn invoke(&self, request: &[u8]) -> Result<Vec<u8>, ToolError> {
             Ok(request.to_vec())
+        }
+    }
+
+    struct ToonResult;
+
+    #[async_trait]
+    impl ToolComponent for ToonResult {
+        fn name(&self) -> &str {
+            "toon-result"
+        }
+
+        fn definition(&self) -> llm_provider::ToolDefinition {
+            llm_provider::ToolDefinition {
+                name: "toon-result".into(),
+                description: None,
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+
+        async fn invoke(&self, _request: &[u8]) -> Result<Vec<u8>, ToolError> {
+            Ok(toon_format::encode_default(&serde_json::json!({
+                "structured": true,
+                "items": [1, 2]
+            }))
+            .unwrap()
+            .into_bytes())
         }
     }
 
@@ -343,5 +403,21 @@ mod tests {
             registry.invoke("echo", b"").await,
             Err(ToolError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn successful_toon_results_remain_structured() {
+        let registry = ComponentToolRegistry::new();
+        registry.register(ToonResult).unwrap();
+        let envelope: ToolResultEnvelope =
+            serde_json::from_slice(&registry.invoke_enveloped("toon-result", b"{}").await).unwrap();
+        assert_eq!(
+            envelope.output,
+            Some(serde_json::json!({
+                "structured": true,
+                "items": [1, 2]
+            }))
+        );
+        assert!(envelope.ok);
     }
 }

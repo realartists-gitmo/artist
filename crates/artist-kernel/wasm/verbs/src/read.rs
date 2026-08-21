@@ -12,7 +12,10 @@ use async_trait::async_trait;
 use crate::host::{VerbError, VerbTool};
 
 const READ_CHUNK_SIZE: u32 = 64 * 1024;
-const MAX_READ_BYTES: usize = 256 * 1024;
+/// Maximum snapshot used to resolve a TECA position. The model response is
+/// still limited by its requested line range, but resolving an address must
+/// see the complete bounded snapshot rather than only the first 256 KiB.
+const MAX_READ_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ReadRequest {
@@ -67,7 +70,14 @@ pub struct ReadResponse {
     pub partial: bool,
     pub binary: bool,
     pub mime_type: Option<String>,
-    pub bytes: Vec<u8>,
+    pub resource: Option<ReadResource>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ReadResource {
+    pub uri: String,
+    pub mime_type: Option<String>,
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +146,39 @@ pub trait ResourceReader: Send + Sync {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, ReadError>;
+
+    /// Read a complete bounded snapshot in provider-sized chunks. This keeps
+    /// TECA resolution correct for anchors beyond the first host read while
+    /// retaining an explicit memory ceiling and a `partial` indicator.
+    async fn read_bounded(
+        &self,
+        uri: &ResourceUri,
+        limit: usize,
+    ) -> Result<(Vec<u8>, bool), ReadError> {
+        let mut bytes = Vec::new();
+        let mut offset = 0u64;
+        let target = limit.saturating_add(1);
+        while bytes.len() < target {
+            let remaining = target - bytes.len();
+            let size = remaining.min(READ_CHUNK_SIZE as usize) as u32;
+            let chunk = self.read_range(uri, offset, size).await?;
+            if chunk.is_empty() {
+                break;
+            }
+            offset = offset
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| ReadError::Addressing("resource is too large".into()))?;
+            bytes.extend_from_slice(&chunk);
+            if chunk.len() < size as usize {
+                break;
+            }
+        }
+        let partial = bytes.len() > limit;
+        if partial {
+            bytes.truncate(limit);
+        }
+        Ok((bytes, partial))
+    }
 
     async fn mime_type(&self, _uri: &ResourceUri) -> Result<Option<String>, ReadError> {
         Ok(None)
@@ -245,16 +288,10 @@ pub async fn read<R: ResourceReader, A: LineAddresser>(
         .or_else(|| infer_mime_type(base.path()));
     // A model-facing read is bounded. The extra byte distinguishes a full
     // response from a resource clipped at the budget; edit uses its own
-    // transactional full-resource path.
-    let bytes = reader
-        .read_range(&base, 0, (MAX_READ_BYTES + 1) as u32)
-        .await?;
-    let partial = bytes.len() > MAX_READ_BYTES;
-    let bytes = if partial {
-        bytes[..MAX_READ_BYTES].to_vec()
-    } else {
-        bytes
-    };
+    // transactional full-resource path. Chunking matters because individual
+    // providers may reject a large single read even when the bounded
+    // snapshot itself is valid.
+    let (bytes, partial) = reader.read_bounded(&base, MAX_READ_BYTES).await?;
     let Ok(source) = std::str::from_utf8(&bytes) else {
         return Ok(ReadResponse {
             uri: base.to_string(),
@@ -268,8 +305,12 @@ pub async fn read<R: ResourceReader, A: LineAddresser>(
             lines: Vec::new(),
             partial,
             binary: true,
-            mime_type,
-            bytes,
+            mime_type: mime_type.clone(),
+            resource: Some(ReadResource {
+                uri: base.to_string(),
+                mime_type: mime_type.clone(),
+                size: bytes.len() as u64,
+            }),
         });
     };
     let lines = addresser.address_lines(source)?;
@@ -301,7 +342,7 @@ pub async fn read<R: ResourceReader, A: LineAddresser>(
         partial,
         binary: false,
         mime_type,
-        bytes: Vec::new(),
+        resource: None,
     })
 }
 
@@ -449,6 +490,35 @@ mod tests {
         }
     }
 
+    struct BytesReader {
+        bytes: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl ResourceReader for BytesReader {
+        async fn read_all(&self, _uri: &ResourceUri) -> Result<Vec<u8>, ReadError> {
+            Ok(self.bytes.clone())
+        }
+
+        async fn read_range(
+            &self,
+            _uri: &ResourceUri,
+            offset: u64,
+            size: u32,
+        ) -> Result<Vec<u8>, ReadError> {
+            let start = usize::try_from(offset)
+                .map_err(|_| ReadError::Addressing("offset exceeds host capacity".into()))?;
+            Ok(self
+                .bytes
+                .get(start..)
+                .unwrap_or_default()
+                .iter()
+                .take(size as usize)
+                .copied()
+                .collect())
+        }
+    }
+
     #[test]
     fn ranges_accept_open_and_infinite_bounds() {
         assert_eq!(ReadRange::parse("..+4").unwrap().end, Some(4));
@@ -494,5 +564,46 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a1", "a2", "a3"]
         );
+    }
+
+    #[tokio::test]
+    async fn read_resolves_an_anchor_after_the_old_prefix_limit() {
+        let source = (0..70_000)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let response = read(
+            &BytesReader {
+                bytes: source.into_bytes(),
+            },
+            &TestAddresser,
+            ReadRequest {
+                uri: "file:///large.txt#a60000".into(),
+                range: Some("0..+0".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.position.as_deref(), Some("a60000"));
+        assert_eq!(response.lines[0].content, "line-60000");
+        assert!(!response.partial);
+    }
+
+    #[tokio::test]
+    async fn binary_read_returns_a_resource_reference_not_raw_bytes() {
+        let response = read(
+            &BytesReader {
+                bytes: vec![0, 255, 1, 2],
+            },
+            &TestAddresser,
+            ReadRequest {
+                uri: "file:///image.png".into(),
+                range: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(response.binary);
+        assert_eq!(response.resource.unwrap().uri, "file:///image.png");
     }
 }

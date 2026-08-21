@@ -86,6 +86,19 @@ pub fn project_conversation(events: &[AgentEvent]) -> Vec<Message> {
                 requested.remove(&result.call_id);
                 messages.push(tool_message(result.clone()));
             }
+            AgentEvent::HarnessCompleted {
+                result, operation, ..
+            } => {
+                requested.remove(&result.call_id);
+                match operation {
+                    Some(artist_component::HarnessOperation::Handoff { brief, .. }) => {
+                        messages.clear();
+                        requested.clear();
+                        messages.push(Message::text(Role::User, brief.clone()));
+                    }
+                    _ => messages.push(tool_message(result.clone())),
+                }
+            }
             _ => {}
         }
     }
@@ -104,6 +117,12 @@ pub fn project_conversation(events: &[AgentEvent]) -> Vec<Message> {
 
 fn assistant_message(response: &ModelResponse) -> Message {
     let mut content = response.content.clone();
+    for item in &response.continuation_items {
+        content.push(ContentPart::ProviderExtension {
+            provider: "openai".into(),
+            value: item.clone(),
+        });
+    }
     if let Some(refusal) = &response.refusal {
         content.push(ContentPart::ProviderExtension {
             provider: "model".into(),
@@ -140,6 +159,18 @@ fn tool_message(result: ToolResult) -> Message {
 /// every provider boundary so replace/remove mutations cannot leave stale
 /// system messages in a mutable vector.
 pub fn project_request(snapshot: &Snapshot, events: &[AgentEvent]) -> Vec<Message> {
+    // A compaction result is the complete provider-neutral request context.
+    // Do not prepend the pre-compaction snapshot again: doing so would turn a
+    // component-owned replacement into an implicit host preservation rule.
+    let latest_compaction = events
+        .iter()
+        .rposition(|event| matches!(event, AgentEvent::ContextCompacted { .. }));
+    let latest_handoff = events
+        .iter()
+        .rposition(|event| matches!(event, AgentEvent::Handoff { .. }));
+    if latest_compaction.is_some_and(|index| latest_handoff.is_none_or(|handoff| index > handoff)) {
+        return project_conversation(events);
+    }
     let mut messages = project_snapshot(snapshot);
     messages.extend(project_conversation(events));
     messages
@@ -160,6 +191,7 @@ mod tests {
             usage: Usage::default(),
             refusal: None,
             incomplete: false,
+            continuation_items: Vec::new(),
         }
     }
 
@@ -211,5 +243,22 @@ mod tests {
         assert_eq!(messages[0].tool_calls[0].id, "call-1");
         assert!(messages[1].tool_results[0].is_error);
         assert_eq!(messages[1].tool_results[0].call_id, "call-1");
+    }
+
+    #[test]
+    fn compaction_replaces_the_complete_request_context() {
+        let compacted = Message::text(Role::User, "compacted");
+        let messages = project_request(
+            &Snapshot::new([artist_session::Contribution::new(
+                "system",
+                "system",
+                "must not be duplicated",
+            )]),
+            &[AgentEvent::ContextCompacted {
+                context: vec![compacted.clone()],
+                metadata: serde_json::Value::Null,
+            }],
+        );
+        assert_eq!(messages, vec![compacted]);
     }
 }

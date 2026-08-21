@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 artist-kernel = { path = "../.." }
+artist-teca = { path = "../../../artist-teca" }
 artist-wasm = { path = ".." }
 artist-wasm-filesystem = { path = "../filesystem" }
 async-trait = "0.1"

@@ -23,7 +23,10 @@ use async_trait::async_trait;
 use notify::{RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
-use crate::{ComponentToolRegistry, ToolComponent, WasmToolComponent};
+use crate::{
+    CompactionComponent, ComponentToolRegistry, ToolComponent, WasmCompactionComponent,
+    WasmToolComponent,
+};
 use crate::{ExtensionCatalog, ExtensionPackage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +54,7 @@ pub struct UrlComposition {
     active: Mutex<BTreeSet<String>>,
     tools: Option<ComponentToolRegistry>,
     active_tools: Mutex<BTreeSet<String>>,
+    active_routes: Mutex<BTreeSet<String>>,
 }
 
 /// The concrete loader installed into the generic master by the native
@@ -201,6 +205,7 @@ impl UrlComposition {
             active: Mutex::new(BTreeSet::new()),
             tools: None,
             active_tools: Mutex::new(BTreeSet::new()),
+            active_routes: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -215,6 +220,50 @@ impl UrlComposition {
 
     pub fn tools(&self) -> Option<ComponentToolRegistry> {
         self.tools.clone()
+    }
+
+    pub fn active_routes(&self) -> BTreeSet<String> {
+        self.active_routes.lock().unwrap().clone()
+    }
+
+    pub fn has_route(&self, route: &str) -> bool {
+        self.active_routes.lock().unwrap().contains(route)
+    }
+
+    pub fn compaction_components(
+        &self,
+        handles: &[GenerationHandle],
+    ) -> anyhow::Result<Vec<Arc<dyn CompactionComponent>>> {
+        let packages = self
+            .discover()?
+            .into_values()
+            .map(|root| ExtensionPackage::open(&self.engine, root))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut components: Vec<Arc<dyn CompactionComponent>> = Vec::new();
+        for package in packages {
+            let Some(handle) = handles
+                .iter()
+                .find(|handle| handle.name() == package.manifest().name)
+            else {
+                continue;
+            };
+            for route in package
+                .manifest()
+                .route_hints
+                .iter()
+                .filter(|route| route.starts_with("compaction://"))
+            {
+                let tool_name = route.trim_start_matches("compaction://");
+                if tool_name.is_empty() {
+                    return Err(anyhow!("empty compaction component route"));
+                }
+                components.push(Arc::new(WasmCompactionComponent::new(
+                    route.clone(),
+                    WasmTool::new(tool_name, handle.clone()),
+                )));
+            }
+        }
+        Ok(components)
     }
 
     /// Scan global then local entries. A local package with the same manifest
@@ -326,6 +375,16 @@ impl UrlComposition {
         }
 
         let desired: BTreeSet<_> = roots.keys().cloned().collect();
+        let mut active_routes = BTreeSet::new();
+        for package in &packages {
+            for route in &package.manifest().route_hints {
+                active_routes.insert(if route.contains("://") {
+                    route.clone()
+                } else {
+                    format!("tool://{route}")
+                });
+            }
+        }
         let old: Vec<_> = self
             .active
             .lock()
@@ -360,15 +419,23 @@ impl UrlComposition {
                         .filter_map(|name| bare_tool_name(name).map(str::to_owned))
                         .collect()
                 };
+                let definitions = package.tool_definitions()?;
                 for name in names {
                     let tool_name = name.clone();
+                    let definition = definitions.get(&tool_name).cloned().ok_or_else(|| {
+                        anyhow!(
+                            "component {:?} exposes tool {:?} without a model-facing contract",
+                            package.manifest().name,
+                            tool_name
+                        )
+                    })?;
                     current_tools.insert(name.clone());
                     additions.push((
                         name,
-                        Arc::new(WasmToolComponent::new(WasmTool::new(
-                            tool_name,
-                            handle.clone(),
-                        ))) as Arc<dyn ToolComponent>,
+                        Arc::new(WasmToolComponent::new(
+                            WasmTool::new(tool_name, handle.clone()),
+                            definition,
+                        )) as Arc<dyn ToolComponent>,
                     ));
                 }
             }
@@ -378,6 +445,7 @@ impl UrlComposition {
             *self.active_tools.lock().unwrap() = current_tools;
         }
         *self.active.lock().unwrap() = desired;
+        *self.active_routes.lock().unwrap() = active_routes;
         Ok(handles)
     }
 

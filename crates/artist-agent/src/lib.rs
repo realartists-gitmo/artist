@@ -10,11 +10,10 @@ use std::time::{Duration, Instant};
 
 use artist_component::{
     CompactionComponent, CompactionRequest, ComponentToolRegistry, CompositionInput,
-    CompositionUpdate, CompositionUpdater, PermissionRegistry,
+    CompositionUpdate, CompositionUpdater, HarnessOperation, HarnessSocket, PermissionRegistry,
 };
-use artist_kernel::{Kernel, ResourceError};
 use artist_session::Snapshot;
-use artist_session::{ContextController, EventLog, EventLogTranscript, LogError};
+use artist_session::{ContextController, EventLog, LogError};
 use futures::StreamExt;
 use llm_provider::{
     Message, ModelEvent, ModelProvider, ModelRequest, ModelResponse, ToolCall, ToolDefinition,
@@ -64,6 +63,19 @@ pub enum AgentEvent {
     },
     ToolCompleted {
         result: ToolResult,
+    },
+    /// The authoritative terminal record for yield, fork, and handoff. A
+    /// control call is not represented as `ToolCompleted` until its lifecycle
+    /// operation has actually succeeded or produced a failure result.
+    HarnessCompleted {
+        operation: Option<HarnessOperation>,
+        result: ToolResult,
+        /// A successful handoff carries its replacement context in the same
+        /// durable record as the model-facing result. This keeps a control
+        /// transition from being split across a harness event and a second
+        /// context-reset event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<Snapshot>,
     },
     ProviderObserved {
         turn_id: String,
@@ -170,13 +182,29 @@ impl ComponentToolInvoker {
 impl ToolInvoker for ComponentToolInvoker {
     async fn invoke(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
         if let Some((profile, permissions)) = &self.permissions {
-            let resource = call
-                .arguments
-                .get("uri")
-                .or_else(|| call.arguments.get("source"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            if !permissions.authorize(profile, &call.name, resource) {
+            let resources = [
+                "uri",
+                "source",
+                "destination",
+                "target",
+                "process",
+                "working_directory",
+                "resource",
+                "stdin",
+                "stdout",
+                "stderr",
+            ]
+            .into_iter()
+            .filter_map(|key| call.arguments.get(key).and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+            let authorized = if resources.is_empty() {
+                permissions.authorize(profile, &call.name, "")
+            } else {
+                resources
+                    .into_iter()
+                    .all(|resource| permissions.authorize(profile, &call.name, resource))
+            };
+            if !authorized {
                 let envelope = artist_component::ToolResultEnvelope {
                     ok: false,
                     output: None,
@@ -321,21 +349,94 @@ async fn execute_forks(
     ingress: ForkIngress,
     tasks: Vec<String>,
     control: TurnControl,
+    seed: &str,
 ) -> Result<Vec<(String, Value)>, AgentError> {
     let jobs = tasks.into_iter().enumerate().map(|(index, task)| {
         let executor = Arc::clone(&executor);
         let ingress = ingress.clone();
         let control = control.child();
+        let fork_id = stable_fork_id(seed, index);
         async move {
-            let fork_id = format!("fork-{}", uuid::Uuid::new_v4());
             let value = executor
                 .execute_with_ingress(fork_id.clone(), ingress, task, control)
                 .await?;
-            let _ = index;
             Ok::<_, AgentError>((fork_id, value))
         }
     });
     futures::future::try_join_all(jobs).await
+}
+
+fn stable_fork_id(seed: &str, index: usize) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(seed.as_bytes());
+    let short = digest
+        .iter()
+        .take(12)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("fork-{short}-{index}")
+}
+
+fn pending_harness_call(events: &[AgentEvent]) -> Option<ToolCall> {
+    let mut requested = std::collections::BTreeMap::<String, ToolCall>::new();
+    for event in events {
+        match event {
+            AgentEvent::ModelEvent {
+                event: ModelEvent::Completed { response },
+            } => {
+                for call in &response.tool_calls {
+                    requested.insert(call.id.clone(), call.clone());
+                }
+            }
+            AgentEvent::ToolRequested { call } => {
+                requested.insert(call.id.clone(), call.clone());
+            }
+            AgentEvent::ToolCompleted { result } | AgentEvent::HarnessCompleted { result, .. } => {
+                requested.remove(&result.call_id);
+            }
+            _ => {}
+        }
+    }
+    requested
+        .into_values()
+        .find(|call| matches!(call.name.as_str(), "fork"))
+}
+
+fn successful_tool_result(call: &ToolCall, payload: Value) -> ToolResult {
+    let envelope = artist_component::ToolResultEnvelope::success(payload);
+    ToolResult {
+        call_id: call.id.clone(),
+        content: vec![llm_provider::ContentPart::Text {
+            text: serde_json::to_string(&envelope).expect("tool envelope is serializable"),
+        }],
+        is_error: false,
+    }
+}
+
+fn failed_tool_result(call: &ToolCall, message: String) -> ToolResult {
+    let envelope = artist_component::ToolResultEnvelope::failure(
+        &artist_component::ToolError::Internal(message),
+    );
+    ToolResult {
+        call_id: call.id.clone(),
+        content: vec![llm_provider::ContentPart::Text {
+            text: serde_json::to_string(&envelope).expect("tool envelope is serializable"),
+        }],
+        is_error: true,
+    }
+}
+
+#[cfg(test)]
+fn tool_result_output(result: &ToolResult) -> Option<Value> {
+    result.content.iter().find_map(|part| match part {
+        llm_provider::ContentPart::Text { text } => {
+            serde_json::from_str::<artist_component::ToolResultEnvelope>(text)
+                .ok()
+                .and_then(|envelope| envelope.output)
+        }
+        _ => None,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -530,16 +631,6 @@ where
         Arc::clone(&self.metrics)
     }
 
-    /// Publish this engine's existing durable event log through the kernel's
-    /// `agent://<agent>/transcript` resource.
-    pub fn register_transcript(
-        &self,
-        kernel: &Kernel,
-        agent: impl Into<String>,
-    ) -> Result<(), ResourceError> {
-        kernel.register_agent_transcript(agent, EventLogTranscript::new(Arc::clone(&self.log)))
-    }
-
     /// Reconstruct the canonical agent event stream without invoking a model
     /// or a tool. Projections and resume logic can build on this stable log
     /// boundary while the concrete context policy remains higher-level.
@@ -640,9 +731,28 @@ where
         self.record(AgentEvent::UserMessage {
             message: request.user.clone(),
         })?;
-        let context = ContextController::restore(
+        let context = ContextController::restore_with_event_hook(
             request.context.clone().unwrap_or_else(|| Snapshot::new([])),
             Arc::clone(&self.log),
+            |record| {
+                if record.event_type != "agent.harness_completed" {
+                    return Ok(None);
+                }
+                let event: AgentEvent =
+                    serde_json::from_value(record.payload.clone()).map_err(|error| {
+                        artist_session::ContextError::Replay(format!(
+                            "invalid harness transaction: {error}"
+                        ))
+                    })?;
+                match event {
+                    AgentEvent::HarnessCompleted {
+                        operation: Some(HarnessOperation::Handoff { .. }),
+                        result,
+                        context: Some(snapshot),
+                    } if !result.is_error => Ok(Some(snapshot)),
+                    _ => Ok(None),
+                }
+            },
         )
         .map_err(|error| AgentError::Context(error.to_string()))?;
         let mut composition_input = request.composition_input.clone();
@@ -671,6 +781,29 @@ where
                                 .apply(event)
                                 .map_err(|error| AgentError::Context(error.to_string()))?;
                         }
+                        CompositionUpdate::Profile {
+                            profile_id,
+                            permissions,
+                            harness,
+                            required_tools,
+                        } => {
+                            if let Some(surface) = &request.tool_surface {
+                                surface.set_permissions(profile_id, permissions);
+                                surface.configure_harness(harness);
+                                let enabled = surface
+                                    .definitions()
+                                    .into_iter()
+                                    .map(|definition| definition.name)
+                                    .collect::<std::collections::BTreeSet<_>>();
+                                for required in required_tools {
+                                    if !enabled.contains(&required) {
+                                        return Err(AgentError::ToolSurface(format!(
+                                            "profile requires unavailable or denied tool {required:?}"
+                                        )));
+                                    }
+                                }
+                            }
+                        }
                         tool_update => surface
                             .apply_composition_update(tool_update)
                             .map_err(|error| AgentError::ToolSurface(error.to_string()))?,
@@ -695,6 +828,68 @@ where
             // receive this same immutable ingress and append only their own
             // task.
             let fork_messages = messages.clone();
+            // A parent can crash after recording ToolRequested(fork) while
+            // one or more child logs are still running. Resume that durable
+            // control call before asking the provider for a new decision.
+            // Stable child IDs let executors reuse completed child logs
+            // instead of duplicating their side effects.
+            if let Some(call) = pending_harness_call(&events) {
+                let operation = if let Some(surface) = &request.tool_surface {
+                    surface.harness_operation(&call)
+                } else {
+                    HarnessSocket
+                        .parse(&call.name, &call.arguments)
+                        .map_err(|error| ToolError::Failed {
+                            message: error.to_string(),
+                        })
+                };
+                if let Ok(Some(HarnessOperation::Fork { tasks, payload })) = operation {
+                    let event_operation = HarnessOperation::Fork {
+                        tasks: tasks.clone(),
+                        payload,
+                    };
+                    let result = if let Some(executor) = &self.fork_executor {
+                        execute_forks(
+                            Arc::clone(executor),
+                            ForkIngress {
+                                snapshot: context.snapshot(),
+                                messages: fork_messages.clone(),
+                            },
+                            tasks,
+                            request.control.clone(),
+                            &call.id,
+                        )
+                        .await
+                        .map(|results| {
+                            successful_tool_result(
+                                &call,
+                                serde_json::json!({
+                                    "forks": results
+                                        .into_iter()
+                                        .map(|(id, value)| serde_json::json!({
+                                            "id": id,
+                                            "result": value
+                                        }))
+                                        .collect::<Vec<_>>()
+                                }),
+                            )
+                        })
+                        .unwrap_or_else(|error| failed_tool_result(&call, error.to_string()))
+                    } else {
+                        failed_tool_result(&call, "fork executor is not installed".into())
+                    };
+                    let failed = result.is_error;
+                    self.record(AgentEvent::HarnessCompleted {
+                        operation: Some(event_operation),
+                        result,
+                        context: None,
+                    })?;
+                    if failed {
+                        self.check_control(&request.control)?;
+                    }
+                    continue 'turn;
+                }
+            }
             let tools = request
                 .tool_surface
                 .as_ref()
@@ -765,11 +960,9 @@ where
                 let event = match event {
                     Ok(event) => event,
                     Err(error) => {
-                        if let (true, false, Some(compaction)) = (
-                            matches!(error, llm_provider::ProviderError::ContextLimit { .. }),
-                            compaction_attempted,
-                            self.compaction.as_ref(),
-                        ) {
+                        if matches!(error, llm_provider::ProviderError::ContextLimit { .. })
+                            && !compaction_attempted
+                        {
                             self.record_provider_observation(
                                 &turn_id,
                                 &provider_call_id,
@@ -778,19 +971,46 @@ where
                                 false,
                                 Some(provider_error_class(&error)),
                             )?;
-                            let compacted = compaction
-                                .compact(CompactionRequest {
-                                    context: crate::session::project_conversation(&events),
-                                    model: active_model.clone(),
-                                    context_limit: self.compaction_context_limit,
-                                    metadata: self.compaction_metadata.clone(),
-                                })
-                                .await
-                                .map_err(|error| AgentError::Compaction(error.to_string()))?;
+                            let compacted = if let Some(compaction) = self.compaction.as_ref() {
+                                compaction
+                                    .compact(CompactionRequest {
+                                        // This is the complete provider-neutral
+                                        // request prefix. The host does not
+                                        // decide that system/profile context
+                                        // must be preserved outside the socket.
+                                        context: fork_messages.clone(),
+                                        model: active_model.clone(),
+                                        context_limit: self.compaction_context_limit,
+                                        metadata: self.compaction_metadata.clone(),
+                                    })
+                                    .await
+                                    .map(|response| (response.context, response.metadata))
+                                    .map_err(|error| AgentError::Compaction(error.to_string()))
+                            } else {
+                                active_provider
+                                    .compact_context(
+                                        fork_messages.clone(),
+                                        active_model.clone(),
+                                        self.compaction_context_limit,
+                                        self.compaction_metadata.clone(),
+                                    )
+                                    .await
+                                    .map(|response| (response.messages, response.metadata))
+                                    .map_err(|error| {
+                                        if matches!(
+                                            &error,
+                                            llm_provider::ProviderError::Unsupported { .. }
+                                        ) {
+                                            AgentError::Provider(error)
+                                        } else {
+                                            AgentError::Compaction(error.to_string())
+                                        }
+                                    })
+                            }?;
                             compaction_attempted = true;
                             self.record(AgentEvent::ContextCompacted {
-                                context: compacted.context,
-                                metadata: compacted.metadata,
+                                context: compacted.0,
+                                metadata: compacted.1,
                             })?;
                             continue 'turn;
                         }
@@ -893,11 +1113,269 @@ where
 
             tool_rounds += 1;
             for call in &response.tool_calls {
-                let harness_arguments = call.arguments.clone();
                 self.check_control(&request.control)?;
                 self.record(AgentEvent::ToolRequested { call: call.clone() })?;
                 self.metrics.tool_call();
                 let tool_started = Instant::now();
+
+                // Harness calls are control operations, not ordinary tools.
+                // Parse them through the component-owned socket and keep the
+                // operation out of the normal invoker until the lifecycle
+                // transition has committed its result.
+                let harness = if let Some(surface) = &request.tool_surface {
+                    surface.harness_operation(call)
+                } else {
+                    HarnessSocket
+                        .parse(&call.name, &call.arguments)
+                        .map_err(|error| ToolError::Failed {
+                            message: error.to_string(),
+                        })
+                };
+                if !matches!(&harness, Ok(None)) {
+                    let (operation, result, return_error, complete_yield, context_commit) =
+                        match harness {
+                            Err(error) => (
+                                None,
+                                failed_tool_result(call, error.to_string()),
+                                None,
+                                false,
+                                None,
+                            ),
+                            Ok(None) => {
+                                unreachable!("a tool surface returned no harness operation")
+                            }
+                            Ok(Some(operation)) => {
+                                let operation_for_event = operation.clone();
+                                let mut return_error = None;
+                                let result = match &operation {
+                                    HarnessOperation::Yield { complete, payload } => {
+                                        (complete.then_some(payload.clone()), None, None)
+                                    }
+                                    HarnessOperation::Fork { tasks, .. } => {
+                                        if self.fork_execution {
+                                            (
+                                                None,
+                                                Some(AgentError::Context(
+                                                    "fork is not available inside a fork".into(),
+                                                )),
+                                                None,
+                                            )
+                                        } else if let Some(executor) = &self.fork_executor {
+                                            match execute_forks(
+                                                Arc::clone(executor),
+                                                ForkIngress {
+                                                    snapshot: context.snapshot(),
+                                                    messages: fork_messages.clone(),
+                                                },
+                                                tasks.clone(),
+                                                request.control.clone(),
+                                                &call.id,
+                                            )
+                                            .await
+                                            {
+                                                Ok(results) => (
+                                                    Some(serde_json::json!({
+                                                        "forks": results
+                                                            .into_iter()
+                                                            .map(|(id, value)| serde_json::json!({
+                                                                "id": id,
+                                                                "result": value
+                                                            }))
+                                                            .collect::<Vec<_>>()
+                                                    })),
+                                                    None,
+                                                    None,
+                                                ),
+                                                Err(error) => (None, Some(error), None),
+                                            }
+                                        } else {
+                                            (
+                                                None,
+                                                Some(AgentError::Context(
+                                                    "fork executor is not installed".into(),
+                                                )),
+                                                None,
+                                            )
+                                        }
+                                    }
+                                    HarnessOperation::Handoff { profile, brief, .. } => {
+                                        if self.fork_execution {
+                                            (
+                                                None,
+                                                Some(AgentError::Context(
+                                                    "handoff is not available inside a fork".into(),
+                                                )),
+                                                None,
+                                            )
+                                        } else {
+                                            let resolved = async {
+                                            let plan = if let Some(handler) = &self.handoff_handler {
+                                                handler.resolve(profile, brief).await?
+                                            } else {
+                                                HandoffPlan {
+                                                    profile_id: profile.clone(),
+                                                    context: Snapshot::new([]),
+                                                    composition_input: None,
+                                                    model: None,
+                                                    provider_config_id: None,
+                                                    tool_definitions: None,
+                                                    permissions: None,
+                                                    harness: None,
+                                                }
+                                            };
+                                            let next_provider = if let Some(provider_config_id) =
+                                                &plan.provider_config_id
+                                            {
+                                                let resolver = self.provider_resolver.as_ref().ok_or_else(|| {
+                                                    AgentError::ProviderSelection(format!(
+                                                        "provider configuration {provider_config_id:?} cannot be resolved"
+                                                    ))
+                                                })?;
+                                                Some(resolver.resolve(provider_config_id).await?)
+                                            } else {
+                                                None
+                                            };
+
+                                            // Validate the replacement surface before changing
+                                            // context. The actual replacement is applied only
+                                            // after all fallible provider/profile resolution has
+                                            // succeeded.
+                                            if let (Some(surface), Some(definitions)) =
+                                                (&request.tool_surface, &plan.tool_definitions)
+                                            {
+                                                surface
+                                                    .validate_static_definitions(definitions)
+                                                    .map_err(|error| {
+                                                        AgentError::ToolSurface(error.to_string())
+                                                    })?;
+                                            }
+                                            let next_model = plan.model.clone();
+                                            let next_provider_id = plan.provider_config_id.clone();
+                                            let next_profile_id = plan.profile_id.clone();
+                                            let next_input = plan.composition_input.clone();
+                                            let next_context = plan.context.clone();
+
+                                            // Apply the replacement surface before the
+                                            // in-memory context commit. The handoff event below
+                                            // carries `next_context` as its single durable
+                                            // transaction boundary, so replay can restore this
+                                            // exact state if the process exits immediately after
+                                            // the event is appended.
+                                            if let (Some(surface), Some(definitions)) =
+                                                (&request.tool_surface, plan.tool_definitions)
+                                            {
+                                                surface
+                                                    .replace_static_definitions(definitions)
+                                                    .map_err(|error| {
+                                                        AgentError::ToolSurface(error.to_string())
+                                                    })?;
+                                            }
+                                            if let (Some(surface), Some((profile, permissions))) =
+                                                (&request.tool_surface, plan.permissions)
+                                            {
+                                                surface.set_permissions(profile, permissions);
+                                            }
+                                            if let (Some(surface), Some(harness)) =
+                                                (&request.tool_surface, plan.harness)
+                                            {
+                                                surface.configure_harness(harness);
+                                            }
+                                            context
+                                                .reset_without_log(next_context.clone())
+                                                .map_err(|error| AgentError::Context(error.to_string()))?;
+                                            if let Some(input) = next_input {
+                                                composition_input = Some(input);
+                                            }
+                                            if let Some(model) = next_model {
+                                                active_model = model;
+                                            }
+                                            if let Some(provider) = next_provider {
+                                                active_provider = provider;
+                                            }
+                                            Ok::<_, AgentError>((
+                                                serde_json::json!({
+                                                    "profile": next_profile_id,
+                                                    "provider": next_provider_id,
+                                                    "model": active_model,
+                                                }),
+                                                next_context,
+                                            ))
+                                        }
+                                        .await;
+                                            match resolved {
+                                                Ok((payload, context)) => {
+                                                    (Some(payload), None, Some(context))
+                                                }
+                                                Err(error) => (None, Some(error), None),
+                                            }
+                                        }
+                                    }
+                                };
+                                let (payload, error, context_commit) = result;
+                                let result = match error {
+                                    Some(error) => {
+                                        if return_error.is_none()
+                                            && matches!(
+                                                &error,
+                                                AgentError::Cancelled
+                                                    | AgentError::DeadlineExceeded
+                                            )
+                                        {
+                                            return_error = Some(error.to_string());
+                                        }
+                                        failed_tool_result(call, error.to_string())
+                                    }
+                                    None => successful_tool_result(
+                                        call,
+                                        payload.unwrap_or_else(|| operation.payload().clone()),
+                                    ),
+                                };
+                                let complete_yield = matches!(
+                                    operation,
+                                    HarnessOperation::Yield { complete: true, .. }
+                                ) && !result.is_error;
+                                (
+                                    Some(operation_for_event),
+                                    result,
+                                    return_error,
+                                    complete_yield,
+                                    context_commit,
+                                )
+                            }
+                        };
+                    self.record_tool_observation(
+                        &turn_id,
+                        call,
+                        tool_started.elapsed(),
+                        !result.is_error,
+                        result.is_error.then_some("tool_error".into()),
+                    )?;
+                    self.record(AgentEvent::HarnessCompleted {
+                        operation: operation.clone(),
+                        result: result.clone(),
+                        context: context_commit,
+                    })?;
+                    if let Some(error) = return_error {
+                        return Err(if error == "agent turn cancelled" {
+                            self.cancelled(&request.control)
+                        } else {
+                            self.deadline_exceeded(&request.control)
+                        });
+                    }
+                    if complete_yield {
+                        self.record(AgentEvent::TurnCompleted {
+                            response: response.clone(),
+                        })?;
+                        self.metrics.turn_completed();
+                        return Ok(TurnOutcome {
+                            response: Some(response),
+                            tool_rounds,
+                            usage,
+                        });
+                    }
+                    continue;
+                }
+
                 let result = if let Some(surface) = &request.tool_surface {
                     surface
                         .invoke_with_control(call.clone(), &request.control)
@@ -938,167 +1416,6 @@ where
                 self.record(AgentEvent::ToolCompleted {
                     result: result.clone(),
                 })?;
-                match call.name.as_str() {
-                    "yield" => {
-                        self.record(AgentEvent::Yielded {
-                            payload: harness_arguments.clone(),
-                        })?;
-                        if harness_arguments
-                            .get("complete")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                        {
-                            self.record(AgentEvent::TurnCompleted {
-                                response: response.clone(),
-                            })?;
-                            self.metrics.turn_completed();
-                            return Ok(TurnOutcome {
-                                response: Some(response),
-                                tool_rounds,
-                                usage,
-                            });
-                        }
-                    }
-                    "fork" => {
-                        let tasks = harness_arguments
-                            .get("tasks")
-                            .and_then(Value::as_array)
-                            .ok_or_else(|| {
-                                AgentError::Context("fork.tasks must be an array".into())
-                            })?
-                            .iter()
-                            .map(|task| {
-                                task.as_str().map(ToOwned::to_owned).ok_or_else(|| {
-                                    AgentError::Context("fork tasks must be strings".into())
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        if self.fork_execution {
-                            return Err(AgentError::Context(
-                                "fork is not available inside a fork".into(),
-                            ));
-                        }
-                        let fork_id = format!("fork-{}", uuid::Uuid::new_v4());
-                        self.record(AgentEvent::ForkStarted {
-                            fork_id: fork_id.clone(),
-                            tasks: tasks.clone(),
-                        })?;
-                        let payload = if let Some(executor) = &self.fork_executor {
-                            let results = execute_forks(
-                                Arc::clone(executor),
-                                ForkIngress {
-                                    snapshot: context.snapshot(),
-                                    messages: fork_messages.clone(),
-                                },
-                                tasks,
-                                request.control.clone(),
-                            )
-                            .await
-                            .map_err(|error| match error {
-                                AgentError::Cancelled => self.cancelled(&request.control),
-                                AgentError::DeadlineExceeded => {
-                                    self.deadline_exceeded(&request.control)
-                                }
-                                other => other,
-                            })?;
-                            serde_json::json!({
-                                "forks": results
-                                    .into_iter()
-                                    .map(|(id, value)| serde_json::json!({
-                                        "id": id,
-                                        "result": value
-                                    }))
-                                    .collect::<Vec<_>>()
-                            })
-                        } else {
-                            serde_json::json!({"error": "fork executor is not installed"})
-                        };
-                        self.record(AgentEvent::ForkCompleted { fork_id, payload })?;
-                    }
-                    "handoff" => {
-                        if self.fork_execution {
-                            return Err(AgentError::Context(
-                                "handoff is not available inside a fork".into(),
-                            ));
-                        }
-                        let profile_id = harness_arguments
-                            .get("profile")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned();
-                        let brief = harness_arguments
-                            .get("brief")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned();
-                        let plan = if let Some(handler) = &self.handoff_handler {
-                            handler.resolve(&profile_id, &brief).await?
-                        } else {
-                            HandoffPlan {
-                                profile_id: profile_id.clone(),
-                                context: Snapshot::new([]),
-                                composition_input: None,
-                                model: None,
-                                provider_config_id: None,
-                                tool_definitions: None,
-                                permissions: None,
-                                harness: None,
-                            }
-                        };
-                        // Resolve the new provider before changing the active
-                        // context. A missing provider must not leave a
-                        // half-applied handoff persisted in the session.
-                        let next_provider = if let Some(provider_config_id) =
-                            &plan.provider_config_id
-                        {
-                            let resolver = self.provider_resolver.as_ref().ok_or_else(|| {
-                                AgentError::ProviderSelection(format!(
-                                    "provider configuration {provider_config_id:?} cannot be resolved"
-                                ))
-                            })?;
-                            Some(resolver.resolve(provider_config_id).await?)
-                        } else {
-                            None
-                        };
-                        let next_provider_id = plan.provider_config_id.clone();
-                        context
-                            .reset(plan.context)
-                            .map_err(|error| AgentError::Context(error.to_string()))?;
-                        if let Some(next_input) = plan.composition_input {
-                            composition_input = Some(next_input);
-                        }
-                        if let Some(model) = plan.model {
-                            active_model = model;
-                        }
-                        if let Some(provider) = next_provider {
-                            active_provider = provider;
-                        }
-                        if let (Some(surface), Some(definitions)) =
-                            (&request.tool_surface, plan.tool_definitions)
-                        {
-                            surface
-                                .replace_static_definitions(definitions)
-                                .map_err(|error| AgentError::ToolSurface(error.to_string()))?;
-                        }
-                        if let (Some(surface), Some((profile, permissions))) =
-                            (&request.tool_surface, plan.permissions)
-                        {
-                            surface.set_permissions(profile, permissions);
-                        }
-                        if let (Some(surface), Some(harness)) =
-                            (&request.tool_surface, plan.harness)
-                        {
-                            surface.configure_harness(harness);
-                        }
-                        self.record(AgentEvent::ProfileChanged {
-                            profile_id: plan.profile_id,
-                            provider_id: next_provider_id,
-                            model: Some(active_model.clone()),
-                        })?;
-                        self.record(AgentEvent::Handoff { profile_id, brief })?;
-                    }
-                    _ => {}
-                }
             }
             for message in request.control.take_steering() {
                 self.record(AgentEvent::SteeringAccepted { message })?;
@@ -1116,6 +1433,7 @@ where
             AgentEvent::Usage { .. } => "agent.usage",
             AgentEvent::ToolRequested { .. } => "agent.tool_requested",
             AgentEvent::ToolCompleted { .. } => "agent.tool_completed",
+            AgentEvent::HarnessCompleted { .. } => "agent.harness_completed",
             AgentEvent::ProviderObserved { .. } => "agent.provider_observed",
             AgentEvent::ToolObserved { .. } => "agent.tool_observed",
             AgentEvent::ContextCompacted { .. } => "agent.context_compacted",
@@ -1313,6 +1631,7 @@ mod tests {
             usage: Default::default(),
             refusal: None,
             incomplete: false,
+            continuation_items: Vec::new(),
         }
     }
 
@@ -1582,10 +1901,14 @@ mod tests {
         assert!(engine.replay_events().unwrap().iter().any(|event| {
             matches!(
                 event,
-                AgentEvent::ForkCompleted { payload, .. }
-                    if payload["forks"]
-                        .as_array()
-                        .is_some_and(|forks| forks.len() == 2)
+                AgentEvent::HarnessCompleted {
+                    operation: Some(HarnessOperation::Fork { .. }),
+                    result,
+                    ..
+                } if !result.is_error
+                    && tool_result_output(result)
+                        .and_then(|payload| payload["forks"].as_array().map(Vec::len))
+                        == Some(2)
             )
         }));
     }
@@ -1664,19 +1987,17 @@ mod tests {
         );
         let records = log.records().unwrap();
         assert!(
-            records
+            !records
                 .iter()
                 .any(|record| record.event_type == "context.reset")
         );
-        assert!(
-            records
-                .iter()
-                .any(|record| record.event_type == "agent.handoff")
-        );
-        assert!(
-            records
-                .iter()
-                .any(|record| record.event_type == "agent.profile_changed")
-        );
+        assert!(records.iter().any(|record| {
+            record.event_type == "agent.harness_completed"
+                && record
+                    .payload
+                    .get("context")
+                    .and_then(|context| context.get("contributions"))
+                    .is_some()
+        }));
     }
 }

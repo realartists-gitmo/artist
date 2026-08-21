@@ -42,6 +42,7 @@ interface types {
     record session-input {
         identity: string,
         profile: option<string>,
+        profile-resource: option<string>,
         system: option<string>,
         agent-instructions: option<string>,
         profile-content: option<string>,

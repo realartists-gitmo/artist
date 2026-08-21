@@ -286,6 +286,7 @@ dependencies = [
  "futures",
  "gray_matter",
  "llm-provider",
+ "nix 0.31.3",
  "notify 8.2.0",
  "notify-debouncer-mini",
  "serde",
@@ -315,10 +316,10 @@ dependencies = [
 name = "artist-default-tools"
 version = "0.1.0"
 dependencies = [
+ "artist-teca",
  "regex",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "toon-format",
  "wit-bindgen 0.60.0",
 ]
@@ -347,7 +348,6 @@ name = "artist-session"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "artist-kernel",
  "async-trait",
  "base64 0.23.0",
  "fs2",
@@ -358,6 +358,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+]
+
+[[package]]
+name = "artist-teca"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -459,6 +466,7 @@ name = "artist-wasm-verbs"
 version = "0.1.0"
 dependencies = [
  "artist-kernel",
+ "artist-teca",
  "artist-wasm",
  "artist-wasm-filesystem",
  "async-trait",

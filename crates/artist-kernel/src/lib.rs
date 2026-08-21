@@ -4,7 +4,6 @@
 //! the VFS projection. Provider implementations own the behavior and source of
 //! truth of the resources they serve.
 
-pub mod agents;
 pub mod contracts;
 pub mod kernel;
 pub mod namespace;
@@ -15,13 +14,12 @@ pub mod uri;
 pub mod verbs;
 pub mod vfs;
 
-pub use agents::{AgentProcess, AgentTranscript, AgentsProvider};
 pub use contracts::{ContractRegistry, ExtensionContract};
 pub use kernel::Kernel;
 pub use native::{EmptyNamespace, FilesNamespace};
 pub use provider::{
     LayeredResourceProvider, ProviderAttrs, ProviderEntry, ResourceError, ResourceErrorCode,
-    ResourceProvider,
+    ResourceProvider, ResourceSignal,
 };
 pub use resources::UrlNamespace;
 pub use uri::{ResourceUri, UriError};

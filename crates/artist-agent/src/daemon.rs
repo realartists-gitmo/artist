@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 
+use artist_kernel::{ResourceSignal, ResourceUri};
 use artist_session::{
     EventLog, SessionId, SessionStore, Snapshot, StoreError, Workspace, WorkspaceId,
 };
@@ -47,6 +48,24 @@ impl ModelProvider for SharedProvider {
         request: llm_provider::ModelRequest,
     ) -> llm_provider::ModelEventStream<'a> {
         self.0.stream(request)
+    }
+
+    fn compact_context<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        model: String,
+        context_limit: Option<u64>,
+        metadata: Value,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<llm_provider::ProviderCompaction, llm_provider::ProviderError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        self.0
+            .compact_context(messages, model, context_limit, metadata)
     }
 }
 
@@ -152,6 +171,40 @@ pub trait SessionRuntimeFactory: Send + Sync {
         metadata: SessionMetadata,
         log: Arc<EventLog>,
     ) -> Result<Arc<dyn SessionTurnRunner>, crate::AgentError>;
+
+    async fn write_resource(
+        &self,
+        _workspace: Workspace,
+        _uri: ResourceUri,
+        _offset: u64,
+        _data: Vec<u8>,
+    ) -> Result<u32, crate::AgentError> {
+        Err(crate::AgentError::Context(
+            "resource writes are not configured for this runtime".into(),
+        ))
+    }
+
+    async fn signal_resource(
+        &self,
+        _workspace: Workspace,
+        _uri: ResourceUri,
+        _signal: ResourceSignal,
+    ) -> Result<(), crate::AgentError> {
+        Err(crate::AgentError::Context(
+            "resource signals are not configured for this runtime".into(),
+        ))
+    }
+
+    async fn move_resource(
+        &self,
+        _workspace: Workspace,
+        _source: ResourceUri,
+        _destination: ResourceUri,
+    ) -> Result<(), crate::AgentError> {
+        Err(crate::AgentError::Context(
+            "resource moves are not configured for this runtime".into(),
+        ))
+    }
 }
 
 struct DeferredSessionRunner {
@@ -330,6 +383,7 @@ struct LiveState {
     pending_events: BTreeMap<u64, artist_session::LogRecord>,
     metadata: SessionMetadata,
     accepted_requests: BTreeSet<String>,
+    turn_lease: Option<File>,
 }
 
 pub struct LiveSession {
@@ -340,6 +394,7 @@ pub struct LiveSession {
     events: broadcast::Sender<RpcFrame>,
     global_events: broadcast::Sender<RpcFrame>,
     runner: RwLock<Option<Arc<dyn SessionTurnRunner>>>,
+    lease_path: std::path::PathBuf,
 }
 
 impl LiveSession {
@@ -349,6 +404,7 @@ impl LiveSession {
         log: Arc<EventLog>,
         metadata: SessionMetadata,
         global_events: broadcast::Sender<RpcFrame>,
+        lease_path: std::path::PathBuf,
     ) -> Self {
         let records = log.records().unwrap_or_default();
         let accepted_requests = records
@@ -381,10 +437,12 @@ impl LiveSession {
                 pending_events: BTreeMap::new(),
                 metadata,
                 accepted_requests,
+                turn_lease: None,
             }),
             events,
             global_events,
             runner: RwLock::new(None),
+            lease_path,
         }
     }
 
@@ -479,20 +537,32 @@ impl LiveSession {
     }
 
     pub fn replay_from(&self, after: u64) -> Result<Vec<RpcFrame>, DaemonError> {
+        Ok(self.replay_from_with_watermark(after)?.0)
+    }
+
+    pub fn replay_from_with_watermark(
+        &self,
+        after: u64,
+    ) -> Result<(Vec<RpcFrame>, u64), DaemonError> {
         let records = self
             .log
             .records()
             .map_err(|error| DaemonError::Store(StoreError::Log(error)))?;
-        Ok(records
+        let watermark = records
+            .last()
+            .map(|record| record.sequence)
+            .unwrap_or(after);
+        let frames = records
             .into_iter()
-            .filter(|record| record.sequence > after)
+            .filter(|record| record.sequence > after && record.sequence <= watermark)
             .map(|record| RpcFrame::Event {
                 stream_id: self.stream_id(),
                 sequence: record.sequence,
                 event_type: record.event_type,
                 payload: record.payload,
             })
-            .collect())
+            .collect();
+        Ok((frames, watermark))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<RpcFrame> {
@@ -509,6 +579,7 @@ impl LiveSession {
             DaemonError::InvalidRequest("session turns require an active async runtime".into())
         })?;
         let control = crate::TurnControl::new();
+        let turn_lease = acquire_turn_lease(&self.lease_path, &self.session_id)?;
         {
             let mut state = self.state.lock().unwrap();
             if state.phase == SessionPhase::Closed {
@@ -524,6 +595,7 @@ impl LiveSession {
             state.active_request = Some(request.request_id.clone());
             state.control = Some(control.clone());
             state.accepted_requests.insert(request.request_id.clone());
+            state.turn_lease = Some(turn_lease);
         }
         let runner = self.runner.read().unwrap().clone();
         let Some(runner) = runner else {
@@ -532,6 +604,7 @@ impl LiveSession {
             state.active_request = None;
             state.control = None;
             state.accepted_requests.remove(&request.request_id);
+            state.turn_lease.take();
             return Err(DaemonError::RunnerUnavailable);
         };
         if let Err(error) = self.journal(
@@ -543,6 +616,7 @@ impl LiveSession {
             state.active_request = None;
             state.control = None;
             state.accepted_requests.remove(&request.request_id);
+            state.turn_lease.take();
             return Err(error);
         }
         let session = Arc::clone(self);
@@ -574,6 +648,7 @@ impl LiveSession {
                 };
                 state.active_request = None;
                 state.control = None;
+                state.turn_lease.take();
             }
         });
         Ok(())
@@ -814,23 +889,31 @@ impl Daemon {
                 "stored session metadata addresses a different session".into(),
             ));
         }
+        let lease_path = self.store.session_lease_path(&workspace_record, &session);
+        // Hold the same cross-daemon lease used by start_turn while deciding
+        // whether an unfinished turn belongs to a crashed daemon. A bare
+        // try-lock followed by an append allowed another daemon to start a
+        // new turn between the check and the interruption record.
+        let recovery_lease = try_acquire_turn_lease(&lease_path)?;
+        if recovery_lease.is_some() && !log.is_closed() && has_unfinished_turn(&log)? {
+            log.append(
+                "session.turn_interrupted",
+                serde_json::json!({"reason": "daemon_reopened_before_turn_completion"}),
+            )
+            .map_err(|error| DaemonError::Store(StoreError::Log(error)))?;
+        }
         let live = Arc::new(LiveSession::new(
             workspace.clone(),
             session.clone(),
             Arc::clone(&log),
             metadata,
             self.global_events.clone(),
+            lease_path,
         ));
         if !has_stored_metadata && !log.is_closed() {
             live.journal(
                 "session.metadata",
                 serde_json::to_value(live.metadata()).map_err(DaemonError::RegistryFormat)?,
-            )?;
-        }
-        if !log.is_closed() && has_unfinished_turn(&log)? {
-            live.journal(
-                "session.turn_interrupted",
-                serde_json::json!({"reason": "daemon_reopened_before_turn_completion"}),
             )?;
         }
         if let Some(runner) = self.runner.read().unwrap().clone() {
@@ -846,6 +929,7 @@ impl Daemon {
             .write()
             .unwrap()
             .insert(key, Arc::clone(&live));
+        drop(recovery_lease);
         if tokio::runtime::Handle::try_current().is_ok() {
             live.start_event_relay();
         }
@@ -866,6 +950,67 @@ impl Daemon {
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<RpcFrame> {
         self.global_events.subscribe()
+    }
+
+    pub async fn write_resource(
+        &self,
+        workspace: &WorkspaceId,
+        uri: ResourceUri,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<u32, crate::AgentError> {
+        let workspace = self
+            .workspace(workspace)
+            .ok_or_else(|| crate::AgentError::Context("workspace is not registered".into()))?;
+        let factory = self
+            .runtime_factory
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                crate::AgentError::Context("resource runtime is not configured".into())
+            })?;
+        factory.write_resource(workspace, uri, offset, data).await
+    }
+
+    pub async fn signal_resource(
+        &self,
+        workspace: &WorkspaceId,
+        uri: ResourceUri,
+        signal: ResourceSignal,
+    ) -> Result<(), crate::AgentError> {
+        let workspace = self
+            .workspace(workspace)
+            .ok_or_else(|| crate::AgentError::Context("workspace is not registered".into()))?;
+        let factory = self
+            .runtime_factory
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                crate::AgentError::Context("resource runtime is not configured".into())
+            })?;
+        factory.signal_resource(workspace, uri, signal).await
+    }
+
+    pub async fn move_resource(
+        &self,
+        workspace: &WorkspaceId,
+        source: ResourceUri,
+        destination: ResourceUri,
+    ) -> Result<(), crate::AgentError> {
+        let workspace = self
+            .workspace(workspace)
+            .ok_or_else(|| crate::AgentError::Context("workspace is not registered".into()))?;
+        let factory = self
+            .runtime_factory
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                crate::AgentError::Context("resource runtime is not configured".into())
+            })?;
+        factory.move_resource(workspace, source, destination).await
     }
 }
 
@@ -977,7 +1122,7 @@ fn infer_phase(log: &EventLog) -> Option<SessionPhase> {
         }
     }
     if active {
-        Some(SessionPhase::Failed)
+        Some(SessionPhase::Running)
     } else {
         phase
     }
@@ -999,6 +1144,26 @@ fn has_unfinished_turn(log: &EventLog) -> Result<bool, DaemonError> {
         }
     }
     Ok(active)
+}
+
+fn acquire_turn_lease(path: &Path, session: &SessionId) -> Result<File, DaemonError> {
+    try_acquire_turn_lease(path)?.ok_or_else(|| DaemonError::SessionBusy(session.clone()))
+}
+
+fn try_acquire_turn_lease(path: &Path) -> Result<Option<File>, DaemonError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let lease = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    match lease.try_lock_exclusive() {
+        Ok(()) => Ok(Some(lease)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(DaemonError::RegistryIo(error)),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1057,6 +1222,34 @@ struct SessionSignalParams {
     workspace_id: String,
     session_id: String,
     signal: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceWriteParams {
+    workspace_id: String,
+    uri: String,
+    #[serde(default)]
+    offset: u64,
+    #[serde(default)]
+    data: Option<Value>,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceSignalParams {
+    workspace_id: String,
+    uri: String,
+    signal: String,
+    #[serde(default)]
+    payload: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceMoveParams {
+    workspace_id: String,
+    source: String,
+    destination: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1231,19 +1424,24 @@ impl RpcHandler for DaemonRpcHandler {
                 let params: SessionStreamParams = serde_json::from_value(params)
                     .map_err(|error| Self::invalid_request(id.clone(), error.to_string()))?;
                 let live = self.live(&id, &params.workspace_id, &params.session_id)?;
-                let frames = live.replay_from(params.after).map_err(|error| RpcError {
-                    code: "session_error".into(),
-                    message: error.to_string(),
-                })?;
+                let (frames, watermark) =
+                    live.replay_from_with_watermark(params.after)
+                        .map_err(|error| RpcError {
+                            code: "session_error".into(),
+                            message: error.to_string(),
+                        })?;
                 Ok(vec![RpcFrame::response(
                     id,
-                    serde_json::to_value(frames).map_err(|error| RpcError {
-                        code: "session_error".into(),
-                        message: error.to_string(),
-                    })?,
+                    serde_json::json!({
+                        "events": serde_json::to_value(frames).map_err(|error| RpcError {
+                            code: "session_error".into(),
+                            message: error.to_string(),
+                        })?,
+                        "watermark": watermark,
+                    }),
                 )])
             }
-            "session/write" | "resource/write" => {
+            "session/write" => {
                 let params: SessionWriteParams = serde_json::from_value(params)
                     .map_err(|error| Self::invalid_request(id.clone(), error.to_string()))?;
                 let live = self.live(&id, &params.workspace_id, &params.session_id)?;
@@ -1257,7 +1455,64 @@ impl RpcHandler for DaemonRpcHandler {
                     serde_json::json!({"accepted": true}),
                 )])
             }
-            "session/signal" | "resource/signal" => {
+            "resource/write" => {
+                let params: ResourceWriteParams = serde_json::from_value(params)
+                    .map_err(|error| Self::invalid_request(id.clone(), error.to_string()))?;
+                let workspace_id = WorkspaceId::new(params.workspace_id)
+                    .map_err(|error| Self::invalid_request(id.clone(), error.to_string()))?;
+                let uri: ResourceUri = params.uri.parse().map_err(|error| {
+                    Self::invalid_request(id.clone(), format!("invalid resource URI: {error}"))
+                })?;
+                let data = match (params.data, params.text) {
+                    (Some(Value::String(text)), None) => text.into_bytes(),
+                    (Some(Value::Array(values)), None) => values
+                        .into_iter()
+                        .map(|value| {
+                            value
+                                .as_u64()
+                                .and_then(|byte| u8::try_from(byte).ok())
+                                .ok_or_else(|| {
+                                    Self::invalid_request(
+                                        id.clone(),
+                                        "data array must contain bytes",
+                                    )
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    (Some(_), None) => {
+                        return Err(Self::invalid_request(
+                            id,
+                            "resource/write data must be a string or byte array",
+                        ));
+                    }
+                    (None, Some(text)) => text.into_bytes(),
+                    (None, None) => {
+                        return Err(Self::invalid_request(
+                            id,
+                            "resource/write requires data or text",
+                        ));
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(Self::invalid_request(
+                            id,
+                            "resource/write accepts either data or text, not both",
+                        ));
+                    }
+                };
+                let written = self
+                    .daemon
+                    .write_resource(&workspace_id, uri, params.offset, data)
+                    .await
+                    .map_err(|error| RpcError {
+                        code: "resource_error".into(),
+                        message: error.to_string(),
+                    })?;
+                Ok(vec![RpcFrame::response(
+                    id,
+                    serde_json::json!({"accepted": true, "written": written}),
+                )])
+            }
+            "session/signal" => {
                 let params: SessionSignalParams = serde_json::from_value(params)
                     .map_err(|error| Self::invalid_request(id.clone(), error.to_string()))?;
                 let live = self.live(&id, &params.workspace_id, &params.session_id)?;
@@ -1265,6 +1520,82 @@ impl RpcHandler for DaemonRpcHandler {
                     code: "session_error".into(),
                     message: error.to_string(),
                 })?;
+                Ok(vec![RpcFrame::response(
+                    id,
+                    serde_json::json!({"accepted": true}),
+                )])
+            }
+            "resource/signal" => {
+                let params: ResourceSignalParams = serde_json::from_value(params)
+                    .map_err(|error| Self::invalid_request(id.clone(), error.to_string()))?;
+                let workspace_id = WorkspaceId::new(params.workspace_id)
+                    .map_err(|error| Self::invalid_request(id.clone(), error.to_string()))?;
+                let uri: ResourceUri = params.uri.parse().map_err(|error| {
+                    Self::invalid_request(id.clone(), format!("invalid resource URI: {error}"))
+                })?;
+                let payload = match params.payload {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(text)) => Some(text.into_bytes()),
+                    Some(Value::Array(values)) => Some(
+                        values
+                            .into_iter()
+                            .map(|value| {
+                                value
+                                    .as_u64()
+                                    .and_then(|byte| u8::try_from(byte).ok())
+                                    .ok_or_else(|| {
+                                        Self::invalid_request(
+                                            id.clone(),
+                                            "signal payload array must contain bytes",
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                    Some(value) => Some(serde_json::to_vec(&value).map_err(|error| {
+                        Self::invalid_request(
+                            id.clone(),
+                            format!("invalid signal payload: {error}"),
+                        )
+                    })?),
+                };
+                self.daemon
+                    .signal_resource(
+                        &workspace_id,
+                        uri,
+                        ResourceSignal {
+                            name: params.signal,
+                            payload,
+                        },
+                    )
+                    .await
+                    .map_err(|error| RpcError {
+                        code: "resource_error".into(),
+                        message: error.to_string(),
+                    })?;
+                Ok(vec![RpcFrame::response(
+                    id,
+                    serde_json::json!({"accepted": true}),
+                )])
+            }
+            "resource/move" => {
+                let params: ResourceMoveParams = serde_json::from_value(params)
+                    .map_err(|error| Self::invalid_request(id.clone(), error.to_string()))?;
+                let workspace_id = WorkspaceId::new(params.workspace_id)
+                    .map_err(|error| Self::invalid_request(id.clone(), error.to_string()))?;
+                let source: ResourceUri = params.source.parse().map_err(|error| {
+                    Self::invalid_request(id.clone(), format!("invalid source URI: {error}"))
+                })?;
+                let destination: ResourceUri = params.destination.parse().map_err(|error| {
+                    Self::invalid_request(id.clone(), format!("invalid destination URI: {error}"))
+                })?;
+                self.daemon
+                    .move_resource(&workspace_id, source, destination)
+                    .await
+                    .map_err(|error| RpcError {
+                        code: "resource_error".into(),
+                        message: error.to_string(),
+                    })?;
                 Ok(vec![RpcFrame::response(
                     id,
                     serde_json::json!({"accepted": true}),

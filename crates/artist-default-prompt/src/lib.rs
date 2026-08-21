@@ -5,7 +5,9 @@ wit_bindgen::generate!({
     world: "composition-extension",
 });
 
-use artist::composition::types::{CompositionUpdate, Contribution, Error, SessionInput, Snapshot};
+use artist::composition::types::{
+    CompositionUpdate, Contribution, Error, Event, SessionInput, Snapshot,
+};
 
 struct Component;
 
@@ -65,8 +67,31 @@ impl exports::artist::composition::extension::Guest for Component {
         Ok(Snapshot { contributions })
     }
 
-    fn update(_input: SessionInput) -> Result<Vec<CompositionUpdate>, Error> {
-        Ok(Vec::new())
+    fn update(input: SessionInput) -> Result<Vec<CompositionUpdate>, Error> {
+        let mut updates = Vec::new();
+        if let Some(content) = input.profile_content {
+            updates.push(CompositionUpdate::Context(Event::Replace(Contribution {
+                id: "profile".into(),
+                source: input
+                    .profile
+                    .map(|value| format!("profile://{value}/PROFILE.md")),
+                slot: "profile".into(),
+                order: 0,
+                revision: 1,
+                content,
+            })));
+        }
+        if let Some(content) = input.agent_instructions {
+            updates.push(CompositionUpdate::Context(Event::Replace(Contribution {
+                id: "agent-instructions".into(),
+                source: Some("prompt://AGENTS.md".into()),
+                slot: "agent_instructions".into(),
+                order: 0,
+                revision: 1,
+                content,
+            })));
+        }
+        Ok(updates)
     }
 }
 

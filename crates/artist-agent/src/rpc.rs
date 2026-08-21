@@ -71,20 +71,31 @@ where
     let mut lines = BufReader::new(reader).lines();
     let mut events = handler.subscribe_events();
     let mut subscribed_streams = BTreeSet::new();
+    let mut replay_watermarks = std::collections::BTreeMap::new();
     let mut event_source_open = true;
     loop {
         if event_source_open {
             tokio::select! {
                 line = lines.next_line() => {
                     let Some(line) = line? else { break };
-                    if let Ok(frame) = RpcFrame::from_line(&line) {
-                        subscribed_streams.extend(handler.event_stream_ids(&frame));
-                    }
-                    process_line(&line, &mut writer, handler).await?;
+                    let request = RpcFrame::from_line(&line).ok();
+                    let stream_ids = request
+                        .as_ref()
+                        .map(|frame| handler.event_stream_ids(frame))
+                        .unwrap_or_default();
+                    subscribed_streams.extend(stream_ids.iter().cloned());
+                    let responses = process_line_frames(&line, handler).await?;
+                    update_replay_watermarks(
+                        request.as_ref(),
+                        &stream_ids,
+                        &responses,
+                        &mut replay_watermarks,
+                    );
+                    write_frames(&mut writer, responses).await?;
                 }
                 event = events.recv() => {
                     match event {
-                        Ok(frame) if event_is_subscribed(&frame, &subscribed_streams) => {
+                        Ok(frame) if event_is_subscribed(&frame, &subscribed_streams, &replay_watermarks) => {
                                 writer.write_all(frame.to_line()?.as_bytes()).await?;
                                 writer.flush().await?;
                             }
@@ -98,17 +109,33 @@ where
             let Some(line) = lines.next_line().await? else {
                 break;
             };
-            if let Ok(frame) = RpcFrame::from_line(&line) {
-                subscribed_streams.extend(handler.event_stream_ids(&frame));
-            }
-            process_line(&line, &mut writer, handler).await?;
+            let request = RpcFrame::from_line(&line).ok();
+            let stream_ids = request
+                .as_ref()
+                .map(|frame| handler.event_stream_ids(frame))
+                .unwrap_or_default();
+            subscribed_streams.extend(stream_ids.iter().cloned());
+            let responses = process_line_frames(&line, handler).await?;
+            update_replay_watermarks(
+                request.as_ref(),
+                &stream_ids,
+                &responses,
+                &mut replay_watermarks,
+            );
+            write_frames(&mut writer, responses).await?;
         }
     }
     Ok(())
 }
 
-fn event_is_subscribed(frame: &RpcFrame, streams: &BTreeSet<String>) -> bool {
-    matches!(frame, RpcFrame::Event { stream_id, .. } if streams.contains(stream_id))
+fn event_is_subscribed(
+    frame: &RpcFrame,
+    streams: &BTreeSet<String>,
+    replay_watermarks: &std::collections::BTreeMap<String, u64>,
+) -> bool {
+    matches!(frame, RpcFrame::Event { stream_id, sequence, .. }
+        if streams.contains(stream_id)
+            && *sequence > replay_watermarks.get(stream_id).copied().unwrap_or_default())
 }
 
 async fn process_line<W, H>(line: &str, writer: &mut W, handler: &H) -> Result<(), RpcServerError>
@@ -116,50 +143,84 @@ where
     W: AsyncWrite + Unpin,
     H: RpcHandler,
 {
+    let responses = process_line_frames(line, handler).await?;
+    write_frames(writer, responses).await
+}
+
+async fn process_line_frames<H>(line: &str, handler: &H) -> Result<Vec<RpcFrame>, RpcServerError>
+where
+    H: RpcHandler,
+{
     let frame = match RpcFrame::from_line(line) {
         Ok(frame) => frame,
         Err(error) => {
-            let response = RpcFrame::error("invalid-request", "invalid_frame", error.to_string());
-            writer.write_all(response.to_line()?.as_bytes()).await?;
-            writer.flush().await?;
-            return Ok(());
+            return Ok(vec![RpcFrame::error(
+                "invalid-request",
+                "invalid_frame",
+                error.to_string(),
+            )]);
         }
     };
     let request_id = match &frame {
         RpcFrame::Request { id, .. } => id.clone(),
         _ => {
-            let response = RpcFrame::error(
+            return Ok(vec![RpcFrame::error(
                 "invalid-request",
                 "request_required",
                 "expected a request frame",
-            );
-            writer.write_all(response.to_line()?.as_bytes()).await?;
-            writer.flush().await?;
-            return Ok(());
+            )]);
         }
     };
     match handler.handle(frame).await {
-        Ok(frames) => {
-            for frame in frames {
-                writer.write_all(frame.to_line()?.as_bytes()).await?;
-            }
-        }
-        Err(error) => {
-            writer
-                .write_all(
-                    RpcFrame::Response {
-                        id: request_id,
-                        result: None,
-                        error: Some(error),
-                    }
-                    .to_line()?
-                    .as_bytes(),
-                )
-                .await?;
-        }
+        Ok(frames) => Ok(frames),
+        Err(error) => Ok(vec![RpcFrame::Response {
+            id: request_id,
+            result: None,
+            error: Some(error),
+        }]),
+    }
+}
+
+async fn write_frames<W>(writer: &mut W, frames: Vec<RpcFrame>) -> Result<(), RpcServerError>
+where
+    W: AsyncWrite + Unpin,
+{
+    for frame in frames {
+        writer.write_all(frame.to_line()?.as_bytes()).await?;
     }
     writer.flush().await?;
     Ok(())
+}
+
+fn update_replay_watermarks(
+    request: Option<&RpcFrame>,
+    stream_ids: &[String],
+    responses: &[RpcFrame],
+    watermarks: &mut std::collections::BTreeMap<String, u64>,
+) {
+    let Some(RpcFrame::Request { method, .. }) = request else {
+        return;
+    };
+    if method != "session/subscribe" {
+        return;
+    }
+    let watermark = responses.iter().find_map(|frame| match frame {
+        RpcFrame::Response {
+            result: Some(result),
+            error: None,
+            ..
+        } => result.get("watermark").and_then(serde_json::Value::as_u64),
+        _ => None,
+    });
+    let Some(watermark) = watermark else {
+        return;
+    };
+    for stream_id in stream_ids {
+        watermarks
+            .entry(stream_id.clone())
+            .and_modify(|current| *current = (*current).max(watermark))
+            .or_insert(watermark);
+    }
 }
 
 #[cfg(test)]

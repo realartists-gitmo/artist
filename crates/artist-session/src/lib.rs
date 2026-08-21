@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use artist_kernel::{AgentTranscript, ResourceError, ResourceErrorCode};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -125,13 +124,24 @@ impl SessionStore {
         workspace: &Workspace,
         session: SessionId,
     ) -> Result<EventLog, StoreError> {
-        let path = self
-            .root
+        let path = self.session_path(workspace, &session);
+        Ok(EventLog::open(path, session.to_string())?)
+    }
+
+    pub fn session_path(&self, workspace: &Workspace, session: &SessionId) -> PathBuf {
+        self.root
             .join("workspaces")
             .join(workspace.id.as_str())
             .join("sessions")
-            .join(format!("{}.jsonl", session.as_str()));
-        Ok(EventLog::open(path, session.to_string())?)
+            .join(format!("{}.jsonl", session.as_str()))
+    }
+
+    /// Stable coordination path for the live daemon lease. The lease is
+    /// deliberately separate from the JSONL stream so event-log readers can
+    /// remain read-only while a daemon owns session execution.
+    pub fn session_lease_path(&self, workspace: &Workspace, session: &SessionId) -> PathBuf {
+        self.session_path(workspace, session)
+            .with_extension("lease")
     }
 }
 
@@ -353,13 +363,50 @@ impl EventLog {
     }
 
     fn last_sequence_from(&self, file: &mut File) -> Result<u64, LogError> {
-        file.seek(SeekFrom::Start(0))
-            .map_err(|source| io_error(&self.path, source))?;
-        let clone = file
-            .try_clone()
-            .map_err(|source| io_error(&self.path, source))?;
-        let records = self.read_records(clone)?;
-        Ok(records.last().map_or(0, |record| record.sequence))
+        const INITIAL_TAIL_BYTES: u64 = 16 * 1024;
+        let length = file
+            .metadata()
+            .map_err(|source| io_error(&self.path, source))?
+            .len();
+        if length == 0 {
+            return Ok(0);
+        }
+
+        // Appends already hold the exclusive stream lock. Only the final
+        // JSONL record is needed to allocate the next sequence; rereading the
+        // entire history for every streamed delta made long sessions
+        // quadratic in both I/O and deserialization.
+        let mut start = length.saturating_sub(INITIAL_TAIL_BYTES);
+        loop {
+            file.seek(SeekFrom::Start(start))
+                .map_err(|source| io_error(&self.path, source))?;
+            let mut tail = Vec::new();
+            file.read_to_end(&mut tail)
+                .map_err(|source| io_error(&self.path, source))?;
+            let end = tail
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .unwrap_or(tail.len());
+            let before_end = &tail[..end];
+            let line_start = before_end
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |index| index + 1);
+            if line_start > 0 || start == 0 {
+                let line = &before_end[line_start..];
+                if line.is_empty() {
+                    return Ok(0);
+                }
+                let record: LogRecord = serde_json::from_slice(line)
+                    .map_err(|source| LogError::InvalidRecord { line: 0, source })?;
+                self.validate_record(&record, record.sequence)?;
+                return Ok(record.sequence);
+            }
+            if start == 0 {
+                return Ok(0);
+            }
+            start = start.saturating_sub(INITIAL_TAIL_BYTES);
+        }
     }
 
     fn read_records(&self, file: File) -> Result<Vec<LogRecord>, LogError> {
@@ -455,57 +502,6 @@ impl EventLog {
             .map_err(|source| io_error(&self.path, source))?;
         Ok(())
     }
-}
-
-/// Kernel resource adapter for an existing durable event log. The log remains
-/// the source of truth; this adapter only gives it `agent://` addressing.
-pub struct EventLogTranscript {
-    log: std::sync::Arc<EventLog>,
-}
-
-impl EventLogTranscript {
-    pub fn new(log: std::sync::Arc<EventLog>) -> Self {
-        Self { log }
-    }
-}
-
-#[async_trait::async_trait]
-impl AgentTranscript for EventLogTranscript {
-    async fn read(&self) -> Result<Vec<u8>, ResourceError> {
-        self.log.bytes().map_err(log_resource_error)
-    }
-
-    async fn append(
-        &self,
-        event_type: &str,
-        payload: serde_json::Value,
-    ) -> Result<(), ResourceError> {
-        self.log
-            .append(event_type, payload)
-            .map(|_| ())
-            .map_err(log_resource_error)
-    }
-
-    async fn close(&self) -> Result<(), ResourceError> {
-        self.log
-            .close()
-            .map_err(|error| ResourceError::new(ResourceErrorCode::Conflict, error.to_string()))
-    }
-
-    fn is_closed(&self) -> bool {
-        self.log.is_closed()
-    }
-}
-
-fn log_resource_error(error: LogError) -> ResourceError {
-    let code = match error {
-        LogError::Closed => ResourceErrorCode::Conflict,
-        LogError::UnsupportedVersion { .. } | LogError::InvalidRecord { .. } => {
-            ResourceErrorCode::Conflict
-        }
-        _ => ResourceErrorCode::Io,
-    };
-    ResourceError::new(code, error.to_string())
 }
 
 #[cfg(test)]
@@ -634,27 +630,6 @@ mod tests {
                 .join("workspaces/repo-a/sessions/session-1.jsonl")
         );
         assert_eq!(log.records().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn transcript_close_survives_reopen() {
-        let dir = tempdir().unwrap();
-        let log = std::sync::Arc::new(
-            EventLog::open(dir.path().join("session.jsonl"), "session-1").unwrap(),
-        );
-        let transcript = EventLogTranscript::new(std::sync::Arc::clone(&log));
-        transcript.close().await.unwrap();
-        assert!(transcript.is_closed());
-
-        let reopened = EventLogTranscript::new(log);
-        assert!(reopened.is_closed());
-        assert!(matches!(
-            reopened.append("late", serde_json::json!({})).await,
-            Err(ResourceError {
-                code: ResourceErrorCode::Conflict,
-                ..
-            })
-        ));
     }
 
     #[test]

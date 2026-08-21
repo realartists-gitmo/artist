@@ -41,6 +41,12 @@ interface read {
         content: string,
     }
 
+    record resource-info {
+        uri: string,
+        mime-type: option<string>,
+        size: u64,
+    }
+
     record response {
         uri: string,
         position: option<string>,
@@ -49,7 +55,7 @@ interface read {
         partial: bool,
         binary: bool,
         mime-type: option<string>,
-        bytes: list<u8>,
+        resource-ref: option<resource-info>,
     }
 
     read: func(requests: list<request>) -> list<result<response, error>>;
@@ -193,6 +199,14 @@ interface poll {
         target: string,
         match: option<string>,
         timeout-ms: u64,
+        stdout-offset: option<u64>,
+        stderr-offset: option<u64>,
+    }
+
+    record chunk {
+        stream-name: string,
+        offset: u64,
+        content: string,
     }
 
     record response {
@@ -200,6 +214,9 @@ interface poll {
         event: string,
         matched: bool,
         content: option<string>,
+        stdout-offset: u64,
+        stderr-offset: u64,
+        chunks: list<chunk>,
     }
 
     execute: func(requests: list<request>) -> list<result<response, error>>;

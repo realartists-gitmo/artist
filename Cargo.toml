@@ -20,6 +20,7 @@ members = [
     "crates/artist-agent",
     "crates/artist-session",
     "crates/artist-component",
+    "crates/artist-teca",
 ]
 resolver = "3"
 exclude = ["vendor/fff"]
