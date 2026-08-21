@@ -22,19 +22,22 @@ impl Lifecycle for AstFixture {
         }
     }
     fn compose_prompt(v: Vec<ContextFragment>) -> Result<Vec<ContextFragment>, String> {
-        Ok(v)
+        let _ = v;
+        Err("prompt socket is not advertised".into())
     }
     fn transform_context(v: Vec<Message>) -> Result<Vec<Message>, String> {
-        Ok(v)
+        let _ = v;
+        Err("context socket is not advertised".into())
     }
     fn observe_hook(_: HookEvent) -> Result<HookDecision, String> {
-        Ok(HookDecision::Proceed)
+        Err("hook socket is not advertised".into())
     }
     fn configure_model(v: ModelConfig) -> Result<ModelConfig, String> {
-        Ok(v)
+        let _ = v;
+        Err("model socket is not advertised".into())
     }
     fn observe_event(_: String) -> Result<(), String> {
-        Ok(())
+        Err("event socket is not advertised".into())
     }
 }
 impl Tools for AstFixture {

@@ -132,14 +132,29 @@ impl PluginHost {
             capabilities: raw.capabilities.into_iter().map(capability).collect(),
         };
         store.data_mut().plugin_id = Some(descriptor.id.to_string());
-        let tool_definitions = bindings
-            .artist_plugin_tool_provider()
-            .call_definitions(&mut store)?
-            .map_err(|message| socket(&descriptor, "definitions", message))?;
-        let routes = bindings
-            .artist_plugin_resource_provider()
-            .call_routes(&mut store)?
-            .map_err(|message| socket(&descriptor, "routes", message))?;
+        // The WIT world keeps every socket statically typed, while the
+        // descriptor decides which sockets a component actually participates
+        // in. Never probe an unadvertised socket: narrow components are free
+        // to make their mandatory ABI stubs fail loudly.
+        let tool_definitions = if descriptor.capabilities.contains(&PluginCapability::Tools) {
+            bindings
+                .artist_plugin_tool_provider()
+                .call_definitions(&mut store)?
+                .map_err(|message| socket(&descriptor, "definitions", message))?
+        } else {
+            Vec::new()
+        };
+        let routes = if descriptor
+            .capabilities
+            .contains(&PluginCapability::Resources)
+        {
+            bindings
+                .artist_plugin_resource_provider()
+                .call_routes(&mut store)?
+                .map_err(|message| socket(&descriptor, "routes", message))?
+        } else {
+            Vec::new()
+        };
         let plugin = Arc::new(Mutex::new(LoadedPlugin {
             store,
             bindings,

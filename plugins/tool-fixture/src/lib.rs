@@ -27,19 +27,22 @@ impl Lifecycle for ToolFixture {
         }
     }
     fn compose_prompt(value: Vec<ContextFragment>) -> Result<Vec<ContextFragment>, String> {
-        Ok(value)
+        let _ = value;
+        Err("prompt socket is not advertised".into())
     }
     fn transform_context(value: Vec<Message>) -> Result<Vec<Message>, String> {
-        Ok(value)
+        let _ = value;
+        Err("context socket is not advertised".into())
     }
     fn observe_hook(_: HookEvent) -> Result<HookDecision, String> {
-        Ok(HookDecision::Proceed)
+        Err("hook socket is not advertised".into())
     }
     fn configure_model(value: ModelConfig) -> Result<ModelConfig, String> {
-        Ok(value)
+        let _ = value;
+        Err("model socket is not advertised".into())
     }
     fn observe_event(_: String) -> Result<(), String> {
-        Ok(())
+        Err("event socket is not advertised".into())
     }
 }
 

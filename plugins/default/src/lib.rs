@@ -19,7 +19,6 @@ impl Lifecycle for DefaultPlugin {
             version: env!("CARGO_PKG_VERSION").into(),
             capabilities: vec![
                 Capability::Prompt,
-                Capability::Tools,
                 Capability::Resources,
                 Capability::Context,
                 Capability::Hooks,
@@ -51,7 +50,7 @@ impl Lifecycle for DefaultPlugin {
 
 impl Tools for DefaultPlugin {
     fn definitions() -> Result<Vec<ToolDefinition>, String> {
-        Ok(Vec::new())
+        Err("tool socket is not advertised".into())
     }
     fn invoke(_: String, _: String) -> Result<String, String> {
         Err("unknown tool".into())
