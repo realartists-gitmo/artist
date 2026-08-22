@@ -1,5 +1,14 @@
 # Artist build plan
 
+## Implementation status
+
+Slices 1–8 are implemented. Slices 9–10 remain intentionally open.
+
+Prompt composition is component-owned: the host passes ordered fragments
+through only the components advertising the WIT `prompt` capability, then the
+resulting `InitialContext` is frozen into the canonical session record. The
+host itself does not interpret or compose prompt content.
+
 ## Direction
 
 Artist is a persistent, streaming agent harness built on Rig. The kernel stays small. Everything that should vary is exposed through a plugin socket.

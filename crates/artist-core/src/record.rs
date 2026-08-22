@@ -1,10 +1,11 @@
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use crate::{CallId, EventId, InterruptionCause, MessageId, RunId, SessionId, Source};
+use crate::{CallId, EventId, InterruptionCause, MessageId, RunId, RunOutcome, SessionId, Source};
 
-pub const RECORD_VERSION: u32 = 1;
+pub const RECORD_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ContextFragment {
@@ -17,12 +18,27 @@ pub struct InitialContext {
     pub fragments: Vec<ContextFragment>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// A validated canonical session record.
+///
+/// Fields are private so deserialization and mutation cannot bypass the
+/// transcript reducer. Serialization emits v2; deserialization validates v2
+/// and migrates legacy v1 snapshots.
+#[derive(Clone, Debug)]
 pub struct SessionRecord {
-    pub version: u32,
-    pub session_id: SessionId,
-    pub initial_context: InitialContext,
-    pub entries: Vec<TranscriptEntry>,
+    version: u32,
+    session_id: SessionId,
+    initial_context: InitialContext,
+    entries: Vec<TranscriptEntry>,
+    state: RecordState,
+}
+
+impl PartialEq for SessionRecord {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.session_id == other.session_id
+            && self.initial_context == other.initial_context
+            && self.entries == other.entries
+    }
 }
 
 impl SessionRecord {
@@ -32,33 +48,80 @@ impl SessionRecord {
             session_id,
             initial_context,
             entries: Vec::new(),
+            state: RecordState::default(),
         }
     }
 
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn initial_context(&self) -> &InitialContext {
+        &self.initial_context
+    }
+
+    pub fn entries(&self) -> &[TranscriptEntry] {
+        &self.entries
+    }
+
     pub fn next_sequence(&self) -> u64 {
-        self.entries.len() as u64
+        self.state.next_sequence
+    }
+
+    pub fn active_run(&self) -> Option<&RunId> {
+        self.state.active.as_ref().map(|active| &active.id)
+    }
+
+    pub fn active_message_id(&self) -> Option<&MessageId> {
+        self.state
+            .active
+            .as_ref()
+            .and_then(|active| active.message_id.as_ref())
     }
 
     pub fn entry(&self, kind: TranscriptEntryKind) -> TranscriptEntry {
-        let sequence = self.next_sequence();
+        self.entry_at(self.next_sequence(), kind)
+    }
+
+    pub fn entries_for(
+        &self,
+        kinds: impl IntoIterator<Item = TranscriptEntryKind>,
+    ) -> Vec<TranscriptEntry> {
+        kinds
+            .into_iter()
+            .enumerate()
+            .map(|(offset, kind)| self.entry_at(self.next_sequence() + offset as u64, kind))
+            .collect()
+    }
+
+    fn entry_at(&self, sequence: u64, kind: TranscriptEntryKind) -> TranscriptEntry {
         TranscriptEntry {
-            event_id: EventId::new(format!("{}:event:{sequence}", self.session_id)),
+            event_id: event_id(&self.session_id, sequence),
             sequence,
             kind,
         }
     }
 
     pub fn append(&mut self, entry: TranscriptEntry) -> Result<(), RecordError> {
-        if entry.sequence != self.next_sequence() {
-            return Err(RecordError::Sequence {
-                expected: self.next_sequence(),
-                actual: entry.sequence,
-            });
-        }
-        self.entries.push(entry);
-        if let Err(error) = self.validate() {
-            self.entries.pop();
-            return Err(error);
+        self.append_batch(std::slice::from_ref(&entry))
+    }
+
+    /// Apply one logical batch. Successful work is proportional to the batch.
+    /// A failed batch rebuilds only to roll back the exceptional path.
+    pub fn append_batch(&mut self, entries: &[TranscriptEntry]) -> Result<(), RecordError> {
+        let original_len = self.entries.len();
+        for entry in entries {
+            if let Err(error) = self.state.apply(&self.session_id, entry) {
+                self.entries.truncate(original_len);
+                self.state = RecordState::replay(&self.session_id, &self.entries)
+                    .expect("the pre-batch transcript was already validated");
+                return Err(error);
+            }
+            self.entries.push(entry.clone());
         }
         Ok(())
     }
@@ -67,111 +130,209 @@ impl SessionRecord {
         if self.version != RECORD_VERSION {
             return Err(RecordError::Version(self.version));
         }
+        RecordState::replay(&self.session_id, &self.entries).map(|_| ())
+    }
 
-        let mut active: Option<&RunId> = None;
-        let mut inputs = HashSet::new();
-        let mut steering = HashSet::new();
-        let mut calls = HashMap::new();
-        for (expected, entry) in self.entries.iter().enumerate() {
-            if entry.sequence != expected as u64 {
+    pub fn from_current_parts(
+        session_id: SessionId,
+        initial_context: InitialContext,
+        entries: Vec<TranscriptEntry>,
+    ) -> Result<Self, RecordError> {
+        let state = RecordState::replay(&session_id, &entries)?;
+        Ok(Self {
+            version: RECORD_VERSION,
+            session_id,
+            initial_context,
+            entries,
+            state,
+        })
+    }
+
+    #[cfg(test)]
+    fn validation_steps(&self) -> u64 {
+        self.state.validation_steps
+    }
+
+    fn migrate_v1(snapshot: SnapshotV1) -> Result<Self, RecordError> {
+        if snapshot.version != 1 {
+            return Err(RecordError::Version(snapshot.version));
+        }
+        let session_id = snapshot.session_id;
+        let mut record = Self::new(session_id.clone(), snapshot.initial_context);
+        let mut old_to_new = Vec::<u64>::with_capacity(snapshot.entries.len());
+        let mut messages = HashMap::<RunId, MessageId>::new();
+        for (expected_sequence, legacy) in snapshot.entries.into_iter().enumerate() {
+            let expected_sequence = expected_sequence as u64;
+            if legacy.sequence != expected_sequence {
                 return Err(RecordError::Sequence {
-                    expected: expected as u64,
-                    actual: entry.sequence,
+                    expected: expected_sequence,
+                    actual: legacy.sequence,
                 });
             }
-
-            match &entry.kind {
-                TranscriptEntryKind::Input { message_id, .. } => {
-                    inputs.insert(message_id);
-                }
-                TranscriptEntryKind::SteeringQueued { message_id, .. } => {
-                    steering.insert(message_id);
-                }
-                TranscriptEntryKind::RunStarted { run_id, input_id } => {
-                    if !inputs.contains(input_id) {
-                        return Err(RecordError::UnknownInput);
-                    }
-                    if active.replace(run_id).is_some() {
-                        return Err(RecordError::RunAlreadyActive);
-                    }
-                }
-                TranscriptEntryKind::AssistantMessage {
-                    run_id, complete, ..
-                } => {
-                    require_run(active, run_id)?;
-                    if *complete {
-                        finish_run(&mut active, run_id)?;
-                    }
-                }
-                TranscriptEntryKind::Interrupted { run_id, .. } => {
-                    let previous = expected.checked_sub(1).and_then(|i| self.entries.get(i));
-                    if !matches!(
-                        previous.map(|entry| &entry.kind),
-                        Some(TranscriptEntryKind::AssistantMessage {
-                            run_id: partial_run,
-                            complete: false,
-                            ..
-                        }) if partial_run == run_id
-                    ) {
-                        return Err(RecordError::MissingPartialMessage);
-                    }
-                    finish_run(&mut active, run_id)?;
-                }
-                TranscriptEntryKind::RunFailed { run_id, .. } => finish_run(&mut active, run_id)?,
-                TranscriptEntryKind::SteeringDelivered {
+            let expected_id = event_id(&session_id, expected_sequence);
+            if legacy.event_id != expected_id {
+                return Err(RecordError::EventId {
+                    expected: expected_id,
+                    actual: legacy.event_id,
+                });
+            }
+            let mut kinds = Vec::new();
+            match legacy.kind {
+                LegacyEntryKind::Input {
+                    message_id,
+                    source,
+                    content,
+                } => kinds.push(TranscriptEntryKind::Input {
+                    message_id,
+                    source,
+                    content,
+                }),
+                LegacyEntryKind::SteeringQueued {
+                    message_id,
+                    source,
+                    content,
+                } => kinds.push(TranscriptEntryKind::SteeringQueued {
+                    message_id,
+                    source,
+                    content,
+                }),
+                LegacyEntryKind::SteeringDelivered {
                     run_id,
                     message_ids,
+                } => kinds.push(TranscriptEntryKind::SteeringDelivered {
+                    run_id,
+                    message_ids,
+                }),
+                LegacyEntryKind::RunStarted { run_id, input_id } => {
+                    kinds.push(TranscriptEntryKind::RunStarted { run_id, input_id });
+                }
+                LegacyEntryKind::AssistantMessage {
+                    message_id,
+                    run_id,
+                    content,
+                    complete,
                 } => {
-                    require_run(active, run_id)?;
-                    if message_ids.iter().any(|id| !steering.contains(id)) {
-                        return Err(RecordError::UnknownSteering);
+                    messages.insert(run_id.clone(), message_id.clone());
+                    kinds.push(TranscriptEntryKind::AssistantMessage {
+                        message_id: message_id.clone(),
+                        run_id: run_id.clone(),
+                        content,
+                    });
+                    if complete {
+                        kinds.push(TranscriptEntryKind::RunFinished {
+                            run_id,
+                            outcome: RunOutcome::Completed { message_id },
+                        });
                     }
                 }
-                TranscriptEntryKind::ToolCall {
-                    run_id, call_id, ..
+                LegacyEntryKind::Interrupted { run_id, cause } => {
+                    let message_id = messages
+                        .get(&run_id)
+                        .cloned()
+                        .ok_or(RecordError::MissingAssistantMessage)?;
+                    kinds.push(TranscriptEntryKind::RunFinished {
+                        run_id,
+                        outcome: RunOutcome::Interrupted { message_id, cause },
+                    });
+                }
+                LegacyEntryKind::RunFailed { run_id, error } => {
+                    let message_id = messages.get(&run_id).cloned();
+                    kinds.push(TranscriptEntryKind::RunFinished {
+                        run_id,
+                        outcome: RunOutcome::Failed { message_id, error },
+                    });
+                }
+                LegacyEntryKind::ToolCall {
+                    run_id,
+                    call_id,
+                    name,
+                    arguments,
+                } => kinds.push(TranscriptEntryKind::ToolCall {
+                    run_id,
+                    call_id,
+                    name,
+                    arguments,
+                }),
+                LegacyEntryKind::ToolResult {
+                    run_id,
+                    call_id,
+                    result,
+                } => kinds.push(TranscriptEntryKind::ToolResult {
+                    run_id,
+                    call_id,
+                    result,
+                }),
+                LegacyEntryKind::Compaction {
+                    through_sequence,
+                    artifact,
                 } => {
-                    require_run(active, run_id)?;
-                    if calls.insert(call_id, run_id).is_some() {
-                        return Err(RecordError::DuplicateToolCall);
-                    }
+                    let through_sequence = old_to_new
+                        .get(through_sequence as usize)
+                        .copied()
+                        .ok_or(RecordError::InvalidCompaction)?;
+                    kinds.push(TranscriptEntryKind::Compaction {
+                        through_sequence,
+                        artifact,
+                    });
                 }
-                TranscriptEntryKind::ToolResult {
-                    run_id, call_id, ..
-                } => {
-                    require_run(active, run_id)?;
-                    if calls.get(call_id) != Some(&run_id) {
-                        return Err(RecordError::UnknownToolCall);
-                    }
-                }
-                TranscriptEntryKind::Compaction {
-                    through_sequence, ..
-                } if *through_sequence >= entry.sequence => {
-                    return Err(RecordError::InvalidCompaction);
-                }
-                _ => {}
             }
+            let entries = record.entries_for(kinds);
+            record.append_batch(&entries)?;
+            old_to_new.push(record.next_sequence() - 1);
         }
-        Ok(())
+        Ok(record)
     }
 }
 
-fn require_run(active: Option<&RunId>, run_id: &RunId) -> Result<(), RecordError> {
-    match active {
-        Some(current) if current == run_id => Ok(()),
-        Some(_) => Err(RecordError::WrongRun),
-        None => Err(RecordError::NoActiveRun),
+impl Serialize for SessionRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SnapshotV2 {
+            version: self.version,
+            session_id: self.session_id.clone(),
+            initial_context: self.initial_context.clone(),
+            entries: self.entries.clone(),
+        }
+        .serialize(serializer)
     }
 }
 
-fn finish_run<'a>(active: &mut Option<&'a RunId>, run_id: &'a RunId) -> Result<(), RecordError> {
-    match active.take() {
-        Some(current) if current == run_id => Ok(()),
-        Some(current) => {
-            *active = Some(current);
-            Err(RecordError::WrongRun)
+impl<'de> Deserialize<'de> for SessionRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let version = value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| serde::de::Error::custom("session snapshot has no numeric version"))?;
+        match version {
+            2 => {
+                let snapshot: SnapshotV2 =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Self::from_current_parts(
+                    snapshot.session_id,
+                    snapshot.initial_context,
+                    snapshot.entries,
+                )
+                .map_err(serde::de::Error::custom)
+            }
+            1 => Self::migrate_v1(serde_json::from_value(value).map_err(serde::de::Error::custom)?)
+                .map_err(serde::de::Error::custom),
+            other => Err(serde::de::Error::custom(RecordError::Version(other as u32))),
         }
-        None => Err(RecordError::NoActiveRun),
     }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct SnapshotV2 {
+    version: u32,
+    session_id: SessionId,
+    initial_context: InitialContext,
+    entries: Vec<TranscriptEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -184,6 +345,318 @@ pub struct TranscriptEntry {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "entry", rename_all = "snake_case")]
 pub enum TranscriptEntryKind {
+    Input {
+        message_id: MessageId,
+        source: Source,
+        content: String,
+    },
+    SteeringQueued {
+        message_id: MessageId,
+        source: Source,
+        content: String,
+    },
+    SteeringDelivered {
+        run_id: RunId,
+        message_ids: Vec<MessageId>,
+    },
+    RunStarted {
+        run_id: RunId,
+        input_id: MessageId,
+    },
+    AssistantMessage {
+        message_id: MessageId,
+        run_id: RunId,
+        content: String,
+    },
+    RunFinished {
+        run_id: RunId,
+        outcome: RunOutcome,
+    },
+    ToolCall {
+        run_id: RunId,
+        call_id: CallId,
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        run_id: RunId,
+        call_id: CallId,
+        result: String,
+    },
+    Compaction {
+        through_sequence: u64,
+        artifact: String,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+struct RecordState {
+    next_sequence: u64,
+    active: Option<ActiveRun>,
+    messages: HashSet<MessageId>,
+    inputs: HashSet<MessageId>,
+    started_inputs: HashSet<MessageId>,
+    steering: HashSet<MessageId>,
+    delivered_steering: HashSet<MessageId>,
+    runs: HashSet<RunId>,
+    calls: HashMap<CallId, ToolCallState>,
+    validation_steps: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveRun {
+    id: RunId,
+    message_id: Option<MessageId>,
+    open_tools: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ToolCallState {
+    run_id: RunId,
+    resolved: bool,
+}
+
+impl RecordState {
+    fn replay(session_id: &SessionId, entries: &[TranscriptEntry]) -> Result<Self, RecordError> {
+        let mut state = Self::default();
+        for entry in entries {
+            state.apply(session_id, entry)?;
+        }
+        Ok(state)
+    }
+
+    fn apply(
+        &mut self,
+        session_id: &SessionId,
+        entry: &TranscriptEntry,
+    ) -> Result<(), RecordError> {
+        if entry.sequence != self.next_sequence {
+            return Err(RecordError::Sequence {
+                expected: self.next_sequence,
+                actual: entry.sequence,
+            });
+        }
+        let expected_id = event_id(session_id, entry.sequence);
+        if entry.event_id != expected_id {
+            return Err(RecordError::EventId {
+                expected: expected_id,
+                actual: entry.event_id.clone(),
+            });
+        }
+        match &entry.kind {
+            TranscriptEntryKind::Input { message_id, .. } => {
+                self.require_new_message(message_id)?;
+                self.messages.insert(message_id.clone());
+                self.inputs.insert(message_id.clone());
+            }
+            TranscriptEntryKind::SteeringQueued { message_id, .. } => {
+                self.require_new_message(message_id)?;
+                self.messages.insert(message_id.clone());
+                self.steering.insert(message_id.clone());
+            }
+            TranscriptEntryKind::SteeringDelivered {
+                run_id,
+                message_ids,
+            } => {
+                self.require_run(run_id)?;
+                let mut in_entry = HashSet::new();
+                for message_id in message_ids {
+                    if !self.steering.contains(message_id) {
+                        return Err(RecordError::UnknownSteering);
+                    }
+                    if self.delivered_steering.contains(message_id) || !in_entry.insert(message_id)
+                    {
+                        return Err(RecordError::SteeringAlreadyDelivered);
+                    }
+                }
+                self.delivered_steering.extend(message_ids.iter().cloned());
+            }
+            TranscriptEntryKind::RunStarted { run_id, input_id } => {
+                if !self.inputs.contains(input_id) {
+                    return Err(RecordError::UnknownInput);
+                }
+                if self.started_inputs.contains(input_id) {
+                    return Err(RecordError::InputAlreadyStarted);
+                }
+                if self.active.is_some() {
+                    return Err(RecordError::RunAlreadyActive);
+                }
+                if self.runs.contains(run_id) {
+                    return Err(RecordError::DuplicateRun);
+                }
+                self.started_inputs.insert(input_id.clone());
+                self.runs.insert(run_id.clone());
+                self.active = Some(ActiveRun {
+                    id: run_id.clone(),
+                    message_id: None,
+                    open_tools: 0,
+                });
+            }
+            TranscriptEntryKind::AssistantMessage {
+                message_id, run_id, ..
+            } => {
+                self.require_run(run_id)?;
+                self.require_new_message(message_id)?;
+                if self.active.as_ref().unwrap().message_id.is_some() {
+                    return Err(RecordError::MultipleAssistantMessages);
+                }
+                self.messages.insert(message_id.clone());
+                self.active.as_mut().unwrap().message_id = Some(message_id.clone());
+            }
+            TranscriptEntryKind::RunFinished { run_id, outcome } => {
+                self.require_run(run_id)?;
+                let active = self.active.as_ref().unwrap();
+                match outcome {
+                    RunOutcome::Completed { message_id } => {
+                        if active.message_id.as_ref() != Some(message_id) {
+                            return Err(RecordError::WrongAssistantMessage);
+                        }
+                        if active.open_tools != 0 {
+                            return Err(RecordError::UnresolvedToolCalls);
+                        }
+                    }
+                    RunOutcome::Interrupted { message_id, .. } => {
+                        if active.message_id.as_ref() != Some(message_id) {
+                            return Err(RecordError::WrongAssistantMessage);
+                        }
+                    }
+                    RunOutcome::Failed { message_id, .. } => {
+                        if active.message_id.as_ref() != message_id.as_ref() {
+                            return Err(RecordError::WrongAssistantMessage);
+                        }
+                    }
+                }
+                self.active = None;
+            }
+            TranscriptEntryKind::ToolCall {
+                run_id, call_id, ..
+            } => {
+                self.require_run(run_id)?;
+                if self.calls.contains_key(call_id) {
+                    return Err(RecordError::DuplicateToolCall);
+                }
+                self.calls.insert(
+                    call_id.clone(),
+                    ToolCallState {
+                        run_id: run_id.clone(),
+                        resolved: false,
+                    },
+                );
+                self.active.as_mut().unwrap().open_tools += 1;
+            }
+            TranscriptEntryKind::ToolResult {
+                run_id, call_id, ..
+            } => {
+                self.require_run(run_id)?;
+                let call = self
+                    .calls
+                    .get_mut(call_id)
+                    .ok_or(RecordError::UnknownToolCall)?;
+                if &call.run_id != run_id {
+                    return Err(RecordError::WrongRun);
+                }
+                if call.resolved {
+                    return Err(RecordError::DuplicateToolResult);
+                }
+                call.resolved = true;
+                self.active.as_mut().unwrap().open_tools -= 1;
+            }
+            TranscriptEntryKind::Compaction {
+                through_sequence, ..
+            } => {
+                if *through_sequence >= entry.sequence {
+                    return Err(RecordError::InvalidCompaction);
+                }
+            }
+        }
+        self.next_sequence += 1;
+        self.validation_steps += 1;
+        Ok(())
+    }
+
+    fn require_new_message(&self, message_id: &MessageId) -> Result<(), RecordError> {
+        if self.messages.contains(message_id) {
+            Err(RecordError::DuplicateMessage)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_run(&self, run_id: &RunId) -> Result<(), RecordError> {
+        match &self.active {
+            Some(active) if &active.id == run_id => Ok(()),
+            Some(_) => Err(RecordError::WrongRun),
+            None => Err(RecordError::NoActiveRun),
+        }
+    }
+}
+
+fn event_id(session_id: &SessionId, sequence: u64) -> EventId {
+    EventId::new(format!("{session_id}:event:{sequence}"))
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum RecordError {
+    #[error("unsupported record version {0}")]
+    Version(u32),
+    #[error("expected transcript sequence {expected}, got {actual}")]
+    Sequence { expected: u64, actual: u64 },
+    #[error("expected event ID {expected}, got {actual}")]
+    EventId { expected: EventId, actual: EventId },
+    #[error("a run is already active")]
+    RunAlreadyActive,
+    #[error("no run is active")]
+    NoActiveRun,
+    #[error("entry refers to a different active run")]
+    WrongRun,
+    #[error("run refers to an input that is not in the transcript")]
+    UnknownInput,
+    #[error("an input cannot start more than one run")]
+    InputAlreadyStarted,
+    #[error("a run ID is reused")]
+    DuplicateRun,
+    #[error("a message ID is reused")]
+    DuplicateMessage,
+    #[error("a run can persist at most one assistant message")]
+    MultipleAssistantMessages,
+    #[error("run outcome refers to the wrong assistant message")]
+    WrongAssistantMessage,
+    #[error("run outcome requires an assistant message")]
+    MissingAssistantMessage,
+    #[error("delivery refers to steering that is not in the transcript")]
+    UnknownSteering,
+    #[error("a steering notification cannot be delivered more than once")]
+    SteeringAlreadyDelivered,
+    #[error("a tool-call ID is reused")]
+    DuplicateToolCall,
+    #[error("tool result has no matching call in the active run")]
+    UnknownToolCall,
+    #[error("a tool call cannot have more than one result")]
+    DuplicateToolResult,
+    #[error("a completed run cannot contain unresolved tool calls")]
+    UnresolvedToolCalls,
+    #[error("compaction must refer to an earlier transcript sequence")]
+    InvalidCompaction,
+}
+
+#[derive(Deserialize)]
+struct SnapshotV1 {
+    version: u32,
+    session_id: SessionId,
+    initial_context: InitialContext,
+    entries: Vec<LegacyTranscriptEntry>,
+}
+
+#[derive(Deserialize)]
+struct LegacyTranscriptEntry {
+    event_id: EventId,
+    sequence: u64,
+    kind: LegacyEntryKind,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "entry", rename_all = "snake_case")]
+enum LegacyEntryKind {
     Input {
         message_id: MessageId,
         source: Source,
@@ -233,35 +706,10 @@ pub enum TranscriptEntryKind {
     },
 }
 
-#[derive(Debug, Error, Eq, PartialEq)]
-pub enum RecordError {
-    #[error("unsupported record version {0}")]
-    Version(u32),
-    #[error("expected transcript sequence {expected}, got {actual}")]
-    Sequence { expected: u64, actual: u64 },
-    #[error("a run is already active")]
-    RunAlreadyActive,
-    #[error("no run is active")]
-    NoActiveRun,
-    #[error("entry refers to a different active run")]
-    WrongRun,
-    #[error("an interruption must immediately follow its partial assistant message")]
-    MissingPartialMessage,
-    #[error("run refers to an input that is not in the transcript")]
-    UnknownInput,
-    #[error("delivery refers to steering that is not in the transcript")]
-    UnknownSteering,
-    #[error("a tool-call ID is reused")]
-    DuplicateToolCall,
-    #[error("tool result has no matching call in the active run")]
-    UnknownToolCall,
-    #[error("compaction must refer to an earlier transcript sequence")]
-    InvalidCompaction,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn record() -> SessionRecord {
         SessionRecord::new(
@@ -270,88 +718,330 @@ mod tests {
         )
     }
 
-    #[test]
-    fn interruption_requires_partial_content() {
-        let mut record = record();
-        let run_id = RunId::from("run");
-        record
-            .append(record.entry(TranscriptEntryKind::Input {
-                message_id: MessageId::from("input"),
+    fn append(record: &mut SessionRecord, kind: TranscriptEntryKind) {
+        record.append(record.entry(kind)).unwrap();
+    }
+
+    fn start(record: &mut SessionRecord, run: &str, input: &str) {
+        append(
+            record,
+            TranscriptEntryKind::Input {
+                message_id: MessageId::from(input),
                 source: Source::User,
                 content: "hello".into(),
-            }))
-            .unwrap();
-        record
-            .append(record.entry(TranscriptEntryKind::RunStarted {
-                run_id: run_id.clone(),
-                input_id: MessageId::from("input"),
-            }))
-            .unwrap();
-
-        let error = record
-            .append(record.entry(TranscriptEntryKind::Interrupted {
-                run_id,
-                cause: InterruptionCause::User,
-            }))
-            .unwrap_err();
-
-        assert_eq!(error, RecordError::MissingPartialMessage);
-        assert_eq!(record.entries.len(), 2);
+            },
+        );
+        append(
+            record,
+            TranscriptEntryKind::RunStarted {
+                run_id: RunId::from(run),
+                input_id: MessageId::from(input),
+            },
+        );
     }
 
     #[test]
-    fn interrupted_run_is_valid_and_round_trips() {
+    fn all_terminal_outcomes_are_explicit_and_round_trip() {
         let mut record = record();
-        let run_id = RunId::from("run");
-        for kind in [
-            TranscriptEntryKind::Input {
-                message_id: MessageId::from("input"),
-                source: Source::User,
-                content: "hello".into(),
-            },
-            TranscriptEntryKind::RunStarted {
-                run_id: run_id.clone(),
-                input_id: MessageId::from("input"),
-            },
+        start(&mut record, "complete", "input-1");
+        append(
+            &mut record,
             TranscriptEntryKind::AssistantMessage {
-                message_id: MessageId::from("partial"),
-                run_id: run_id.clone(),
+                message_id: MessageId::from("answer-1"),
+                run_id: RunId::from("complete"),
+                content: "done".into(),
+            },
+        );
+        append(
+            &mut record,
+            TranscriptEntryKind::RunFinished {
+                run_id: RunId::from("complete"),
+                outcome: RunOutcome::Completed {
+                    message_id: MessageId::from("answer-1"),
+                },
+            },
+        );
+        start(&mut record, "interrupted", "input-2");
+        append(
+            &mut record,
+            TranscriptEntryKind::AssistantMessage {
+                message_id: MessageId::from("answer-2"),
+                run_id: RunId::from("interrupted"),
                 content: "half".into(),
-                complete: false,
             },
-            TranscriptEntryKind::Interrupted {
-                run_id,
-                cause: InterruptionCause::User,
+        );
+        append(
+            &mut record,
+            TranscriptEntryKind::RunFinished {
+                run_id: RunId::from("interrupted"),
+                outcome: RunOutcome::Interrupted {
+                    message_id: MessageId::from("answer-2"),
+                    cause: InterruptionCause::User,
+                },
             },
-        ] {
-            record.append(record.entry(kind)).unwrap();
-        }
-
-        record.validate().unwrap();
-        let json = serde_json::to_string(&record).unwrap();
+        );
+        start(&mut record, "failed", "input-3");
+        append(
+            &mut record,
+            TranscriptEntryKind::RunFinished {
+                run_id: RunId::from("failed"),
+                outcome: RunOutcome::Failed {
+                    message_id: None,
+                    error: "provider".into(),
+                },
+            },
+        );
+        let encoded = serde_json::to_string(&record).unwrap();
         assert_eq!(
-            serde_json::from_str::<SessionRecord>(&json).unwrap(),
+            serde_json::from_str::<SessionRecord>(&encoded).unwrap(),
             record
         );
     }
 
     #[test]
-    fn rejects_references_to_missing_canonical_entries() {
+    fn rejects_duplicate_ids_delivery_results_and_unresolved_completion() {
         let mut record = record();
-        let error = record
-            .append(record.entry(TranscriptEntryKind::RunStarted {
+        start(&mut record, "run", "input");
+        let duplicate_input = record.entry(TranscriptEntryKind::Input {
+            message_id: MessageId::from("input"),
+            source: Source::User,
+            content: "duplicate".into(),
+        });
+        assert_eq!(
+            record.append(duplicate_input),
+            Err(RecordError::DuplicateMessage)
+        );
+        append(
+            &mut record,
+            TranscriptEntryKind::SteeringQueued {
+                message_id: MessageId::from("steer"),
+                source: Source::Harness,
+                content: "notice".into(),
+            },
+        );
+        append(
+            &mut record,
+            TranscriptEntryKind::SteeringDelivered {
                 run_id: RunId::from("run"),
-                input_id: MessageId::from("missing"),
-            }))
-            .unwrap_err();
-        assert_eq!(error, RecordError::UnknownInput);
+                message_ids: vec![MessageId::from("steer")],
+            },
+        );
+        let repeated = record.entry(TranscriptEntryKind::SteeringDelivered {
+            run_id: RunId::from("run"),
+            message_ids: vec![MessageId::from("steer")],
+        });
+        assert_eq!(
+            record.append(repeated),
+            Err(RecordError::SteeringAlreadyDelivered)
+        );
+        append(
+            &mut record,
+            TranscriptEntryKind::ToolCall {
+                run_id: RunId::from("run"),
+                call_id: CallId::from("call"),
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        );
+        append(
+            &mut record,
+            TranscriptEntryKind::ToolResult {
+                run_id: RunId::from("run"),
+                call_id: CallId::from("call"),
+                result: "ok".into(),
+            },
+        );
+        let duplicate = record.entry(TranscriptEntryKind::ToolResult {
+            run_id: RunId::from("run"),
+            call_id: CallId::from("call"),
+            result: "again".into(),
+        });
+        assert_eq!(
+            record.append(duplicate),
+            Err(RecordError::DuplicateToolResult)
+        );
+        append(
+            &mut record,
+            TranscriptEntryKind::ToolCall {
+                run_id: RunId::from("run"),
+                call_id: CallId::from("open"),
+                name: "poll".into(),
+                arguments: "{}".into(),
+            },
+        );
+        append(
+            &mut record,
+            TranscriptEntryKind::AssistantMessage {
+                message_id: MessageId::from("answer"),
+                run_id: RunId::from("run"),
+                content: "done".into(),
+            },
+        );
+        let finish = record.entry(TranscriptEntryKind::RunFinished {
+            run_id: RunId::from("run"),
+            outcome: RunOutcome::Completed {
+                message_id: MessageId::from("answer"),
+            },
+        });
+        assert_eq!(record.append(finish), Err(RecordError::UnresolvedToolCalls));
+    }
 
-        let error = record
-            .append(record.entry(TranscriptEntryKind::Compaction {
-                through_sequence: 0,
-                artifact: "future".into(),
-            }))
-            .unwrap_err();
-        assert_eq!(error, RecordError::InvalidCompaction);
+    #[test]
+    fn rejects_reused_inputs_runs_messages_and_wrong_terminal_references() {
+        let mut record = record();
+        start(&mut record, "run", "input");
+        append(
+            &mut record,
+            TranscriptEntryKind::AssistantMessage {
+                message_id: MessageId::from("answer"),
+                run_id: RunId::from("run"),
+                content: "done".into(),
+            },
+        );
+        let second_message = record.entry(TranscriptEntryKind::AssistantMessage {
+            message_id: MessageId::from("another"),
+            run_id: RunId::from("run"),
+            content: "duplicate".into(),
+        });
+        assert_eq!(
+            record.append(second_message),
+            Err(RecordError::MultipleAssistantMessages)
+        );
+        let wrong_finish = record.entry(TranscriptEntryKind::RunFinished {
+            run_id: RunId::from("run"),
+            outcome: RunOutcome::Completed {
+                message_id: MessageId::from("wrong"),
+            },
+        });
+        assert_eq!(
+            record.append(wrong_finish),
+            Err(RecordError::WrongAssistantMessage)
+        );
+        append(
+            &mut record,
+            TranscriptEntryKind::RunFinished {
+                run_id: RunId::from("run"),
+                outcome: RunOutcome::Completed {
+                    message_id: MessageId::from("answer"),
+                },
+            },
+        );
+        let reused_input = record.entry(TranscriptEntryKind::RunStarted {
+            run_id: RunId::from("new-run"),
+            input_id: MessageId::from("input"),
+        });
+        assert_eq!(
+            record.append(reused_input),
+            Err(RecordError::InputAlreadyStarted)
+        );
+        append(
+            &mut record,
+            TranscriptEntryKind::Input {
+                message_id: MessageId::from("new-input"),
+                source: Source::User,
+                content: "again".into(),
+            },
+        );
+        let reused_run = record.entry(TranscriptEntryKind::RunStarted {
+            run_id: RunId::from("run"),
+            input_id: MessageId::from("new-input"),
+        });
+        assert_eq!(record.append(reused_run), Err(RecordError::DuplicateRun));
+
+        let mut bad_id = record.entry(TranscriptEntryKind::Input {
+            message_id: MessageId::from("bad-event"),
+            source: Source::User,
+            content: String::new(),
+        });
+        bad_id.event_id = EventId::from("forged");
+        assert!(matches!(
+            record.append(bad_id),
+            Err(RecordError::EventId { .. })
+        ));
+    }
+
+    #[test]
+    fn a_failed_batch_rolls_back_every_entry() {
+        let mut record = record();
+        let batch = record.entries_for([
+            TranscriptEntryKind::Input {
+                message_id: MessageId::from("same"),
+                source: Source::User,
+                content: "first".into(),
+            },
+            TranscriptEntryKind::Input {
+                message_id: MessageId::from("same"),
+                source: Source::User,
+                content: "second".into(),
+            },
+        ]);
+        assert_eq!(
+            record.append_batch(&batch),
+            Err(RecordError::DuplicateMessage)
+        );
+        assert_eq!(record.next_sequence(), 0);
+        assert!(record.entries().is_empty());
+    }
+
+    #[test]
+    fn successful_incremental_append_does_not_replay_the_prefix() {
+        let mut record = record();
+        for index in 0..10_000 {
+            append(
+                &mut record,
+                TranscriptEntryKind::Input {
+                    message_id: MessageId::new(format!("input-{index}")),
+                    source: Source::User,
+                    content: String::new(),
+                },
+            );
+        }
+        assert_eq!(record.validation_steps(), 10_000);
+    }
+
+    #[test]
+    fn migrates_v1_and_rejects_unknown_versions() {
+        let legacy = json!({
+            "version": 1, "session_id": "legacy", "initial_context": {"fragments": []},
+            "entries": [
+                {"event_id":"legacy:event:0","sequence":0,"kind":{"entry":"input","message_id":"input","source":"user","content":"hello"}},
+                {"event_id":"legacy:event:1","sequence":1,"kind":{"entry":"run_started","run_id":"run","input_id":"input"}},
+                {"event_id":"legacy:event:2","sequence":2,"kind":{"entry":"assistant_message","message_id":"answer","run_id":"run","content":"done","complete":true}}
+            ]
+        });
+        let migrated: SessionRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(migrated.version(), RECORD_VERSION);
+        assert!(matches!(
+            migrated.entries().last().unwrap().kind,
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Completed { .. },
+                ..
+            }
+        ));
+        let unknown = json!({"version":99,"session_id":"future","initial_context":{"fragments":[]},"entries":[]});
+        assert!(serde_json::from_value::<SessionRecord>(unknown).is_err());
+        let unknown_entry = json!({
+            "version": 2,
+            "session_id": "future-entry",
+            "initial_context": {"fragments": []},
+            "entries": [{
+                "event_id": "future-entry:event:0",
+                "sequence": 0,
+                "kind": {"entry": "future_semantics"}
+            }]
+        });
+        assert!(serde_json::from_value::<SessionRecord>(unknown_entry).is_err());
+
+        let corrupt_legacy = json!({
+            "version": 1,
+            "session_id": "legacy",
+            "initial_context": {"fragments": []},
+            "entries": [{
+                "event_id": "forged",
+                "sequence": 7,
+                "kind": {"entry": "input", "message_id": "input", "source": "user", "content": "hello"}
+            }]
+        });
+        assert!(serde_json::from_value::<SessionRecord>(corrupt_legacy).is_err());
     }
 }

@@ -15,7 +15,13 @@ Artist is a small persistent, streaming agent harness. Rig owns model execution;
 - `plugins/ast-fixture`: Rust `?symbols/...` projections backed by the shared tool bridge
 - `plugins/tool-fixture`: cross-component tool-call and recursion smoke fixture
 
-The canonical transcript is the memory boundary. The kernel projects it into Rig messages for every request instead of letting Rig keep a second conversation log. This is intentional: Rig's automatic memory append only sees successful turns, while Artist must also preserve partial output and typed interruptions. `rig-memory` policies shape the projection without rewriting the transcript.
+The canonical transcript is the memory boundary. The kernel projects it into Rig messages for every request instead of letting Rig keep a second conversation log. This is intentional: Rig's automatic memory append only sees successful turns, while Artist must also preserve partial output and typed interruptions. `rig-memory` policies shape the projection without rewriting the transcript. The permanent record and physical-log contracts are specified in [`TRANSCRIPT_V1.md`](TRANSCRIPT_V1.md).
+
+Initial prompt composition is also component-owned. The host supplies ordered
+fragments to the WIT prompt socket of each component advertising that
+capability, and freezes the composed result into the session record before the
+first input. With no prompt component loaded, the host leaves fragments
+untouched.
 
 ## Control semantics
 
@@ -31,7 +37,9 @@ Replacement is explicitly `abort`, then `input`.
 make test
 ```
 
-This formats and lints the Rust workspace, builds the default `wasm32-wasip2` component, invokes every WIT socket through Wasmtime, and runs deterministic tests.
+This formats and lints the Rust workspace, builds all fixture `wasm32-wasip2`
+components, invokes every advertised WIT socket through Wasmtime, verifies
+that unadvertised sockets are skipped, and runs deterministic tests.
 
 On Linux with a usable `/dev/fuse`, the full Unix projection and shared FFF
 index smoke test is:
@@ -48,7 +56,11 @@ OPENAI_API_KEY=... cargo run -p artist-rig --example openai -- <streaming-model-
 
 ## Stable contracts
 
-- The JSONL header and transcript entries use `artist-core::RECORD_VERSION`.
+- Canonical snapshots use `artist-core::RECORD_VERSION = 2` and deserialize only
+  through the validating record reducer.
+- File-backed sessions use `artist-store::FILE_FORMAT_VERSION = 2`: a frozen
+  header followed by SHA-256-chained, atomic JSON batch frames. Legacy v1 JSONL
+  is migrated on read and rewritten on the next append.
 - The public command and stream protocol consists only of `artist-core` values.
 - The plugin ABI is `artist:plugin@0.3.0` in `wit/plugin.wit`; tool and resource providers are separate interoperable contracts.
 - Telemetry is derived from stream events and is never required to load or resume a session.

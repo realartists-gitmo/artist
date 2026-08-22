@@ -1,8 +1,8 @@
 use std::{collections::VecDeque, sync::Arc, time::Instant};
 
 use artist_core::{
-    Command, EventId, InitialContext, InterruptionCause, MessageId, RunId, SessionId,
-    SessionRecord, Source, StreamEvent, StreamEventKind, TranscriptEntry, TranscriptEntryKind,
+    Command, EventId, InitialContext, InterruptionCause, MessageId, RunId, RunOutcome, SessionId,
+    SessionRecord, Source, StreamEvent, StreamEventKind, TranscriptEntryKind,
 };
 use artist_store::{SessionStore, StoreError};
 use futures::StreamExt;
@@ -48,35 +48,39 @@ impl SessionHandle {
         model: Arc<dyn StreamingModel>,
     ) -> Result<Self, SessionError> {
         let mut record = store.load(session_id).await?;
-        if let Some(run_id) = active_run(&record) {
-            let message_id = MessageId::new(format!(
-                "{}:message:{}",
-                record.session_id,
-                record.next_sequence()
-            ));
-            let kinds = [
-                TranscriptEntryKind::AssistantMessage {
-                    message_id,
+        if let Some(run_id) = record.active_run().cloned() {
+            let existing_message = record.active_message_id().cloned();
+            let message_id = existing_message.clone().unwrap_or_else(|| {
+                MessageId::new(format!(
+                    "{}:message:{}",
+                    record.session_id(),
+                    record.next_sequence()
+                ))
+            });
+            let mut kinds = Vec::new();
+            if existing_message.is_none() {
+                kinds.push(TranscriptEntryKind::AssistantMessage {
+                    message_id: message_id.clone(),
                     run_id: run_id.clone(),
                     content: String::new(),
-                    complete: false,
-                },
-                TranscriptEntryKind::Interrupted {
-                    run_id,
+                });
+            }
+            kinds.push(TranscriptEntryKind::RunFinished {
+                run_id,
+                outcome: RunOutcome::Interrupted {
+                    message_id,
                     cause: InterruptionCause::Harness {
                         reason: "resumed after an unfinished run".into(),
                     },
                 },
-            ];
-            let mut entries = Vec::new();
-            for kind in kinds {
-                let entry = record.entry(kind);
-                record
-                    .append(entry.clone())
-                    .expect("resume reconciliation is valid");
-                entries.push(entry);
-            }
-            store.append(session_id, &entries).await?;
+            });
+            let entries = record.entries_for(kinds);
+            store
+                .append(session_id, record.next_sequence(), &entries)
+                .await?;
+            record
+                .append_batch(&entries)
+                .expect("resume reconciliation is valid");
         }
         Ok(Self::spawn(record, store, model))
     }
@@ -140,20 +144,6 @@ impl SessionHandle {
             .map_err(|_| SessionError::Closed)?;
         response.await.map_err(|_| SessionError::Closed)?
     }
-}
-
-fn active_run(record: &SessionRecord) -> Option<RunId> {
-    let mut active = None;
-    for entry in &record.entries {
-        match &entry.kind {
-            TranscriptEntryKind::RunStarted { run_id, .. } => active = Some(run_id.clone()),
-            TranscriptEntryKind::AssistantMessage { complete: true, .. }
-            | TranscriptEntryKind::Interrupted { .. }
-            | TranscriptEntryKind::RunFailed { .. } => active = None,
-            _ => {}
-        }
-    }
-    active
 }
 
 struct Envelope {
@@ -322,7 +312,7 @@ impl Session {
     async fn start(&mut self, input: PendingInput) -> Result<(), SessionError> {
         let run_id = RunId::new(format!(
             "{}:run:{}",
-            self.record.session_id,
+            self.record.session_id(),
             self.record.next_sequence()
         ));
         self.append(vec![TranscriptEntryKind::RunStarted {
@@ -337,7 +327,7 @@ impl Session {
         }
         let messages_in = history.len() + 1;
         let request = ModelRequest {
-            session_id: self.record.session_id.clone(),
+            session_id: self.record.session_id().clone(),
             run_id: run_id.clone(),
             context,
             prompt: input.content,
@@ -479,12 +469,19 @@ impl Session {
         let duration_ms = millis(active.started.elapsed());
         let time_to_first_token_ms = active.first_token_ms;
         let message_id = self.message_id();
-        self.append(vec![TranscriptEntryKind::AssistantMessage {
-            message_id: message_id.clone(),
-            run_id: active.id.clone(),
-            content: active.content,
-            complete: true,
-        }])
+        self.append(vec![
+            TranscriptEntryKind::AssistantMessage {
+                message_id: message_id.clone(),
+                run_id: active.id.clone(),
+                content: active.content,
+            },
+            TranscriptEntryKind::RunFinished {
+                run_id: active.id.clone(),
+                outcome: RunOutcome::Completed {
+                    message_id: message_id.clone(),
+                },
+            },
+        ])
         .await?;
         self.emit(
             Some(active.id),
@@ -502,14 +499,16 @@ impl Session {
         let message_id = self.message_id();
         self.append(vec![
             TranscriptEntryKind::AssistantMessage {
-                message_id,
+                message_id: message_id.clone(),
                 run_id: active.id.clone(),
                 content: active.content,
-                complete: false,
             },
-            TranscriptEntryKind::Interrupted {
+            TranscriptEntryKind::RunFinished {
                 run_id: active.id.clone(),
-                cause: cause.clone(),
+                outcome: RunOutcome::Interrupted {
+                    message_id,
+                    cause: cause.clone(),
+                },
             },
         ])
         .await?;
@@ -520,17 +519,22 @@ impl Session {
     async fn fail(&mut self, error: ModelError) -> Result<(), SessionError> {
         let active = self.active.take().expect("model failure without run");
         let mut entries = Vec::new();
+        let mut message_id = None;
         if !active.content.is_empty() {
+            let partial_id = self.message_id();
             entries.push(TranscriptEntryKind::AssistantMessage {
-                message_id: self.message_id(),
+                message_id: partial_id.clone(),
                 run_id: active.id.clone(),
                 content: active.content,
-                complete: false,
             });
+            message_id = Some(partial_id);
         }
-        entries.push(TranscriptEntryKind::RunFailed {
+        entries.push(TranscriptEntryKind::RunFinished {
             run_id: active.id.clone(),
-            error: error.0.clone(),
+            outcome: RunOutcome::Failed {
+                message_id,
+                error: error.0.clone(),
+            },
         });
         self.append(entries).await?;
         self.emit(Some(active.id), StreamEventKind::Failed { error: error.0 });
@@ -538,24 +542,21 @@ impl Session {
     }
 
     async fn append(&mut self, kinds: Vec<TranscriptEntryKind>) -> Result<(), SessionError> {
-        let mut candidate = self.record.clone();
-        let mut entries = Vec::<TranscriptEntry>::with_capacity(kinds.len());
-        for kind in kinds {
-            let entry = candidate.entry(kind);
-            candidate
-                .append(entry.clone())
-                .expect("kernel produced an invalid transcript transition");
-            entries.push(entry);
-        }
-        self.store.append(&self.record.session_id, &entries).await?;
-        self.record = candidate;
+        let expected_sequence = self.record.next_sequence();
+        let entries = self.record.entries_for(kinds);
+        self.store
+            .append(self.record.session_id(), expected_sequence, &entries)
+            .await?;
+        self.record
+            .append_batch(&entries)
+            .expect("the store accepted an invalid kernel transition");
         Ok(())
     }
 
     fn message_id(&self) -> MessageId {
         MessageId::new(format!(
             "{}:message:{}",
-            self.record.session_id,
+            self.record.session_id(),
             self.record.next_sequence()
         ))
     }
@@ -564,8 +565,8 @@ impl Session {
         let sequence = self.event_sequence;
         self.event_sequence += 1;
         let _ = self.events.send(StreamEvent {
-            event_id: EventId::new(format!("{}:stream:{sequence}", self.record.session_id)),
-            session_id: self.record.session_id.clone(),
+            event_id: EventId::new(format!("{}:stream:{sequence}", self.record.session_id())),
+            session_id: self.record.session_id().clone(),
             run_id,
             sequence,
             kind,
@@ -670,8 +671,16 @@ mod tests {
         .await;
 
         let record = store.load(&SessionId::from("session")).await.unwrap();
-        assert!(matches!(record.entries.last().unwrap().kind,
-            TranscriptEntryKind::AssistantMessage { ref content, complete: true, .. } if content == "hello"));
+        let tail = &record.entries()[record.entries().len() - 2..];
+        assert!(matches!(tail[0].kind,
+            TranscriptEntryKind::AssistantMessage { ref content, .. } if content == "hello"));
+        assert!(matches!(
+            tail[1].kind,
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Completed { .. },
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -686,15 +695,16 @@ mod tests {
         session.steer(Source::User, "small note").await.unwrap();
 
         let before = store.load(&SessionId::from("session")).await.unwrap();
+        assert!(!before.entries().iter().any(|entry| matches!(
+            entry.kind,
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Interrupted { .. },
+                ..
+            }
+        )));
         assert!(
             !before
-                .entries
-                .iter()
-                .any(|entry| matches!(entry.kind, TranscriptEntryKind::Interrupted { .. }))
-        );
-        assert!(
-            !before
-                .entries
+                .entries()
                 .iter()
                 .any(|entry| matches!(entry.kind, TranscriptEntryKind::SteeringDelivered { .. }))
         );
@@ -715,16 +725,17 @@ mod tests {
         let after = store.load(&SessionId::from("session")).await.unwrap();
         assert!(
             after
-                .entries
+                .entries()
                 .iter()
                 .any(|entry| matches!(entry.kind, TranscriptEntryKind::SteeringDelivered { .. }))
         );
-        assert!(
-            !after
-                .entries
-                .iter()
-                .any(|entry| matches!(entry.kind, TranscriptEntryKind::Interrupted { .. }))
-        );
+        assert!(!after.entries().iter().any(|entry| matches!(
+            entry.kind,
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Interrupted { .. },
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
@@ -759,12 +770,12 @@ mod tests {
         .await;
 
         let record = store.load(&SessionId::from("session")).await.unwrap();
-        let delivered_run = record.entries.iter().find_map(|entry| match &entry.kind {
+        let delivered_run = record.entries().iter().find_map(|entry| match &entry.kind {
             TranscriptEntryKind::SteeringDelivered { run_id, .. } => Some(run_id),
             _ => None,
         });
         let runs: Vec<_> = record
-            .entries
+            .entries()
             .iter()
             .filter_map(|entry| match &entry.kind {
                 TranscriptEntryKind::RunStarted { run_id, .. } => Some(run_id),
@@ -789,14 +800,17 @@ mod tests {
         session.abort(InterruptionCause::User).await.unwrap();
 
         let record = store.load(&SessionId::from("session")).await.unwrap();
-        let tail = &record.entries[record.entries.len() - 2..];
+        let tail = &record.entries()[record.entries().len() - 2..];
         assert!(
-            matches!(tail[0].kind, TranscriptEntryKind::AssistantMessage { ref content, complete: false, .. } if content == "partial")
+            matches!(tail[0].kind, TranscriptEntryKind::AssistantMessage { ref content, .. } if content == "partial")
         );
         assert!(matches!(
             tail[1].kind,
-            TranscriptEntryKind::Interrupted {
-                cause: InterruptionCause::User,
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Interrupted {
+                    cause: InterruptionCause::User,
+                    ..
+                },
                 ..
             }
         ));
@@ -819,18 +833,17 @@ mod tests {
         .await;
 
         let record = store.load(&SessionId::from("session")).await.unwrap();
-        let tail = &record.entries[record.entries.len() - 2..];
+        let tail = &record.entries()[record.entries().len() - 2..];
         assert!(matches!(
             tail[0].kind,
             TranscriptEntryKind::AssistantMessage {
                 ref content,
-                complete: false,
                 ..
             } if content == "partial"
         ));
         assert!(matches!(
             tail[1].kind,
-            TranscriptEntryKind::RunFailed { ref error, .. } if error == "provider failed"
+            TranscriptEntryKind::RunFinished { outcome: RunOutcome::Failed { ref error, .. }, .. } if error == "provider failed"
         ));
     }
 
@@ -849,8 +862,11 @@ mod tests {
 
         let record = store.load(&SessionId::from("session")).await.unwrap();
         assert!(matches!(
-            record.entries.last().unwrap().kind,
-            TranscriptEntryKind::RunFailed { .. }
+            record.entries().last().unwrap().kind,
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Failed { .. },
+                ..
+            }
         ));
     }
 
@@ -934,7 +950,7 @@ mod tests {
         let record = store.load(&SessionId::from("session")).await.unwrap();
         assert_eq!(
             record
-                .entries
+                .entries()
                 .iter()
                 .filter(|entry| matches!(entry.kind, TranscriptEntryKind::RunStarted { .. }))
                 .count(),
@@ -942,9 +958,15 @@ mod tests {
         );
         assert_eq!(
             record
-                .entries
+                .entries()
                 .iter()
-                .filter(|entry| matches!(entry.kind, TranscriptEntryKind::Interrupted { .. }))
+                .filter(|entry| matches!(
+                    entry.kind,
+                    TranscriptEntryKind::RunFinished {
+                        outcome: RunOutcome::Interrupted { .. },
+                        ..
+                    }
+                ))
                 .count(),
             1
         );
@@ -979,20 +1001,68 @@ mod tests {
             .unwrap();
 
         let record = store.load(&SessionId::from("resume")).await.unwrap();
-        let tail = &record.entries[record.entries.len() - 2..];
+        let tail = &record.entries()[record.entries().len() - 2..];
         assert!(matches!(
             tail[0].kind,
-            TranscriptEntryKind::AssistantMessage {
-                complete: false,
-                ..
-            }
+            TranscriptEntryKind::AssistantMessage { .. }
         ));
         assert!(matches!(
             tail[1].kind,
-            TranscriptEntryKind::Interrupted {
-                cause: InterruptionCause::Harness { .. },
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Interrupted {
+                    cause: InterruptionCause::Harness { .. },
+                    ..
+                },
                 ..
             }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resume_reuses_an_existing_partial_message() {
+        let store = Arc::new(MemoryStore::default());
+        let mut record = SessionRecord::new(
+            SessionId::from("resume-partial"),
+            InitialContext { fragments: vec![] },
+        );
+        let entries = record.entries_for([
+            TranscriptEntryKind::Input {
+                message_id: MessageId::from("input"),
+                source: Source::User,
+                content: "hello".into(),
+            },
+            TranscriptEntryKind::RunStarted {
+                run_id: RunId::from("unfinished"),
+                input_id: MessageId::from("input"),
+            },
+            TranscriptEntryKind::AssistantMessage {
+                message_id: MessageId::from("existing-partial"),
+                run_id: RunId::from("unfinished"),
+                content: "preserved".into(),
+            },
+        ]);
+        record.append_batch(&entries).unwrap();
+        store.create(record).await.unwrap();
+        let (model, _) = ControlledModel::new();
+        let _session =
+            SessionHandle::resume(&SessionId::from("resume-partial"), store.clone(), model)
+                .await
+                .unwrap();
+
+        let record = store
+            .load(&SessionId::from("resume-partial"))
+            .await
+            .unwrap();
+        assert_eq!(record.entries().len(), 4);
+        assert!(matches!(
+            record.entries().last().unwrap().kind,
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Interrupted {
+                    ref message_id,
+                    ..
+                },
+                ..
+            } if message_id.as_str() == "existing-partial"
         ));
     }
 }

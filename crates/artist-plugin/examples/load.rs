@@ -15,7 +15,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         source: "empty".into(),
         content: "  ".into(),
     }])?;
-    assert_eq!(untouched.len(), 1, "the host must not compose prompts itself");
+    assert_eq!(
+        untouched.len(),
+        1,
+        "the host must not compose prompts itself"
+    );
     let descriptor = host.load(path)?;
     assert_eq!(descriptor.id.as_str(), "artist.default");
 
@@ -120,10 +124,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .len(),
             1
         );
-        assert_eq!(host.transform_context(vec![Message {
-            role: "user".into(),
-            content: "still default-owned".into(),
-        }])?.len(), 1);
+        assert_eq!(
+            host.transform_context(vec![Message {
+                role: "user".into(),
+                content: "still default-owned".into(),
+            }])?
+            .len(),
+            1
+        );
         assert_eq!(
             host.call_tool("fixture-cross", r#"{"value":42}"#)?,
             Some(r#"{"value":42}"#.into())

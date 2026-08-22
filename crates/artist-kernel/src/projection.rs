@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use artist_core::{MessageId, SessionRecord, TranscriptEntryKind};
+use artist_core::{MessageId, RunOutcome, SessionRecord, TranscriptEntryKind};
 
 use crate::{ModelHistoryItem, ModelMessage};
 
 pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
     let context = record
-        .initial_context
+        .initial_context()
         .fragments
         .iter()
         .map(|fragment| fragment.content.as_str())
@@ -14,7 +14,7 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
         .join("\n\n");
     let mut inputs = HashMap::<MessageId, String>::new();
     let mut steering = HashMap::<MessageId, String>::new();
-    for entry in &record.entries {
+    for entry in record.entries() {
         match &entry.kind {
             TranscriptEntryKind::Input {
                 message_id,
@@ -34,7 +34,7 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
         }
     }
     let latest_compaction = record
-        .entries
+        .entries()
         .iter()
         .rev()
         .find_map(|entry| match &entry.kind {
@@ -45,7 +45,7 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
             _ => None,
         });
     let completed_calls: HashSet<_> = record
-        .entries
+        .entries()
         .iter()
         .filter_map(|entry| match &entry.kind {
             TranscriptEntryKind::ToolResult { call_id, .. } => Some(call_id.clone()),
@@ -60,7 +60,7 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
         });
     }
 
-    for entry in &record.entries {
+    for entry in record.entries() {
         if latest_compaction
             .as_ref()
             .is_some_and(|(through, _)| entry.sequence <= *through)
@@ -86,11 +86,25 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
                     message: ModelMessage::Assistant(content.clone()),
                 });
             }
-            TranscriptEntryKind::Interrupted { cause, .. } => {
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Interrupted { cause, .. },
+                ..
+            } => {
                 history.push(ModelHistoryItem {
                     sequence: entry.sequence,
                     message: ModelMessage::Notification(format!(
                         "The preceding assistant response was interrupted: {cause:?}."
+                    )),
+                });
+            }
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Failed { error, .. },
+                ..
+            } => {
+                history.push(ModelHistoryItem {
+                    sequence: entry.sequence,
+                    message: ModelMessage::Notification(format!(
+                        "The preceding assistant response failed: {error}."
                     )),
                 });
             }
@@ -129,7 +143,11 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
                     });
                 }
             }
-            TranscriptEntryKind::ToolCall { .. } | TranscriptEntryKind::RunFailed { .. } => {}
+            TranscriptEntryKind::ToolCall { .. }
+            | TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Completed { .. },
+                ..
+            } => {}
         }
     }
     (context, history)
@@ -182,12 +200,17 @@ mod tests {
             },
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("answer"),
-                run_id: run,
+                run_id: run.clone(),
                 content: "old answer".into(),
-                complete: true,
+            },
+            TranscriptEntryKind::RunFinished {
+                run_id: run,
+                outcome: RunOutcome::Completed {
+                    message_id: MessageId::from("answer"),
+                },
             },
             TranscriptEntryKind::Compaction {
-                through_sequence: 2,
+                through_sequence: 3,
                 artifact: "old exchange summarized".into(),
             },
             TranscriptEntryKind::Input {
@@ -209,13 +232,13 @@ mod tests {
             project(&record).1,
             vec![
                 ModelHistoryItem {
-                    sequence: 2,
+                    sequence: 3,
                     message: ModelMessage::Notification(
                         "Earlier context: old exchange summarized".into()
                     ),
                 },
                 ModelHistoryItem {
-                    sequence: 5,
+                    sequence: 6,
                     message: ModelMessage::User("new question".into()),
                 },
             ]
@@ -260,7 +283,6 @@ mod tests {
                 message_id: MessageId::from("answer"),
                 run_id: run,
                 content: "done".into(),
-                complete: true,
             },
         ] {
             let entry = record.entry(kind);
@@ -310,9 +332,14 @@ mod tests {
             },
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("answer"),
-                run_id: run,
+                run_id: run.clone(),
                 content: "found it".into(),
-                complete: true,
+            },
+            TranscriptEntryKind::RunFinished {
+                run_id: run,
+                outcome: RunOutcome::Completed {
+                    message_id: MessageId::from("answer"),
+                },
             },
         ] {
             record.append(record.entry(kind)).unwrap();
@@ -336,6 +363,53 @@ mod tests {
                     call_id: CallId::from("resource-call"),
                     result: r#"{"text":"symbol foo\n"}"#.into(),
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_runs_replay_the_partial_message_and_failure_reason() {
+        let mut record =
+            SessionRecord::new(SessionId::from("s"), InitialContext { fragments: vec![] });
+        let run = RunId::from("run");
+        for kind in [
+            TranscriptEntryKind::Input {
+                message_id: MessageId::from("input"),
+                source: Source::User,
+                content: "question".into(),
+            },
+            TranscriptEntryKind::RunStarted {
+                run_id: run.clone(),
+                input_id: MessageId::from("input"),
+            },
+            TranscriptEntryKind::AssistantMessage {
+                message_id: MessageId::from("answer"),
+                run_id: run.clone(),
+                content: "partial".into(),
+            },
+            TranscriptEntryKind::RunFinished {
+                run_id: run,
+                outcome: RunOutcome::Failed {
+                    message_id: Some(MessageId::from("answer")),
+                    error: "provider unavailable".into(),
+                },
+            },
+        ] {
+            record.append(record.entry(kind)).unwrap();
+        }
+
+        assert_eq!(
+            project(&record)
+                .1
+                .into_iter()
+                .map(|item| item.message)
+                .collect::<Vec<_>>(),
+            [
+                ModelMessage::User("question".into()),
+                ModelMessage::Assistant("partial".into()),
+                ModelMessage::Notification(
+                    "The preceding assistant response failed: provider unavailable.".into(),
+                ),
             ]
         );
     }

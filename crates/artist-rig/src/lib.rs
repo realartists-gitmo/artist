@@ -315,14 +315,23 @@ fn translate(item: MultiTurnStreamItem) -> Vec<ModelEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artist_core::{RunId, SessionId};
+    use artist_core::{
+        InitialContext, InterruptionCause, RunId, RunOutcome, SessionId, Source, StreamEvent,
+        StreamEventKind, TranscriptEntryKind,
+    };
+    use artist_kernel::SessionHandle;
     use artist_resource::{
         InvocationContext, ToolDefinition as RegistryDefinition, ToolError, ToolHandler,
     };
+    use artist_store::{MemoryStore, SessionStore};
     use async_trait::async_trait;
-    use rig_agent::test_utils::{MockCompletionModel, MockStreamEvent, mock_final};
+    use rig_agent::test_utils::{MockCompletionModel, MockError, MockStreamEvent, mock_final};
     use serde_json::{Value, json};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        time::Duration,
+    };
+    use tokio::sync::{Semaphore, broadcast};
 
     #[test]
     fn text_history_converts_without_loss() {
@@ -339,6 +348,44 @@ mod tests {
         assert_eq!(
             to_rig_history(history).unwrap(),
             vec![Message::user("hello"), Message::assistant("hi")]
+        );
+    }
+
+    #[test]
+    fn tool_history_preserves_call_result_pairing() {
+        let history = vec![
+            ModelHistoryItem {
+                sequence: 0,
+                message: ModelMessage::ToolCall {
+                    call_id: CallId::from("call"),
+                    name: "read".into(),
+                    arguments: r#"{"uri":"file:///tmp/a"}"#.into(),
+                },
+            },
+            ModelHistoryItem {
+                sequence: 1,
+                message: ModelMessage::ToolResult {
+                    call_id: CallId::from("call"),
+                    result: "body".into(),
+                },
+            },
+        ];
+        let converted = to_rig_history(history).unwrap();
+        assert!(matches!(converted[0], Message::Assistant { .. }));
+        assert!(matches!(converted[1], Message::User { .. }));
+
+        let orphan = vec![ModelHistoryItem {
+            sequence: 0,
+            message: ModelMessage::ToolResult {
+                call_id: CallId::from("missing"),
+                result: "body".into(),
+            },
+        }];
+        assert!(
+            to_rig_history(orphan)
+                .unwrap_err()
+                .0
+                .contains("no matching call")
         );
     }
 
@@ -392,6 +439,44 @@ mod tests {
         }
     }
 
+    struct Gate {
+        started: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl ToolHandler for Gate {
+        async fn call(&self, arguments: Value, _: InvocationContext) -> Result<Value, ToolError> {
+            self.started.add_permits(1);
+            self.release
+                .acquire()
+                .await
+                .map_err(|_| ToolError::Failed("gate closed".into()))?
+                .forget();
+            Ok(arguments)
+        }
+    }
+
+    async fn wait_for(
+        events: &mut broadcast::Receiver<StreamEvent>,
+        predicate: impl Fn(&StreamEventKind) -> bool,
+    ) -> StreamEvent {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if predicate(&event.kind) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for stream event")
+    }
+
+    fn final_event() -> MockStreamEvent {
+        MockStreamEvent::FinalResponse(mock_final(rig_core::completion::Usage::new()))
+    }
+
     #[tokio::test]
     async fn rig_executes_model_selected_registry_tools() {
         let registry = ToolRegistry::new();
@@ -407,8 +492,6 @@ mod tests {
             )
             .await
             .unwrap();
-        let final_event =
-            || MockStreamEvent::FinalResponse(mock_final(rig_core::completion::Usage::new()));
         let model = RigModel::with_registry(
             MockCompletionModel::from_stream_turns([
                 vec![
@@ -439,5 +522,270 @@ mod tests {
             event,
             Ok(ModelEvent::ToolResult { result, .. }) if result.contains("42")
         )));
+    }
+
+    #[tokio::test]
+    async fn kernel_controls_hold_through_the_rig_streaming_adapter() {
+        let registry = ToolRegistry::new();
+        let started = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        registry
+            .register(
+                RegistryDefinition {
+                    name: "gate".into(),
+                    description: "pause between model request boundaries".into(),
+                    input_schema: json!({"type":"object"}),
+                },
+                Arc::new(Gate {
+                    started: started.clone(),
+                    release: release.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        let mock = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call("gate-call", "gate", json!({"ok":true})),
+                final_event(),
+            ],
+            vec![MockStreamEvent::text("done"), final_event()],
+        ]);
+        let model = Arc::new(RigModel::with_registry(mock.clone(), registry).await);
+        let store = Arc::new(MemoryStore::default());
+        let session = SessionHandle::create(
+            SessionId::from("rig-controls"),
+            InitialContext { fragments: vec![] },
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
+        let mut events = session.subscribe();
+
+        session.input(Source::User, "use the gate").await.unwrap();
+        started.acquire().await.unwrap().forget();
+        session
+            .steer(Source::Harness, "new boundary context")
+            .await
+            .unwrap();
+        release.add_permits(1);
+        wait_for(&mut events, |kind| {
+            matches!(kind, StreamEventKind::SteeringDelivered { .. })
+        })
+        .await;
+        wait_for(&mut events, |kind| {
+            matches!(kind, StreamEventKind::Completed { .. })
+        })
+        .await;
+
+        let record = store.load(&SessionId::from("rig-controls")).await.unwrap();
+        assert!(
+            record
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry.kind, TranscriptEntryKind::ToolCall { .. }))
+        );
+        assert!(
+            record
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry.kind, TranscriptEntryKind::ToolResult { .. }))
+        );
+        assert!(
+            record
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry.kind, TranscriptEntryKind::SteeringDelivered { .. }))
+        );
+        assert!(matches!(
+            record.entries()[record.entries().len() - 2].kind,
+            TranscriptEntryKind::AssistantMessage {
+                ref content,
+                ..
+            } if content == "done"
+        ));
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1]
+                .documents
+                .iter()
+                .any(|document| document.text.contains("new boundary context"))
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_cancels_a_rig_tool_turn_and_records_an_interruption() {
+        let registry = ToolRegistry::new();
+        let started = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        registry
+            .register(
+                RegistryDefinition {
+                    name: "gate".into(),
+                    description: "never released during this test".into(),
+                    input_schema: json!({"type":"object"}),
+                },
+                Arc::new(Gate {
+                    started: started.clone(),
+                    release,
+                }),
+            )
+            .await
+            .unwrap();
+        let mock = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::tool_call("gate-call", "gate", json!({})),
+            final_event(),
+        ]]);
+        let model = Arc::new(RigModel::with_registry(mock, registry).await);
+        let store = Arc::new(MemoryStore::default());
+        let session = SessionHandle::create(
+            SessionId::from("rig-abort"),
+            InitialContext { fragments: vec![] },
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
+        let mut events = session.subscribe();
+        session.input(Source::User, "wait").await.unwrap();
+        started.acquire().await.unwrap().forget();
+        session.abort(InterruptionCause::User).await.unwrap();
+        wait_for(&mut events, |kind| {
+            matches!(kind, StreamEventKind::Interrupted { .. })
+        })
+        .await;
+
+        let record = store.load(&SessionId::from("rig-abort")).await.unwrap();
+        let tail = &record.entries()[record.entries().len() - 2..];
+        assert!(matches!(
+            tail[0].kind,
+            TranscriptEntryKind::AssistantMessage { .. }
+        ));
+        assert!(matches!(
+            tail[1].kind,
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Interrupted {
+                    cause: InterruptionCause::User,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn rig_provider_failure_preserves_partial_output() {
+        let mock = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("partial"),
+            MockStreamEvent::Error(MockError::provider("provider failed")),
+        ]]);
+        let model = Arc::new(RigModel::new(mock));
+        let store = Arc::new(MemoryStore::default());
+        let session = SessionHandle::create(
+            SessionId::from("rig-failure"),
+            InitialContext { fragments: vec![] },
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
+        let mut events = session.subscribe();
+        session.input(Source::User, "fail").await.unwrap();
+        wait_for(&mut events, |kind| {
+            matches!(kind, StreamEventKind::Failed { .. })
+        })
+        .await;
+
+        let record = store.load(&SessionId::from("rig-failure")).await.unwrap();
+        let tail = &record.entries()[record.entries().len() - 2..];
+        assert!(matches!(
+            tail[0].kind,
+            TranscriptEntryKind::AssistantMessage {
+                ref content,
+                ..
+            } if content == "partial"
+        ));
+        assert!(matches!(
+            tail[1].kind,
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Failed { .. },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn compaction_appends_an_artifact_without_rewriting_canonical_history() {
+        let mock = MockCompletionModel::from_stream_turns([
+            vec![MockStreamEvent::text("first answer"), final_event()],
+            vec![MockStreamEvent::text("second answer"), final_event()],
+        ]);
+        let model = Arc::new(RigModel::new(mock.clone()).compact_last_messages(1));
+        let store = Arc::new(MemoryStore::default());
+        let context = InitialContext {
+            fragments: vec![artist_core::ContextFragment {
+                source: "component://prompt".into(),
+                content: "stable prefix".into(),
+            }],
+        };
+        let session = SessionHandle::create(
+            SessionId::from("rig-compaction"),
+            context.clone(),
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
+        let mut events = session.subscribe();
+
+        session.input(Source::User, "first").await.unwrap();
+        wait_for(&mut events, |kind| {
+            matches!(kind, StreamEventKind::Completed { .. })
+        })
+        .await;
+        let before = store
+            .load(&SessionId::from("rig-compaction"))
+            .await
+            .unwrap();
+        let frozen_bytes = serde_json::to_vec(&before).unwrap();
+
+        session.input(Source::User, "second").await.unwrap();
+        wait_for(&mut events, |kind| {
+            matches!(kind, StreamEventKind::ContextCompacted { .. })
+        })
+        .await;
+        wait_for(&mut events, |kind| {
+            matches!(kind, StreamEventKind::Completed { .. })
+        })
+        .await;
+
+        let after = store
+            .load(&SessionId::from("rig-compaction"))
+            .await
+            .unwrap();
+        assert_eq!(after.initial_context(), &context);
+        assert_eq!(&after.entries()[..before.entries().len()], before.entries());
+        assert_eq!(serde_json::to_vec(&before).unwrap(), frozen_bytes);
+        assert!(
+            after
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry.kind, TranscriptEntryKind::Compaction { .. }))
+        );
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].preamble, requests[1].preamble);
+        let system = |request: &rig_core::completion::CompletionRequest| {
+            request
+                .chat_history
+                .iter()
+                .find_map(|message| match message {
+                    Message::System { content } => Some(content.clone()),
+                    _ => None,
+                })
+        };
+        assert_eq!(system(&requests[0]).as_deref(), Some("stable prefix"));
+        assert_eq!(system(&requests[1]).as_deref(), Some("stable prefix"));
     }
 }

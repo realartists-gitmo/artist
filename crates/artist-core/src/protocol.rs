@@ -25,6 +25,24 @@ pub enum InterruptionCause {
     Provider { reason: String },
 }
 
+/// Terminal state of one run, independent of transport or model-provider
+/// representations.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum RunOutcome {
+    Completed {
+        message_id: MessageId,
+    },
+    Failed {
+        message_id: Option<MessageId>,
+        error: String,
+    },
+    Interrupted {
+        message_id: MessageId,
+        cause: InterruptionCause,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StreamEvent {
     pub event_id: EventId,
@@ -170,5 +188,21 @@ mod tests {
             ],
         };
         round_trip(&descriptor);
+
+        for outcome in [
+            RunOutcome::Completed {
+                message_id: MessageId::from("answer"),
+            },
+            RunOutcome::Failed {
+                message_id: None,
+                error: "provider failed".into(),
+            },
+            RunOutcome::Interrupted {
+                message_id: MessageId::from("partial"),
+                cause: InterruptionCause::User,
+            },
+        ] {
+            round_trip(&outcome);
+        }
     }
 }
