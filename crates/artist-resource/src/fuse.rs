@@ -65,6 +65,20 @@ struct Inodes {
     next: u64,
     nodes: HashMap<u64, Node>,
     keys: HashMap<String, u64>,
+    lookups: HashMap<u64, u64>,
+    opens: HashMap<u64, u64>,
+}
+
+struct OpenFile {
+    ino: u64,
+    uri: ResourceUri,
+    bytes: Vec<u8>,
+    dirty: bool,
+}
+
+struct OpenFiles {
+    next: u64,
+    files: HashMap<u64, OpenFile>,
 }
 
 struct ResourceFs {
@@ -72,6 +86,7 @@ struct ResourceFs {
     runtime: Handle,
     mount: PathBuf,
     inodes: Mutex<Inodes>,
+    open_files: Mutex<OpenFiles>,
 }
 
 impl ResourceFs {
@@ -84,6 +99,12 @@ impl ResourceFs {
                 next: 2,
                 nodes: HashMap::from([(1, Node::Root)]),
                 keys: HashMap::from([("/".into(), 1)]),
+                lookups: HashMap::new(),
+                opens: HashMap::new(),
+            }),
+            open_files: Mutex::new(OpenFiles {
+                next: 1,
+                files: HashMap::new(),
             }),
         }
     }
@@ -102,29 +123,118 @@ impl ResourceFs {
         INodeNo(ino)
     }
     fn classify(&self, uri: ResourceUri) -> Option<(INodeNo, bool, u64)> {
-        let directory = self
-            .runtime
-            .block_on(
-                self.router
-                    .handle(ResourceRequest::Children { uri: uri.clone() }),
-            )
-            .is_ok();
-        let size = if directory {
-            0
-        } else {
-            match self
+        let (directory, size) = match self.runtime.block_on(
+            self.router
+                .handle(ResourceRequest::Children { uri: uri.clone() }),
+        ) {
+            Ok(ResourceReply::Children { .. }) => (true, 0),
+            _ => match self
                 .runtime
                 .block_on(self.router.handle(ResourceRequest::Read {
                     uri: uri.clone(),
                     start_line: None,
                     line_count: None,
                 })) {
-                Ok(ResourceReply::Text { text }) => text.len() as u64,
+                Ok(ResourceReply::Text { text }) => (false, text.len() as u64),
                 _ => return None,
-            }
+            },
         };
         let ino = self.inode(uri.to_string(), Node::Resource { uri, directory });
         Some((ino, directory, size))
+    }
+
+    fn acquire_lookup(&self, ino: INodeNo) {
+        *self
+            .inodes
+            .lock()
+            .unwrap()
+            .lookups
+            .entry(u64::from(ino))
+            .or_default() += 1;
+    }
+
+    fn forget_inode(&self, ino: INodeNo, count: u64) {
+        let ino = u64::from(ino);
+        if ino == 1 {
+            return;
+        }
+        let mut table = self.inodes.lock().unwrap();
+        let remaining = table.lookups.entry(ino).or_default();
+        *remaining = remaining.saturating_sub(count);
+        Self::reclaim_inode(&mut table, ino);
+    }
+
+    fn reclaim_inode(table: &mut Inodes, ino: u64) {
+        if table.lookups.get(&ino).copied().unwrap_or(0) != 0
+            || table.opens.get(&ino).copied().unwrap_or(0) != 0
+        {
+            return;
+        }
+        table.lookups.remove(&ino);
+        table.opens.remove(&ino);
+        table.nodes.remove(&ino);
+        table.keys.retain(|_, value| *value != ino);
+    }
+
+    fn reclaim_unreferenced(&self) {
+        let mut table = self.inodes.lock().unwrap();
+        let candidates = table
+            .nodes
+            .keys()
+            .copied()
+            .filter(|ino| *ino != 1)
+            .collect::<Vec<_>>();
+        for ino in candidates {
+            Self::reclaim_inode(&mut table, ino);
+        }
+    }
+
+    fn open_file(&self, ino: INodeNo, uri: ResourceUri, bytes: Vec<u8>) -> FileHandle {
+        let ino = u64::from(ino);
+        *self.inodes.lock().unwrap().opens.entry(ino).or_default() += 1;
+        let mut files = self.open_files.lock().unwrap();
+        let handle = files.next;
+        files.next += 1;
+        files.files.insert(
+            handle,
+            OpenFile {
+                ino,
+                uri,
+                bytes,
+                dirty: false,
+            },
+        );
+        FileHandle(handle)
+    }
+
+    fn commit_file(&self, handle: FileHandle) -> Result<(), Errno> {
+        let mut files = self.open_files.lock().map_err(Self::error)?;
+        let Some(file) = files.files.get_mut(&u64::from(handle)) else {
+            return Err(Errno::EBADF);
+        };
+        if !file.dirty {
+            return Ok(());
+        }
+        let text = String::from_utf8(file.bytes.clone()).map_err(|_| Errno::EINVAL)?;
+        self.runtime
+            .block_on(self.router.handle(ResourceRequest::Write {
+                uri: file.uri.clone(),
+                text,
+            }))
+            .map_err(Self::error)?;
+        file.dirty = false;
+        Ok(())
+    }
+
+    fn apply_write(file: &mut OpenFile, offset: usize, data: &[u8]) {
+        if file.bytes.len() < offset {
+            file.bytes.resize(offset, 0);
+        }
+        if file.bytes.len() < offset + data.len() {
+            file.bytes.resize(offset + data.len(), 0);
+        }
+        file.bytes[offset..offset + data.len()].copy_from_slice(data);
+        file.dirty = true;
     }
     fn child_uri(&self, parent: &Node, name: &str) -> Option<ResourceUri> {
         match parent {
@@ -203,16 +313,12 @@ impl Filesystem for ResourceFs {
             return;
         };
         if matches!(parent, Node::Root) {
-            if !self
-                .runtime
-                .block_on(self.router.schemes())
-                .iter()
-                .any(|scheme| scheme == name)
-            {
+            if !self.router.schemes().iter().any(|scheme| scheme == name) {
                 reply.error(Errno::ENOENT);
                 return;
             }
             let ino = self.inode(format!("scheme:{name}"), Node::Scheme(name.into()));
+            self.acquire_lookup(ino);
             reply.entry(&TTL, &Self::attr(ino, true, 0), Generation(0));
             return;
         }
@@ -221,7 +327,10 @@ impl Filesystem for ResourceFs {
             return;
         };
         match self.classify(uri) {
-            Some((ino, dir, size)) => reply.entry(&TTL, &Self::attr(ino, dir, size), Generation(0)),
+            Some((ino, dir, size)) => {
+                self.acquire_lookup(ino);
+                reply.entry(&TTL, &Self::attr(ino, dir, size), Generation(0));
+            }
             None => reply.error(Errno::ENOENT),
         }
     }
@@ -230,24 +339,29 @@ impl Filesystem for ResourceFs {
         match self.node(ino) {
             Some(Node::Root | Node::Scheme(_)) => reply.attr(&TTL, &Self::attr(ino, true, 0)),
             Some(Node::Resource { uri, directory }) => {
-                let size = if directory {
-                    0
-                } else {
-                    match self
-                        .runtime
-                        .block_on(self.router.handle(ResourceRequest::Read {
-                            uri,
-                            start_line: None,
-                            line_count: None,
-                        })) {
-                        Ok(ResourceReply::Text { text }) => text.len() as u64,
-                        _ => 0,
+                if directory {
+                    reply.attr(&TTL, &Self::attr(ino, true, 0));
+                    return;
+                }
+                match self
+                    .runtime
+                    .block_on(self.router.handle(ResourceRequest::Read {
+                        uri,
+                        start_line: None,
+                        line_count: None,
+                    })) {
+                    Ok(ResourceReply::Text { text }) => {
+                        reply.attr(&TTL, &Self::attr(ino, false, text.len() as u64))
                     }
-                };
-                reply.attr(&TTL, &Self::attr(ino, directory, size))
+                    _ => reply.error(Errno::ENOENT),
+                }
             }
             None => reply.error(Errno::ENOENT),
         }
+    }
+
+    fn forget(&self, _: &Request, ino: INodeNo, nlookup: u64) {
+        self.forget_inode(ino, nlookup);
     }
 
     fn setattr(
@@ -261,7 +375,7 @@ impl Filesystem for ResourceFs {
         _: Option<TimeOrNow>,
         _: Option<TimeOrNow>,
         _: Option<std::time::SystemTime>,
-        _: Option<FileHandle>,
+        fh: Option<FileHandle>,
         _: Option<std::time::SystemTime>,
         _: Option<std::time::SystemTime>,
         _: Option<std::time::SystemTime>,
@@ -280,6 +394,17 @@ impl Filesystem for ResourceFs {
             reply.attr(&TTL, &Self::attr(ino, false, 0));
             return;
         };
+        if let Some(handle) = fh {
+            let mut files = self.open_files.lock().unwrap();
+            let Some(file) = files.files.get_mut(&u64::from(handle)) else {
+                reply.error(Errno::EBADF);
+                return;
+            };
+            file.bytes.resize(size as usize, 0);
+            file.dirty = true;
+            reply.attr(&TTL, &Self::attr(ino, false, size));
+            return;
+        }
         let mut bytes = match self
             .runtime
             .block_on(self.router.handle(ResourceRequest::Read {
@@ -304,8 +429,34 @@ impl Filesystem for ResourceFs {
         }
     }
 
-    fn open(&self, _: &Request, _: INodeNo, _: OpenFlags, reply: ReplyOpen) {
-        reply.opened(FileHandle(0), FopenFlags::FOPEN_DIRECT_IO);
+    fn open(&self, _: &Request, ino: INodeNo, _: OpenFlags, reply: ReplyOpen) {
+        let Some(Node::Resource {
+            uri,
+            directory: false,
+        }) = self.node(ino)
+        else {
+            reply.error(Errno::EISDIR);
+            return;
+        };
+        let bytes = match self
+            .runtime
+            .block_on(self.router.handle(ResourceRequest::Read {
+                uri: uri.clone(),
+                start_line: None,
+                line_count: None,
+            })) {
+            Ok(ResourceReply::Text { text }) => text.into_bytes(),
+            Ok(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+            Err(error) => {
+                reply.error(Self::error(error));
+                return;
+            }
+        };
+        let handle = self.open_file(ino, uri, bytes);
+        reply.opened(handle, FopenFlags::FOPEN_DIRECT_IO);
     }
 
     fn create(
@@ -336,15 +487,17 @@ impl Filesystem for ResourceFs {
                 let ino = self.inode(
                     uri.to_string(),
                     Node::Resource {
-                        uri,
+                        uri: uri.clone(),
                         directory: false,
                     },
                 );
+                self.acquire_lookup(ino);
+                let handle = self.open_file(ino, uri, Vec::new());
                 reply.created(
                     &TTL,
                     &Self::attr(ino, false, 0),
                     Generation(0),
-                    FileHandle(0),
+                    handle,
                     FopenFlags::FOPEN_DIRECT_IO,
                 );
             }
@@ -356,40 +509,32 @@ impl Filesystem for ResourceFs {
         &self,
         _: &Request,
         ino: INodeNo,
-        _: FileHandle,
+        fh: FileHandle,
         offset: u64,
         size: u32,
         _: OpenFlags,
         _: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        let Some(Node::Resource { uri, .. }) = self.node(ino) else {
-            reply.error(Errno::EISDIR);
+        let files = self.open_files.lock().unwrap();
+        let Some(file) = files
+            .files
+            .get(&u64::from(fh))
+            .filter(|file| file.ino == u64::from(ino))
+        else {
+            reply.error(Errno::EBADF);
             return;
         };
-        match self
-            .runtime
-            .block_on(self.router.handle(ResourceRequest::Read {
-                uri,
-                start_line: None,
-                line_count: None,
-            })) {
-            Ok(ResourceReply::Text { text }) => {
-                let bytes = text.as_bytes();
-                let start = (offset as usize).min(bytes.len());
-                let end = (start + size as usize).min(bytes.len());
-                reply.data(&bytes[start..end]);
-            }
-            Ok(_) => reply.error(Errno::EIO),
-            Err(e) => reply.error(Self::error(e)),
-        }
+        let start = (offset as usize).min(file.bytes.len());
+        let end = (start + size as usize).min(file.bytes.len());
+        reply.data(&file.bytes[start..end]);
     }
 
     fn write(
         &self,
         _: &Request,
         ino: INodeNo,
-        _: FileHandle,
+        fh: FileHandle,
         offset: u64,
         data: &[u8],
         _: WriteFlags,
@@ -397,38 +542,54 @@ impl Filesystem for ResourceFs {
         _: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        let Some(Node::Resource { uri, .. }) = self.node(ino) else {
-            reply.error(Errno::EISDIR);
+        let mut files = self.open_files.lock().unwrap();
+        let Some(file) = files
+            .files
+            .get_mut(&u64::from(fh))
+            .filter(|file| file.ino == u64::from(ino))
+        else {
+            reply.error(Errno::EBADF);
             return;
         };
-        let mut text = match self
-            .runtime
-            .block_on(self.router.handle(ResourceRequest::Read {
-                uri: uri.clone(),
-                start_line: None,
-                line_count: None,
-            })) {
-            Ok(ResourceReply::Text { text }) => text.into_bytes(),
-            _ => Vec::new(),
-        };
-        let offset = offset as usize;
-        if text.len() < offset {
-            text.resize(offset, 0);
+        Self::apply_write(file, offset as usize, data);
+        reply.written(data.len() as u32);
+    }
+
+    fn flush(&self, _: &Request, _: INodeNo, fh: FileHandle, _: LockOwner, reply: ReplyEmpty) {
+        match self.commit_file(fh) {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(error),
         }
-        if text.len() < offset + data.len() {
-            text.resize(offset + data.len(), 0);
+    }
+
+    fn fsync(&self, _: &Request, _: INodeNo, fh: FileHandle, _: bool, reply: ReplyEmpty) {
+        match self.commit_file(fh) {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(error),
         }
-        text[offset..offset + data.len()].copy_from_slice(data);
-        let Ok(text) = String::from_utf8(text) else {
-            reply.error(Errno::EINVAL);
-            return;
-        };
-        match self
-            .runtime
-            .block_on(self.router.handle(ResourceRequest::Write { uri, text }))
-        {
-            Ok(_) => reply.written(data.len() as u32),
-            Err(e) => reply.error(Self::error(e)),
+    }
+
+    fn release(
+        &self,
+        _: &Request,
+        _: INodeNo,
+        fh: FileHandle,
+        _: OpenFlags,
+        _: Option<LockOwner>,
+        _: bool,
+        reply: ReplyEmpty,
+    ) {
+        let commit = self.commit_file(fh);
+        let file = self.open_files.lock().unwrap().files.remove(&u64::from(fh));
+        if let Some(file) = file {
+            let mut table = self.inodes.lock().unwrap();
+            let opens = table.opens.entry(file.ino).or_default();
+            *opens = opens.saturating_sub(1);
+            Self::reclaim_inode(&mut table, file.ino);
+        }
+        match commit {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(error),
         }
     }
 
@@ -450,7 +611,7 @@ impl Filesystem for ResourceFs {
         ];
         match node {
             Node::Root => {
-                for scheme in self.runtime.block_on(self.router.schemes()) {
+                for scheme in self.router.schemes() {
                     let child =
                         self.inode(format!("scheme:{scheme}"), Node::Scheme(scheme.clone()));
                     entries.push((child, FileType::Directory, scheme));
@@ -523,7 +684,7 @@ impl Filesystem for ResourceFs {
                                 base_name.clone(),
                             ));
                             for projection in if child.projection_segments().is_empty() {
-                                self.runtime.block_on(self.router.projection_roots(&child))
+                                self.router.projection_roots(&child)
                             } else {
                                 Vec::new()
                             } {
@@ -553,6 +714,10 @@ impl Filesystem for ResourceFs {
             }
         }
         reply.ok();
+        // Plain readdir does not acquire kernel lookup references. Drop any
+        // directory-enumeration-only inode now; a later lookup recreates it
+        // deterministically, while looked-up or open nodes remain pinned.
+        self.reclaim_unreferenced();
     }
 
     fn unlink(&self, _: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
@@ -633,7 +798,126 @@ mod tests {
         uri_to_mount_path,
     };
     use async_trait::async_trait;
-    use std::{process::Command, sync::Arc};
+    use std::{
+        process::Command,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    #[tokio::test]
+    async fn inode_reclamation_respects_lookup_and_open_references() {
+        let mount = tempfile::tempdir().unwrap();
+        let fs = ResourceFs::new(
+            ResourceRouter::new(),
+            Handle::current(),
+            mount.path().to_owned(),
+        );
+        let uri = ResourceUri::resolve("file:///dynamic", Path::new("/")).unwrap();
+        let ino = fs.inode(
+            uri.to_string(),
+            Node::Resource {
+                uri: uri.clone(),
+                directory: false,
+            },
+        );
+        fs.acquire_lookup(ino);
+        let handle = fs.open_file(ino, uri, Vec::new());
+        fs.forget_inode(ino, 1);
+        assert!(fs.node(ino).is_some(), "open handle must pin the inode");
+
+        let file = fs
+            .open_files
+            .lock()
+            .unwrap()
+            .files
+            .remove(&u64::from(handle))
+            .unwrap();
+        let mut table = fs.inodes.lock().unwrap();
+        *table.opens.get_mut(&file.ino).unwrap() -= 1;
+        ResourceFs::reclaim_inode(&mut table, file.ino);
+        assert!(!table.nodes.contains_key(&file.ino));
+    }
+
+    #[test]
+    fn per_open_buffer_handles_overwrite_sparse_extension_and_utf8_validation() {
+        let uri = ResourceUri::resolve("file:///buffer", Path::new("/")).unwrap();
+        let mut file = OpenFile {
+            ino: 2,
+            uri,
+            bytes: b"hello".to_vec(),
+            dirty: false,
+        };
+        ResourceFs::apply_write(&mut file, 1, b"a");
+        ResourceFs::apply_write(&mut file, 7, b"z");
+        assert_eq!(file.bytes, b"hallo\0\0z");
+        assert!(file.dirty);
+        file.bytes = vec![0xff];
+        assert!(String::from_utf8(file.bytes).is_err());
+    }
+
+    struct CountingWrites {
+        writes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ResourceProvider for CountingWrites {
+        async fn handle(&self, request: ResourceRequest) -> Result<ResourceReply, ResourceError> {
+            match request {
+                ResourceRequest::Write { .. } => {
+                    self.writes.fetch_add(1, Ordering::AcqRel);
+                    Ok(ResourceReply::Written)
+                }
+                other => Err(ResourceError::Unsupported {
+                    uri: other.uri().clone(),
+                    operation: other.operation(),
+                }),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_flushes_commit_each_dirty_buffer_only_once() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let router = ResourceRouter::new();
+        router
+            .register(
+                "writes",
+                ResourceRoute::new("file:///**", None::<String>, [ResourceOperation::Write]),
+                Arc::new(CountingWrites {
+                    writes: writes.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let fs = Arc::new(ResourceFs::new(
+            router,
+            Handle::current(),
+            mount.path().to_owned(),
+        ));
+        let uri = ResourceUri::resolve("file:///buffer", Path::new("/")).unwrap();
+        let ino = fs.inode(
+            uri.to_string(),
+            Node::Resource {
+                uri: uri.clone(),
+                directory: false,
+            },
+        );
+        let handle = fs.open_file(ino, uri, b"old".to_vec());
+        {
+            let mut files = fs.open_files.lock().unwrap();
+            ResourceFs::apply_write(files.files.get_mut(&u64::from(handle)).unwrap(), 0, b"new");
+        }
+        tokio::task::spawn_blocking(move || {
+            fs.commit_file(handle).unwrap();
+            fs.commit_file(handle).unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(writes.load(Ordering::Acquire), 1);
+    }
 
     struct Symbols;
     #[async_trait]

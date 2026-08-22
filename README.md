@@ -2,6 +2,10 @@
 
 Artist is a small persistent, streaming agent harness. Rig owns model execution; the Artist kernel owns the durable session protocol; Wasmtime components supply behavior that should vary.
 
+Artist deliberately provides no permission, security, sandbox, confinement, or
+isolation boundary. Resource scopes organize routing; they do not restrict
+access. Deployments that need a boundary must provide it outside Artist.
+
 ## Crates
 
 - `artist-core`: stable IDs, commands, stream events, and append-only transcript types
@@ -10,7 +14,7 @@ Artist is a small persistent, streaming agent harness. Rig owns model execution;
 - `artist-rig`: thin Rig streaming adapter and `rig-memory` policies
 - `artist-resource`: canonical URI tree, deterministic routing, universal tools, FUSE projection, and FFF search
 - `artist-plugin`: versioned WIT component host and ordered capability chains
-- `artist-observe`: projection of public stream events into `rig-tap`
+- `artist-observe`: backend-neutral observations projected from public stream events
 - `plugins/default`: lifecycle defaults and the terminal `file:///**` resource provider
 - `plugins/ast-fixture`: Rust `?symbols/...` projections backed by the shared tool bridge
 - `plugins/tool-fixture`: cross-component tool-call and recursion smoke fixture
@@ -56,13 +60,17 @@ OPENAI_API_KEY=... cargo run -p artist-rig --example openai -- <streaming-model-
 
 ## Stable contracts
 
-- Canonical snapshots use `artist-core::RECORD_VERSION = 2` and deserialize only
-  through the validating record reducer.
+- Canonical snapshots use `artist-core::RECORD_VERSION = 3` and deserialize only
+  through the validating record reducer. Legacy v1/v2 snapshots and framed v2
+  logs migrate explicitly; rich tool-result parts remain lossless.
 - File-backed sessions use `artist-store::FILE_FORMAT_VERSION = 2`: a frozen
   header followed by SHA-256-chained, atomic JSON batch frames. Legacy v1 JSONL
   is migrated on read and rewritten on the next append.
 - The public command and stream protocol consists only of `artist-core` values.
-- The plugin ABI is `artist:plugin@0.3.0` in `wit/plugin.wit`; tool and resource providers are separate interoperable contracts.
+- With locked Rig 0.42, `AgentRunner` stream errors are terminal; Artist
+  preserves partial output and closes the run instead of expecting a later
+  recovery item from that stream.
+- The plugin ABI is `artist:plugin@0.4.0` in `wit/plugin.wit`; tool and resource providers are separate interoperable contracts.
 - Telemetry is derived from stream events and is never required to load or resume a session.
 
 The complete resource-fabric contract and verification checklist live in

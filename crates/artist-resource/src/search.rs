@@ -1,14 +1,13 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
 use fff_search::{
-    FFFMode, FilePicker, FilePickerOptions, FuzzySearchOptions, GrepMode, GrepSearchOptions,
-    PaginationArgs, grep::parse_grep_query,
+    Constraint, ConstraintVec, FFFMode, FFFQuery, FilePicker, FilePickerOptions, FuzzyQuery,
+    FuzzySearchOptions, GrepMode, GrepSearchOptions, MixedItemRef, PaginationArgs,
+    SharedFilePicker, SharedFrecency,
 };
 use globset::Glob;
 use serde_json::{Value, json};
@@ -18,24 +17,32 @@ use crate::ResourceUri;
 /// The single native FFF index over the complete Artist mount.
 pub struct SearchEngine {
     mount_root: PathBuf,
-    picker: Mutex<FilePicker>,
+    picker: SharedFilePicker,
+    frecency: SharedFrecency,
     generation: AtomicU64,
 }
 
 impl SearchEngine {
     pub fn new(mount_root: impl Into<PathBuf>) -> Result<Self, String> {
         let mount_root = mount_root.into();
-        let picker = build_picker(&mount_root)?;
+        let picker = SharedFilePicker::default();
+        let frecency = SharedFrecency::default();
+        build_picker(&mount_root, picker.clone(), frecency.clone())?;
         Ok(Self {
             mount_root,
-            picker: Mutex::new(picker),
+            picker,
+            frecency,
             generation: AtomicU64::new(0),
         })
     }
 
     pub fn refresh(&self) -> Result<(), String> {
-        *self.picker.lock().map_err(|_| "FFF index lock poisoned")? =
-            build_picker(&self.mount_root)?;
+        self.picker
+            .trigger_full_rescan_async(&self.frecency)
+            .map_err(|error| error.to_string())?;
+        if !self.picker.wait_for_scan(Duration::from_secs(30)) {
+            return Err("FFF rescan timed out".into());
+        }
         Ok(())
     }
 
@@ -49,12 +56,13 @@ impl SearchEngine {
 
     /// Canonical URIs and byte lengths currently held by the native index.
     pub fn indexed_resources(&self) -> Result<Vec<(ResourceUri, u64)>, String> {
-        let picker = self.picker.lock().map_err(|_| "FFF index lock poisoned")?;
+        let guard = self.picker.read().map_err(|error| error.to_string())?;
+        let picker = guard.as_ref().ok_or("FFF index is not initialized")?;
         picker
             .get_files()
             .iter()
             .map(|file| {
-                let path = self.mount_root.join(file.relative_path(&*picker));
+                let path = self.mount_root.join(file.relative_path(picker));
                 Ok((mount_path_to_uri(&self.mount_root, &path)?, file.size))
             })
             .collect()
@@ -68,17 +76,13 @@ impl SearchEngine {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Value, String> {
-        let picker = self.picker.lock().map_err(|_| "FFF index lock poisoned")?;
+        let guard = self.picker.read().map_err(|error| error.to_string())?;
+        let picker = guard.as_ref().ok_or("FFF index is not initialized")?;
         let root = uri_to_mount_path(&self.mount_root, uri)?;
         let root_rel = root
             .strip_prefix(&self.mount_root)
             .map_err(|_| "URI is outside the search mount")?;
-        let offset = parse_cursor(cursor)?;
-        let matcher = glob
-            .map(Glob::new)
-            .transpose()
-            .map_err(|e| e.to_string())?
-            .map(|g| g.compile_matcher());
+        let offset = parse_cursor(cursor, "find")?;
         let pattern = match glob {
             Some(glob) if !root_rel.as_os_str().is_empty() => {
                 format!("{}/{}", root_rel.to_string_lossy(), glob)
@@ -86,12 +90,25 @@ impl SearchEngine {
             Some(glob) => glob.to_owned(),
             None => "**".into(),
         };
-        let result = picker.glob(
-            &pattern,
+        let depth_pattern = max_depth.map(|depth| depth_glob(root_rel, depth));
+        let mut constraints: ConstraintVec<'_> =
+            std::iter::once(Constraint::Glob(pattern.as_str())).collect();
+        if let Some(depth_pattern) = depth_pattern.as_deref() {
+            constraints.push(Constraint::Glob(depth_pattern));
+        }
+        let query = FFFQuery {
+            raw_query: &pattern,
+            constraints,
+            fuzzy_query: FuzzyQuery::Empty,
+            location: None,
+        };
+        let result = picker.fuzzy_search_mixed(
+            &query,
+            None,
             FuzzySearchOptions {
                 pagination: PaginationArgs {
-                    offset: 0,
-                    limit: usize::MAX,
+                    offset,
+                    limit: limit.saturating_add(1),
                 },
                 max_threads: 0,
                 current_file: None,
@@ -101,40 +118,29 @@ impl SearchEngine {
         let mut paths = result
             .items
             .into_iter()
-            .map(|item| PathBuf::from(item.relative_path(&*picker)))
+            .map(|item| match item {
+                MixedItemRef::File(item) => PathBuf::from(item.relative_path(picker)),
+                MixedItemRef::Dir(item) => PathBuf::from(item.relative_path(picker)),
+            })
             .filter(|path| path.starts_with(root_rel))
             .filter(|path| {
-                let relative = path.strip_prefix(root_rel).unwrap_or(path);
-                !relative.as_os_str().is_empty()
-                    && max_depth.is_none_or(|depth| relative.components().count() <= depth)
-                    && matcher.as_ref().is_none_or(|m| m.is_match(relative))
+                !path
+                    .strip_prefix(root_rel)
+                    .unwrap_or(path)
+                    .as_os_str()
+                    .is_empty()
             })
             .collect::<Vec<_>>();
-        paths.extend(
-            picker
-                .get_dirs()
-                .iter()
-                .map(|item| PathBuf::from(item.relative_path(&*picker)))
-                .filter(|path| path.starts_with(root_rel))
-                .filter(|path| {
-                    let relative = path.strip_prefix(root_rel).unwrap_or(path);
-                    !relative.as_os_str().is_empty()
-                        && max_depth.is_none_or(|depth| relative.components().count() <= depth)
-                        && matcher.as_ref().is_none_or(|m| m.is_match(relative))
-                }),
-        );
-        paths.sort();
-        paths.dedup();
+        let has_more = paths.len() > limit;
+        paths.truncate(limit);
         let page = paths
             .iter()
-            .skip(offset)
-            .take(limit)
             .map(|path| {
                 mount_path_to_uri(&self.mount_root, &self.mount_root.join(path))
                     .map(|u| u.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let next = (offset + page.len() < paths.len()).then(|| (offset + page.len()).to_string());
+        let next = has_more.then(|| format!("find:{}", offset + page.len()));
         Ok(json!({"results": page, "cursor": next}))
     }
 
@@ -147,75 +153,139 @@ impl SearchEngine {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Value, String> {
-        let picker = self.picker.lock().map_err(|_| "FFF index lock poisoned")?;
+        regex::Regex::new(regex).map_err(|error| format!("invalid regex: {error}"))?;
+        // FFF's public grep entry point accepts an FFFQuery and its query type
+        // strips a leading backslash before `*`, `/`, or `!`. Wrapping the
+        // already-validated raw expression prevents that query-language escape
+        // rule from touching the regex while preserving regex semantics.
+        let raw_regex = format!("(?:{regex})");
+        let guard = self.picker.read().map_err(|error| error.to_string())?;
+        let picker = guard.as_ref().ok_or("FFF index is not initialized")?;
         let root = uri_to_mount_path(&self.mount_root, uri)?;
-        let offset = parse_cursor(cursor)?;
-        let include = include_glob
-            .map(Glob::new)
-            .transpose()
-            .map_err(|e| e.to_string())?
-            .map(|g| g.compile_matcher());
-        let query = parse_grep_query(regex);
-        let result = picker.grep(
-            &query,
-            &GrepSearchOptions {
-                mode: GrepMode::Regex,
-                page_limit: usize::MAX,
-                before_context: context,
-                after_context: context,
-                ..Default::default()
-            },
-        );
-        if let Some(error) = result.regex_fallback_error {
-            return Err(format!("invalid regex: {error}"));
-        }
+        let root_rel = root
+            .strip_prefix(&self.mount_root)
+            .map_err(|_| "URI is outside the search mount")?;
+        let offset = parse_cursor(cursor, "grep")?;
+        let include_pattern = match include_glob {
+            Some(glob) if !root_rel.as_os_str().is_empty() => {
+                format!("{}/{}", root_rel.to_string_lossy(), glob)
+            }
+            Some(glob) => glob.to_owned(),
+            None => "**".into(),
+        };
+        let include = Glob::new(&include_pattern)
+            .map_err(|error| format!("invalid include glob: {error}"))?
+            .compile_matcher();
+        // FFF 0.10.5 deliberately retries a zero-result constrained grep with
+        // its constraints removed. Artist URI roots and include globs are hard
+        // constraints, so feed FFF only the raw regex and apply scope to each
+        // bounded native page. This keeps FFF's stable file-offset pagination
+        // without allowing its query-language fallback to escape the URI root.
+        let query = FFFQuery {
+            raw_query: &raw_regex,
+            constraints: ConstraintVec::new(),
+            fuzzy_query: FuzzyQuery::Text(&raw_regex),
+            location: None,
+        };
         let mut matches = Vec::new();
-        for found in result.matches {
-            let file = result.files[found.file_index];
-            let path = self.mount_root.join(file.relative_path(&*picker));
-            if !path.starts_with(&root) {
-                continue;
+        let mut page_offset = offset;
+        let next = loop {
+            let result = picker.grep(
+                &query,
+                &GrepSearchOptions {
+                    mode: GrepMode::Regex,
+                    file_offset: page_offset,
+                    page_limit: limit.saturating_sub(matches.len()).max(1),
+                    before_context: context,
+                    after_context: context,
+                    ..Default::default()
+                },
+            );
+            if let Some(error) = result.regex_fallback_error {
+                return Err(format!("invalid regex: {error}"));
             }
-            let relative = path.strip_prefix(&root).unwrap_or(&path);
-            if include
-                .as_ref()
-                .is_some_and(|glob| !glob.is_match(relative))
-            {
-                continue;
+            for found in result.matches {
+                let file = result.files[found.file_index];
+                let relative_text = file.relative_path(picker);
+                let relative = Path::new(&relative_text);
+                if !relative.starts_with(root_rel) || !include.is_match(relative) {
+                    continue;
+                }
+                let path = self.mount_root.join(relative);
+                matches.push(json!({
+                    "uri": mount_path_to_uri(&self.mount_root, &path)?.to_string(),
+                    "line": found.line_number,
+                    "column": found.col,
+                    "text": found.line_content,
+                    "before": found.context_before,
+                    "after": found.context_after,
+                }));
             }
-            matches.push(json!({
-                "uri": mount_path_to_uri(&self.mount_root, &path)?.to_string(),
-                "line": found.line_number,
-                "column": found.col,
-                "text": found.line_content,
-                "before": found.context_before,
-                "after": found.context_after,
-            }));
-        }
-        let total = matches.len();
-        let page: Vec<_> = matches.into_iter().skip(offset).take(limit).collect();
-        let next = (offset + page.len() < total).then(|| (offset + page.len()).to_string());
-        Ok(json!({"matches": page, "cursor": next}))
+            if matches.len() >= limit || result.next_file_offset == 0 {
+                break (result.next_file_offset != 0)
+                    .then(|| format!("grep:{}", result.next_file_offset));
+            }
+            page_offset = result.next_file_offset;
+        };
+        Ok(json!({"matches": matches, "cursor": next}))
     }
 }
 
-fn build_picker(root: &Path) -> Result<FilePicker, String> {
-    let mut picker = FilePicker::new(FilePickerOptions {
-        base_path: root.to_string_lossy().into_owned(),
-        mode: FFFMode::Ai,
-        watch: true,
-        enable_mmap_cache: false,
-        enable_content_indexing: false,
-        ..Default::default()
-    })
-    .map_err(|e| e.to_string())?;
-    picker.collect_files().map_err(|e| e.to_string())?;
-    Ok(picker)
+fn depth_glob(root: &Path, depth: usize) -> String {
+    if depth == 0 {
+        return "__artist_no_descendants__".into();
+    }
+    let prefix = (!root.as_os_str().is_empty()).then(|| format!("{}/", root.to_string_lossy()));
+    let patterns = (1..=depth)
+        .map(|level| {
+            format!(
+                "{}{}",
+                prefix.as_deref().unwrap_or_default(),
+                std::iter::repeat_n("*", level)
+                    .collect::<Vec<_>>()
+                    .join("/")
+            )
+        })
+        .collect::<Vec<_>>();
+    if patterns.len() == 1 {
+        patterns.into_iter().next().unwrap()
+    } else {
+        format!("{{{}}}", patterns.join(","))
+    }
 }
 
-fn parse_cursor(cursor: Option<&str>) -> Result<usize, String> {
+fn build_picker(
+    root: &Path,
+    picker: SharedFilePicker,
+    frecency: SharedFrecency,
+) -> Result<(), String> {
+    FilePicker::new_with_shared_state(
+        picker.clone(),
+        frecency,
+        FilePickerOptions {
+            base_path: root.to_string_lossy().into_owned(),
+            mode: FFFMode::Ai,
+            watch: true,
+            enable_mmap_cache: false,
+            enable_content_indexing: false,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    if !picker.wait_for_indexing_complete(Duration::from_secs(30)) {
+        return Err("FFF initial scan timed out".into());
+    }
+    if !picker.wait_for_watcher(Duration::from_secs(30)) {
+        return Err("FFF watcher startup timed out".into());
+    }
+    Ok(())
+}
+
+fn parse_cursor(cursor: Option<&str>, kind: &str) -> Result<usize, String> {
+    let Some(cursor) = cursor else { return Ok(0) };
     cursor
-        .unwrap_or("0")
+        .strip_prefix(&format!("{kind}:"))
+        .ok_or_else(|| "invalid continuation cursor".to_owned())?
         .parse()
         .map_err(|_| "invalid continuation cursor".into())
 }
@@ -327,12 +397,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("file/workspace/src/lib.rs");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, "pub fn indexed_symbol() {}\n").unwrap();
+        std::fs::write(&file, "pub fn indexed_symbol() {} // projected_body\n").unwrap();
         std::fs::write(
             file.with_file_name("other.rs"),
-            "pub fn indexed_symbol_too() {}\n",
+            "pub fn indexed_symbol_too() {}\n*.rs !excluded type:rust path/to/file\n",
         )
         .unwrap();
+        let projected_file = file.with_file_name("lib.rs?symbols").join("foo");
+        std::fs::create_dir_all(projected_file.parent().unwrap()).unwrap();
+        std::fs::write(&projected_file, "projected_body\n").unwrap();
         let index = SearchEngine::new(temp.path()).unwrap();
         let root = ResourceUri::resolve("file:///workspace", Path::new("/")).unwrap();
         let found = index.find(&root, Some("**/*.rs"), None, None, 50).unwrap();
@@ -346,7 +419,7 @@ mod tests {
         let first = index
             .grep(&root, "indexed_symbol", Some("**/*.rs"), 0, None, 1)
             .unwrap();
-        assert_eq!(first["cursor"], "1");
+        assert_eq!(first["cursor"], "grep:1");
         let second = index
             .grep(
                 &root,
@@ -357,7 +430,71 @@ mod tests {
                 1,
             )
             .unwrap();
-        assert!(second["cursor"].is_null());
         assert_ne!(first["matches"][0]["uri"], second["matches"][0]["uri"]);
+        if let Some(cursor) = second["cursor"].as_str() {
+            let terminal = index
+                .grep(&root, "indexed_symbol", Some("**/*.rs"), 0, Some(cursor), 1)
+                .unwrap();
+            assert!(terminal["matches"].as_array().unwrap().is_empty());
+            assert!(terminal["cursor"].is_null());
+        }
+
+        let syntax = index
+            .grep(
+                &root,
+                r"\*\.rs.*type:rust.*path/to/file",
+                Some("**/*.rs"),
+                0,
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(syntax["matches"].as_array().unwrap().len(), 1);
+        assert!(index.grep(&root, "[", None, 0, None, 10).is_err());
+
+        let projected_root =
+            ResourceUri::resolve("file:///workspace/src/lib.rs?symbols", Path::new("/")).unwrap();
+        let projected = index
+            .grep(&projected_root, "projected_body", None, 0, None, 10)
+            .unwrap();
+        assert_eq!(projected["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            projected["matches"][0]["uri"],
+            "file:///workspace/src/lib.rs?symbols/foo"
+        );
+    }
+
+    #[test]
+    fn ordinary_edits_are_discovered_by_the_long_running_watcher() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("file/workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let index = SearchEngine::new(temp.path()).unwrap();
+        let root = ResourceUri::resolve("file:///workspace", Path::new("/")).unwrap();
+
+        std::fs::write(
+            workspace.join("watched.rs"),
+            "fn appeared_after_indexing() {}\n",
+        )
+        .unwrap();
+
+        for _ in 0..100 {
+            let found = index
+                .find(&root, Some("watched.rs"), None, None, 10)
+                .unwrap();
+            if found["results"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+            {
+                let matches = index
+                    .grep(&root, "appeared_after_indexing", None, 0, None, 10)
+                    .unwrap();
+                assert_eq!(matches["matches"].as_array().unwrap().len(), 1);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        panic!("FFF watcher did not discover an ordinary filesystem edit");
     }
 }

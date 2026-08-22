@@ -1,4 +1,8 @@
-use std::{collections::VecDeque, sync::Arc, time::Instant};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+    time::Instant,
+};
 
 use artist_core::{
     Command, EventId, InitialContext, InterruptionCause, MessageId, RunId, RunOutcome, SessionId,
@@ -62,7 +66,7 @@ impl SessionHandle {
                 kinds.push(TranscriptEntryKind::AssistantMessage {
                     message_id: message_id.clone(),
                     run_id: run_id.clone(),
-                    content: String::new(),
+                    content: Vec::new(),
                 });
             }
             kinds.push(TranscriptEntryKind::RunFinished {
@@ -158,7 +162,8 @@ struct PendingInput {
 
 struct ActiveRun {
     id: RunId,
-    content: String,
+    text: String,
+    content: Vec<artist_core::ContentPart>,
     stream: ModelStream,
     started: Instant,
     first_token_ms: Option<u64>,
@@ -185,7 +190,56 @@ impl Session {
         commands: mpsc::Receiver<Envelope>,
         events: broadcast::Sender<StreamEvent>,
     ) -> Self {
-        let (steering, delivered) = Steering::channel();
+        let started_inputs: HashSet<_> = record
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                TranscriptEntryKind::RunStarted { input_id, .. } => Some(input_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let delivered_steering: HashSet<_> = record
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                TranscriptEntryKind::SteeringDelivered { message_ids, .. } => Some(message_ids),
+                _ => None,
+            })
+            .flatten()
+            .cloned()
+            .collect();
+        let inputs = record
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                TranscriptEntryKind::Input {
+                    message_id,
+                    content,
+                    ..
+                } if !started_inputs.contains(message_id) => Some(PendingInput {
+                    message_id: message_id.clone(),
+                    content: content.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        let queued_steering = record
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                TranscriptEntryKind::SteeringQueued {
+                    message_id,
+                    source,
+                    content,
+                } if !delivered_steering.contains(message_id) => Some(SteeringNotice {
+                    message_id: message_id.clone(),
+                    source: *source,
+                    content: content.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        let (steering, delivered) = Steering::channel_with(queued_steering);
         Self {
             record,
             store,
@@ -193,7 +247,7 @@ impl Session {
             commands,
             events,
             event_sequence: 0,
-            inputs: VecDeque::new(),
+            inputs,
             steering,
             delivered,
             active: None,
@@ -241,17 +295,19 @@ impl Session {
                 }
                 Wake::Delivered(None) => return,
                 Wake::Model(Some(Ok(event))) => {
-                    if self.model_event(event).await.is_err() {
+                    if self.flush_delivered().await.is_err()
+                        || self.model_event(event).await.is_err()
+                    {
                         return;
                     }
                 }
                 Wake::Model(Some(Err(error))) => {
-                    if self.fail(error).await.is_err() {
+                    if self.flush_delivered().await.is_err() || self.fail(error).await.is_err() {
                         return;
                     }
                 }
                 Wake::Model(None) => {
-                    if self.complete().await.is_err() {
+                    if self.flush_delivered().await.is_err() || self.complete().await.is_err() {
                         return;
                     }
                 }
@@ -336,7 +392,8 @@ impl Session {
         let stream = self.model.stream(request, self.steering.clone());
         self.active = Some(ActiveRun {
             id: run_id.clone(),
-            content: String::new(),
+            text: String::new(),
+            content: Vec::new(),
             stream,
             started: Instant::now(),
             first_token_ms: None,
@@ -358,11 +415,17 @@ impl Session {
                     let active = self.active.as_mut().unwrap();
                     active.first_token_ms = Some(millis(active.started.elapsed()));
                 }
-                self.active.as_mut().unwrap().content.push_str(&delta);
+                let active = self.active.as_mut().unwrap();
+                active.text.push_str(&delta);
+                active
+                    .content
+                    .push(artist_core::ContentPart::text(delta.clone()));
                 self.emit(Some(run_id), StreamEventKind::TextDelta { delta });
             }
             ModelEvent::TextReset => {
-                self.active.as_mut().unwrap().content.clear();
+                let active = self.active.as_mut().unwrap();
+                active.text.clear();
+                active.content.clear();
                 self.emit(Some(run_id), StreamEventKind::TextReset);
             }
             ModelEvent::ToolCallDelta { call_id, delta } => {
@@ -392,17 +455,41 @@ impl Session {
                     },
                 );
             }
-            ModelEvent::ToolResult { call_id, result } => {
+            ModelEvent::ToolExecutionCommitted {
+                call_id,
+                name,
+                arguments,
+            } => {
+                self.emit(
+                    Some(run_id),
+                    StreamEventKind::ToolExecutionCommitted {
+                        call_id,
+                        name,
+                        arguments,
+                    },
+                );
+            }
+            ModelEvent::ToolResult { call_id, content } => {
                 self.append(vec![TranscriptEntryKind::ToolResult {
                     run_id: run_id.clone(),
                     call_id: call_id.clone(),
-                    result: result.clone(),
+                    content: content.clone(),
                 }])
                 .await?;
                 self.emit(
                     Some(run_id),
-                    StreamEventKind::ToolResult { call_id, result },
+                    StreamEventKind::ToolResult { call_id, content },
                 );
+            }
+            ModelEvent::Content(part) => {
+                if matches!(
+                    part,
+                    artist_core::ContentPart::Reasoning { .. }
+                        | artist_core::ContentPart::Image { .. }
+                ) {
+                    self.active.as_mut().unwrap().content.push(part.clone());
+                }
+                self.emit(Some(run_id), StreamEventKind::Content { part });
             }
             ModelEvent::ContextCompacted {
                 through_sequence,
@@ -428,6 +515,9 @@ impl Session {
             ModelEvent::Usage(usage) => {
                 self.emit(Some(run_id), StreamEventKind::Usage(usage));
             }
+            ModelEvent::CompletionMetadata(calls) => {
+                self.emit(Some(run_id), StreamEventKind::CompletionMetadata { calls });
+            }
             ModelEvent::Finished { output } => {
                 if self
                     .active
@@ -435,7 +525,9 @@ impl Session {
                     .is_some_and(|active| active.content.is_empty())
                     && let Some(output) = output
                 {
-                    self.active.as_mut().unwrap().content = output;
+                    let active = self.active.as_mut().unwrap();
+                    active.text = output.clone();
+                    active.content.push(artist_core::ContentPart::text(output));
                 }
                 self.complete().await?;
             }
@@ -459,6 +551,13 @@ impl Session {
             Some(run_id),
             StreamEventKind::SteeringDelivered { message_ids },
         );
+        Ok(())
+    }
+
+    async fn flush_delivered(&mut self) -> Result<(), SessionError> {
+        while let Ok(ids) = self.delivered.try_recv() {
+            self.steering_delivered(ids).await?;
+        }
         Ok(())
     }
 
@@ -533,11 +632,14 @@ impl Session {
             run_id: active.id.clone(),
             outcome: RunOutcome::Failed {
                 message_id,
-                error: error.0.clone(),
+                error: error.0.message.clone(),
             },
         });
         self.append(entries).await?;
-        self.emit(Some(active.id), StreamEventKind::Failed { error: error.0 });
+        self.emit(
+            Some(active.id),
+            StreamEventKind::Failed { failure: error.0 },
+        );
         Ok(())
     }
 
@@ -588,6 +690,11 @@ mod tests {
 
     struct ControlledModel(Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Control>>>);
 
+    struct RecordingModel {
+        requests: mpsc::UnboundedSender<ModelRequest>,
+        steering: mpsc::UnboundedSender<Vec<SteeringNotice>>,
+    }
+
     enum Control {
         Event(ModelEvent),
         Error(ModelError),
@@ -619,6 +726,19 @@ mod tests {
                     Some((event, (receiver, steering)))
                 },
             ))
+        }
+    }
+
+    impl StreamingModel for RecordingModel {
+        fn stream(&self, request: ModelRequest, steering: Steering) -> ModelStream {
+            self.requests.send(request).unwrap();
+            let observed = self.steering.clone();
+            Box::pin(stream::once(async move {
+                observed.send(steering.take().await).unwrap();
+                Ok(ModelEvent::Finished {
+                    output: Some("done".into()),
+                })
+            }))
         }
     }
 
@@ -673,7 +793,7 @@ mod tests {
         let record = store.load(&SessionId::from("session")).await.unwrap();
         let tail = &record.entries()[record.entries().len() - 2..];
         assert!(matches!(tail[0].kind,
-            TranscriptEntryKind::AssistantMessage { ref content, .. } if content == "hello"));
+            TranscriptEntryKind::AssistantMessage { ref content, .. } if content == &vec![artist_core::ContentPart::text("hel"), artist_core::ContentPart::text("lo")]));
         assert!(matches!(
             tail[1].kind,
             TranscriptEntryKind::RunFinished {
@@ -802,7 +922,7 @@ mod tests {
         let record = store.load(&SessionId::from("session")).await.unwrap();
         let tail = &record.entries()[record.entries().len() - 2..];
         assert!(
-            matches!(tail[0].kind, TranscriptEntryKind::AssistantMessage { ref content, .. } if content == "partial")
+            matches!(tail[0].kind, TranscriptEntryKind::AssistantMessage { ref content, .. } if content == &vec![artist_core::ContentPart::text("partial")])
         );
         assert!(matches!(
             tail[1].kind,
@@ -825,7 +945,7 @@ mod tests {
             .send(Control::Event(ModelEvent::TextDelta("partial".into())))
             .unwrap();
         control
-            .send(Control::Error(ModelError("provider failed".into())))
+            .send(Control::Error(ModelError::new("provider failed")))
             .unwrap();
         wait_for(&mut events, |event| {
             matches!(event, StreamEventKind::Failed { .. })
@@ -839,7 +959,7 @@ mod tests {
             TranscriptEntryKind::AssistantMessage {
                 ref content,
                 ..
-            } if content == "partial"
+            } if content == &vec![artist_core::ContentPart::text("partial")]
         ));
         assert!(matches!(
             tail[1].kind,
@@ -853,7 +973,7 @@ mod tests {
         let mut events = session.subscribe();
         session.input(Source::User, "work").await.unwrap();
         control
-            .send(Control::Error(ModelError("no response".into())))
+            .send(Control::Error(ModelError::new("no response")))
             .unwrap();
         wait_for(&mut events, |event| {
             matches!(event, StreamEventKind::Failed { .. })
@@ -915,9 +1035,9 @@ mod tests {
             messages,
             vec![
                 crate::ModelMessage::User("first".into()),
-                crate::ModelMessage::Assistant("one".into()),
+                crate::ModelMessage::Assistant(vec![artist_core::ContentPart::text("one")]),
                 crate::ModelMessage::User("second".into()),
-                crate::ModelMessage::Assistant("two".into()),
+                crate::ModelMessage::Assistant(vec![artist_core::ContentPart::text("two")]),
             ]
         );
     }
@@ -1038,7 +1158,7 @@ mod tests {
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("existing-partial"),
                 run_id: RunId::from("unfinished"),
-                content: "preserved".into(),
+                content: vec![artist_core::ContentPart::text("preserved")],
             },
         ]);
         record.append_batch(&entries).unwrap();
@@ -1064,5 +1184,84 @@ mod tests {
                 ..
             } if message_id.as_str() == "existing-partial"
         ));
+    }
+
+    #[tokio::test]
+    async fn resume_reconstructs_pending_inputs_and_steering_in_order() {
+        let store = Arc::new(MemoryStore::default());
+        let mut record = SessionRecord::new(
+            SessionId::from("resume-queues"),
+            InitialContext { fragments: vec![] },
+        );
+        let entries = record.entries_for([
+            TranscriptEntryKind::Input {
+                message_id: MessageId::from("first"),
+                source: Source::User,
+                content: "first pending".into(),
+            },
+            TranscriptEntryKind::SteeringQueued {
+                message_id: MessageId::from("notice-1"),
+                source: Source::Harness,
+                content: "first notice".into(),
+            },
+            TranscriptEntryKind::SteeringQueued {
+                message_id: MessageId::from("notice-2"),
+                source: Source::User,
+                content: "second notice".into(),
+            },
+            TranscriptEntryKind::Input {
+                message_id: MessageId::from("second"),
+                source: Source::User,
+                content: "second pending".into(),
+            },
+        ]);
+        record.append_batch(&entries).unwrap();
+        store.create(record).await.unwrap();
+
+        let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
+        let (steering_tx, mut steering_rx) = mpsc::unbounded_channel();
+        let model = Arc::new(RecordingModel {
+            requests: requests_tx,
+            steering: steering_tx,
+        });
+        let _session =
+            SessionHandle::resume(&SessionId::from("resume-queues"), store.clone(), model)
+                .await
+                .unwrap();
+
+        assert_eq!(requests_rx.recv().await.unwrap().prompt, "first pending");
+        let notices = steering_rx.recv().await.unwrap();
+        assert_eq!(
+            notices
+                .iter()
+                .map(|notice| notice.content.as_str())
+                .collect::<Vec<_>>(),
+            ["first notice", "second notice"]
+        );
+        assert_eq!(requests_rx.recv().await.unwrap().prompt, "second pending");
+        assert!(steering_rx.recv().await.unwrap().is_empty());
+
+        tokio::task::yield_now().await;
+        let record = store.load(&SessionId::from("resume-queues")).await.unwrap();
+        let started: Vec<_> = record
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                TranscriptEntryKind::RunStarted { input_id, .. } => Some(input_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, ["first", "second"]);
+        let delivered: Vec<_> = record
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                TranscriptEntryKind::SteeringDelivered { message_ids, .. } => Some(message_ids),
+                _ => None,
+            })
+            .flatten()
+            .map(|id| id.as_str())
+            .collect();
+        assert_eq!(delivered, ["notice-1", "notice-2"]);
     }
 }

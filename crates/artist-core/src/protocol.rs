@@ -2,6 +2,35 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CallId, EventId, MessageId, RunId, SessionId};
 
+/// Backend-neutral content preserved across live events and durable history.
+/// Unknown provider-native content is retained as an opaque tagged JSON value.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text {
+        text: String,
+    },
+    Json {
+        value: serde_json::Value,
+    },
+    Image {
+        value: serde_json::Value,
+    },
+    Reasoning {
+        value: serde_json::Value,
+    },
+    Opaque {
+        kind: String,
+        value: serde_json::Value,
+    },
+}
+
+impl ContentPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -43,6 +72,49 @@ pub enum RunOutcome {
     },
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    Stop,
+    Length,
+    ToolCalls,
+    ContentFilter,
+    Other(String),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CompletionCallMetadata {
+    pub call_index: usize,
+    pub finish_reason: Option<FinishReason>,
+    pub message_id: Option<String>,
+    pub response_id: Option<String>,
+    pub provider_request_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureClass {
+    Transport,
+    Provider,
+    InvalidRequest,
+    InvalidResponse,
+    Memory,
+    Tool,
+    Cancelled,
+    Limit,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ModelFailure {
+    pub message: String,
+    pub class: FailureClass,
+    pub retriable: bool,
+    pub provider_code: Option<String>,
+    pub http_status: Option<u16>,
+    pub provider_request_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StreamEvent {
     pub event_id: EventId,
@@ -80,9 +152,17 @@ pub enum StreamEventKind {
         name: String,
         arguments: String,
     },
+    ToolExecutionCommitted {
+        call_id: CallId,
+        name: String,
+        arguments: String,
+    },
     ToolResult {
         call_id: CallId,
-        result: String,
+        content: Vec<ContentPart>,
+    },
+    Content {
+        part: ContentPart,
     },
     ContextCompacted {
         evicted_count: usize,
@@ -90,6 +170,9 @@ pub enum StreamEventKind {
         summary_bytes: usize,
     },
     Usage(TokenUsage),
+    CompletionMetadata {
+        calls: Vec<CompletionCallMetadata>,
+    },
     Completed {
         message_id: MessageId,
         duration_ms: u64,
@@ -99,7 +182,7 @@ pub enum StreamEventKind {
         cause: InterruptionCause,
     },
     Failed {
-        error: String,
+        failure: ModelFailure,
     },
 }
 

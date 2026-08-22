@@ -1,10 +1,15 @@
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
@@ -65,36 +70,90 @@ struct RegisteredTool {
     owner: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadArgs {
+    pub uri: String,
+    #[schemars(range(min = 1))]
+    pub start_line: Option<u64>,
+    #[schemars(range(min = 1))]
+    pub line_count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FindArgs {
+    pub uri: String,
+    pub glob: Option<String>,
+    pub max_depth: Option<usize>,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GrepArgs {
+    pub uri: String,
+    pub regex: String,
+    pub include_glob: Option<String>,
+    pub context: Option<usize>,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WriteArgs {
+    pub uri: String,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveArgs {
+    pub from: String,
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PollArgs {
+    pub uri: String,
+    #[serde(rename = "match")]
+    #[schemars(rename = "match")]
+    pub pattern: Option<String>,
+    pub timeout_ms: Option<u64>,
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub async fn register(
+    pub fn register(
         &self,
         definition: ToolDefinition,
         handler: Arc<dyn ToolHandler>,
     ) -> Result<(), ToolError> {
-        self.register_inner(definition, handler, None).await
+        self.register_inner(definition, handler, None)
     }
 
-    pub async fn register_owned(
+    pub fn register_owned(
         &self,
         definition: ToolDefinition,
         handler: Arc<dyn ToolHandler>,
         owner: impl Into<String>,
     ) -> Result<(), ToolError> {
         self.register_inner(definition, handler, Some(owner.into()))
-            .await
     }
 
-    async fn register_inner(
+    fn register_inner(
         &self,
         definition: ToolDefinition,
         handler: Arc<dyn ToolHandler>,
         owner: Option<String>,
     ) -> Result<(), ToolError> {
-        let mut tools = self.tools.write().await;
+        let mut tools = self.tools.write().expect("tool registry lock poisoned");
         if tools.contains_key(&definition.name) {
             return Err(ToolError::Failed(format!(
                 "tool already registered: {}",
@@ -112,30 +171,33 @@ impl ToolRegistry {
         Ok(())
     }
 
-    async fn replace(&self, definition: ToolDefinition, handler: Arc<dyn ToolHandler>) {
-        self.tools.write().await.insert(
-            definition.name.clone(),
-            RegisteredTool {
-                definition,
-                handler,
-                owner: None,
-            },
-        );
+    fn replace(&self, definition: ToolDefinition, handler: Arc<dyn ToolHandler>) {
+        self.tools
+            .write()
+            .expect("tool registry lock poisoned")
+            .insert(
+                definition.name.clone(),
+                RegisteredTool {
+                    definition,
+                    handler,
+                    owner: None,
+                },
+            );
     }
 
-    pub async fn definitions(&self) -> Vec<ToolDefinition> {
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .read()
-            .await
+            .expect("tool registry lock poisoned")
             .values()
             .map(|t| t.definition.clone())
             .collect()
     }
 
-    pub async fn owner(&self, name: &str) -> Option<String> {
+    pub fn owner(&self, name: &str) -> Option<String> {
         self.tools
             .read()
-            .await
+            .expect("tool registry lock poisoned")
             .get(name)
             .and_then(|tool| tool.owner.clone())
     }
@@ -161,7 +223,7 @@ impl ToolRegistry {
         let handler = self
             .tools
             .read()
-            .await
+            .expect("tool registry lock poisoned")
             .get(name)
             .cloned()
             .ok_or_else(|| ToolError::Unknown(name.into()))?
@@ -190,26 +252,22 @@ impl UniversalTools {
         self
     }
 
-    pub async fn register(self, registry: &ToolRegistry) -> Result<(), ToolError> {
+    pub fn register(self, registry: &ToolRegistry) -> Result<(), ToolError> {
         let this = Arc::new(self);
         for definition in universal_definitions() {
-            registry.register(definition, this.clone()).await?;
+            registry.register(definition, this.clone())?;
         }
         Ok(())
     }
 
-    pub async fn install(self, registry: &ToolRegistry) {
+    pub fn install(self, registry: &ToolRegistry) {
         let this = Arc::new(self);
         for definition in universal_definitions() {
-            registry.replace(definition, this.clone()).await;
+            registry.replace(definition, this.clone());
         }
     }
 
-    fn uri(&self, value: &Value, key: &str) -> Result<ResourceUri, ToolError> {
-        let text = value
-            .get(key)
-            .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::Arguments(format!("missing string argument: {key}")))?;
+    fn uri(&self, text: &str) -> Result<ResourceUri, ToolError> {
         ResourceUri::resolve(text, &self.working_directory)
             .map_err(|e| ToolError::Arguments(e.to_string()))
     }
@@ -235,22 +293,30 @@ impl ToolHandler for UniversalTools {
             .expect("dispatcher pushed tool name")
             .as_str();
         match name {
-            "read" => reply(
-                self.router
-                    .handle(ResourceRequest::Read {
-                        uri: self.uri(&a, "uri")?,
-                        start_line: u64_arg(&a, "start_line")?,
-                        line_count: u64_arg(&a, "line_count")?,
-                    })
-                    .await?,
-            ),
+            "read" => {
+                let args: ReadArgs = arguments(a)?;
+                if args.start_line == Some(0) || args.line_count == Some(0) {
+                    return Err(ToolError::Arguments(
+                        "start_line and line_count must be positive".into(),
+                    ));
+                }
+                reply(
+                    self.router
+                        .handle(ResourceRequest::Read {
+                            uri: self.uri(&args.uri)?,
+                            start_line: args.start_line,
+                            line_count: args.line_count,
+                        })
+                        .await?,
+                )
+            }
             "write" => {
-                let text = string_arg(&a, "text")?;
+                let args: WriteArgs = arguments(a)?;
                 let result = self
                     .router
                     .handle(ResourceRequest::Write {
-                        uri: self.uri(&a, "uri")?,
-                        text,
+                        uri: self.uri(&args.uri)?,
+                        text: args.text,
                     })
                     .await?;
                 if self.search.is_some() {
@@ -259,15 +325,12 @@ impl ToolHandler for UniversalTools {
                 reply(result)
             }
             "move" => {
-                let to = a
-                    .get("to")
-                    .filter(|v| !v.is_null())
-                    .map(|_| self.uri(&a, "to"))
-                    .transpose()?;
+                let args: MoveArgs = arguments(a)?;
+                let to = args.to.as_deref().map(|to| self.uri(to)).transpose()?;
                 let result = self
                     .router
                     .handle(ResourceRequest::Move {
-                        from: self.uri(&a, "from")?,
+                        from: self.uri(&args.from)?,
                         to,
                     })
                     .await?;
@@ -277,39 +340,43 @@ impl ToolHandler for UniversalTools {
                 reply(result)
             }
             "poll" => {
-                let pattern = a.get("match").and_then(Value::as_str).map(str::to_owned);
-                let timeout = u64_arg(&a, "timeout_ms")?.map(Duration::from_millis);
+                let args: PollArgs = arguments(a)?;
+                let timeout = args.timeout_ms.map(Duration::from_millis);
                 reply(
                     self.router
                         .handle(ResourceRequest::Poll {
-                            uri: self.uri(&a, "uri")?,
-                            pattern,
+                            uri: self.uri(&args.uri)?,
+                            pattern: args.pattern,
                             timeout,
                         })
                         .await?,
                 )
             }
-            "find" => self
-                .search()?
-                .find(
-                    &self.uri(&a, "uri")?,
-                    a.get("glob").and_then(Value::as_str),
-                    u64_arg(&a, "max_depth")?.map(|v| v as usize),
-                    a.get("cursor").and_then(Value::as_str),
-                    u64_arg(&a, "limit")?.map(|v| v as usize).unwrap_or(50),
-                )
-                .map_err(ToolError::Failed),
-            "grep" => self
-                .search()?
-                .grep(
-                    &self.uri(&a, "uri")?,
-                    &string_arg(&a, "regex")?,
-                    a.get("include_glob").and_then(Value::as_str),
-                    u64_arg(&a, "context")?.map(|v| v as usize).unwrap_or(0),
-                    a.get("cursor").and_then(Value::as_str),
-                    u64_arg(&a, "limit")?.map(|v| v as usize).unwrap_or(100),
-                )
-                .map_err(ToolError::Failed),
+            "find" => {
+                let args: FindArgs = arguments(a)?;
+                self.search()?
+                    .find(
+                        &self.uri(&args.uri)?,
+                        args.glob.as_deref(),
+                        args.max_depth,
+                        args.cursor.as_deref(),
+                        args.limit.unwrap_or(50),
+                    )
+                    .map_err(ToolError::Failed)
+            }
+            "grep" => {
+                let args: GrepArgs = arguments(a)?;
+                self.search()?
+                    .grep(
+                        &self.uri(&args.uri)?,
+                        &args.regex,
+                        args.include_glob.as_deref(),
+                        args.context.unwrap_or(0),
+                        args.cursor.as_deref(),
+                        args.limit.unwrap_or(100),
+                    )
+                    .map_err(ToolError::Failed)
+            }
             _ => Err(ToolError::Unknown(name.into())),
         }
     }
@@ -327,39 +394,62 @@ fn reply(reply: ResourceReply) -> Result<Value, ToolError> {
     })
 }
 
-fn string_arg(value: &Value, key: &str) -> Result<String, ToolError> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| ToolError::Arguments(format!("missing string argument: {key}")))
-}
-fn u64_arg(value: &Value, key: &str) -> Result<Option<u64>, ToolError> {
-    match value.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(v) => v
-            .as_u64()
-            .map(Some)
-            .ok_or_else(|| ToolError::Arguments(format!("{key} must be an unsigned integer"))),
-    }
+fn arguments<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, ToolError> {
+    serde_json::from_value(value).map_err(|error| ToolError::Arguments(error.to_string()))
 }
 
 fn universal_definitions() -> Vec<ToolDefinition> {
-    let object = |required: &[&str], properties: Value| json!({"type":"object", "required": required, "properties": properties, "additionalProperties": false});
     vec![
-        ToolDefinition { name: "read".into(), description: "Read UTF-8 text from a resource URI.".into(), input_schema: object(&["uri"], json!({"uri":{"type":"string"},"start_line":{"type":"integer","minimum":1},"line_count":{"type":"integer","minimum":1}})) },
-        ToolDefinition { name: "find".into(), description: "Find descendants of a resource URI. With no glob and depth one, lists immediate children.".into(), input_schema: object(&["uri"], json!({"uri":{"type":"string"},"glob":{"type":"string"},"max_depth":{"type":"integer"},"cursor":{"type":"string"},"limit":{"type":"integer"}})) },
-        ToolDefinition { name: "grep".into(), description: "Search text resources with a regular expression.".into(), input_schema: object(&["uri","regex"], json!({"uri":{"type":"string"},"regex":{"type":"string"},"include_glob":{"type":"string"},"context":{"type":"integer"},"cursor":{"type":"string"},"limit":{"type":"integer"}})) },
-        ToolDefinition { name: "write".into(), description: "Write UTF-8 text to a resource URI.".into(), input_schema: object(&["uri","text"], json!({"uri":{"type":"string"},"text":{"type":"string"}})) },
-        ToolDefinition { name: "move".into(), description: "Move a resource, or remove it when `to` is null.".into(), input_schema: object(&["from"], json!({"from":{"type":"string"},"to":{"type":["string","null"]}})) },
-        ToolDefinition { name: "poll".into(), description: "Wait for subsequently appended text, a match, close, or timeout.".into(), input_schema: object(&["uri"], json!({"uri":{"type":"string"},"match":{"type":"string"},"timeout_ms":{"type":"integer"}})) },
+        definition::<ReadArgs>("read", "Read UTF-8 text from a resource URI."),
+        definition::<FindArgs>(
+            "find",
+            "Find descendants of a resource URI. With no glob and depth one, lists immediate children.",
+        ),
+        definition::<GrepArgs>("grep", "Search text resources with a regular expression."),
+        definition::<WriteArgs>("write", "Write UTF-8 text to a resource URI."),
+        definition::<MoveArgs>("move", "Move a resource, or remove it when `to` is null."),
+        definition::<PollArgs>(
+            "poll",
+            "Wait for subsequently appended text, a match, close, or timeout.",
+        ),
     ]
+}
+
+fn definition<T: JsonSchema>(name: &str, description: &str) -> ToolDefinition {
+    ToolDefinition {
+        name: name.into(),
+        description: description.into(),
+        input_schema: serde_json::to_value(schemars::schema_for!(T))
+            .expect("JSON schema is serializable"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn universal_schemas_are_derived_closed_contracts() {
+        let definitions = universal_definitions();
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["read", "find", "grep", "write", "move", "poll"]
+        );
+        for definition in &definitions {
+            assert_eq!(definition.input_schema["additionalProperties"], false);
+        }
+        assert_eq!(definitions[0].input_schema["required"], json!(["uri"]));
+        assert_eq!(
+            definitions[2].input_schema["required"],
+            json!(["uri", "regex"])
+        );
+        assert!(arguments::<ReadArgs>(json!({"uri":"x", "extra": true})).is_err());
+        assert!(arguments::<GrepArgs>(json!({"uri":"x"})).is_err());
+    }
     struct Nested {
         registry: ToolRegistry,
         next: &'static str,
@@ -388,7 +478,6 @@ mod tests {
                     next: "b",
                 }),
             )
-            .await
             .unwrap();
         registry
             .register(
@@ -402,7 +491,6 @@ mod tests {
                     next: "a",
                 }),
             )
-            .await
             .unwrap();
         assert!(
             matches!(registry.call("a", json!({})).await, Err(ToolError::Recursive { cycle }) if cycle == "a -> b -> a")
@@ -444,7 +532,6 @@ mod tests {
                         seen: seen.clone(),
                     }),
                 )
-                .await
                 .unwrap();
         }
         assert_eq!(

@@ -98,7 +98,7 @@ name = "artist-observe"
 version = "0.1.0"
 dependencies = [
  "artist-core",
- "rig-tap",
+ "serde",
  "tokio",
 ]
 
@@ -128,6 +128,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "regex",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -149,7 +150,7 @@ dependencies = [
  "async-trait",
  "futures",
  "rig-agent",
- "rig-core 0.42.0",
+ "rig-core",
  "rig-memory",
  "serde_json",
  "tokio",
@@ -1909,15 +1910,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanoid"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ffa00dec017b5b1a8b7cf5e2c008bfda1aa7e0697ac1508b491fdf2622fb4d8"
-dependencies = [
- "rand 0.8.7",
-]
-
-[[package]]
 name = "neo_frizbee"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2596,7 +2588,7 @@ dependencies = [
  "futures",
  "http",
  "indexmap",
- "rig-core 0.42.0",
+ "rig-core",
  "schemars",
  "serde",
  "serde_json",
@@ -2604,38 +2596,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-futures",
-]
-
-[[package]]
-name = "rig-core"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6bd308c89a90f89ce7cd6641a078c7d2a2c55fb5a4147fd48b5a0989c3430bd"
-dependencies = [
- "as-any",
- "async-stream",
- "base64",
- "bytes",
- "eventsource-stream",
- "fastrand",
- "futures",
- "futures-timer",
- "glob",
- "http",
- "mime",
- "mime_guess",
- "nanoid",
- "ordered-float",
- "pin-project-lite",
- "reqwest",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-futures",
- "url",
 ]
 
 [[package]]
@@ -2678,20 +2638,7 @@ version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed56015accac541e4a28eccc4fa63f878d5ce0d235b47aff3971d5dd1072e539"
 dependencies = [
- "rig-core 0.42.0",
- "tracing",
-]
-
-[[package]]
-name = "rig-tap"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85a5354ddca67090e11298176a0b07c6cb6555c4100028296cda6f0d388ea3f2"
-dependencies = [
- "rig-core 0.37.0",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
+ "rig-core",
  "tracing",
 ]
 

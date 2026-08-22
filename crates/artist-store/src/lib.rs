@@ -11,7 +11,9 @@ use std::{
     },
 };
 
-use artist_core::{InitialContext, RECORD_VERSION, SessionId, SessionRecord, TranscriptEntry};
+use artist_core::{
+    InitialContext, RECORD_VERSION, SessionId, SessionRecord, TranscriptEntry, V2TranscriptEntry,
+};
 use async_trait::async_trait;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -346,6 +348,31 @@ struct BatchPayload {
     previous_hash: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "frame", rename_all = "snake_case")]
+enum V2Frame {
+    Header {
+        format_version: u32,
+        record_version: u32,
+        session_id: SessionId,
+        initial_context: InitialContext,
+        hash: String,
+    },
+    Batch {
+        expected_sequence: u64,
+        entries: Vec<V2TranscriptEntry>,
+        previous_hash: String,
+        hash: String,
+    },
+}
+
+#[derive(Serialize)]
+struct V2BatchPayload {
+    expected_sequence: u64,
+    entries: Vec<V2TranscriptEntry>,
+    previous_hash: String,
+}
+
 fn encode_full(record: &SessionRecord) -> Result<(Vec<u8>, String), StoreError> {
     let header = HeaderPayload {
         format_version: FILE_FORMAT_VERSION,
@@ -412,6 +439,18 @@ fn decode_v2(
     valid_len: u64,
     expected_id: &SessionId,
 ) -> Result<Cached, StoreError> {
+    let first = bytes
+        .split(|byte| *byte == b'\n')
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| StoreError::Corrupt("missing header frame".into()))?;
+    let marker: serde_json::Value = serde_json::from_slice(first)?;
+    if marker
+        .get("record_version")
+        .and_then(|value| value.as_u64())
+        == Some(2)
+    {
+        return decode_record_v2(bytes, file_len, valid_len, expected_id);
+    }
     let mut lines = bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty());
@@ -480,6 +519,84 @@ fn decode_v2(
         record,
         last_hash,
         legacy: false,
+    })
+}
+
+fn decode_record_v2(
+    bytes: &[u8],
+    file_len: u64,
+    valid_len: u64,
+    expected_id: &SessionId,
+) -> Result<Cached, StoreError> {
+    let mut lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty());
+    let Some(V2Frame::Header {
+        format_version,
+        record_version,
+        session_id,
+        initial_context,
+        hash: stored_hash,
+    }) = lines.next().map(serde_json::from_slice).transpose()?
+    else {
+        return Err(StoreError::Corrupt("first frame is not a header".into()));
+    };
+    if format_version != FILE_FORMAT_VERSION || record_version != 2 {
+        return Err(StoreError::Corrupt(format!(
+            "unsupported file/record version {format_version}/{record_version}"
+        )));
+    }
+    if &session_id != expected_id {
+        return Err(StoreError::Corrupt("session ID mismatch".into()));
+    }
+    let expected_hash = hash(&HeaderPayload {
+        format_version,
+        record_version,
+        session_id: session_id.clone(),
+        initial_context: initial_context.clone(),
+    })?;
+    if stored_hash != expected_hash {
+        return Err(StoreError::Corrupt("header hash mismatch".into()));
+    }
+    let mut entries = Vec::new();
+    let mut last_hash = stored_hash;
+    for bytes in lines {
+        let V2Frame::Batch {
+            expected_sequence,
+            entries: batch,
+            previous_hash,
+            hash: stored_hash,
+        } = serde_json::from_slice(bytes)?
+        else {
+            return Err(StoreError::Corrupt("header appears after log start".into()));
+        };
+        if previous_hash != last_hash {
+            return Err(StoreError::Corrupt("broken frame hash chain".into()));
+        }
+        let expected_hash = hash(&V2BatchPayload {
+            expected_sequence,
+            entries: batch.clone(),
+            previous_hash: previous_hash.clone(),
+        })?;
+        if stored_hash != expected_hash {
+            return Err(StoreError::Corrupt("batch hash mismatch".into()));
+        }
+        if entries.len() as u64 != expected_sequence {
+            return Err(StoreError::Corrupt(format!(
+                "batch expected {expected_sequence}, preceding tail is {}",
+                entries.len()
+            )));
+        }
+        entries.extend(batch);
+        last_hash = stored_hash;
+    }
+    let record = SessionRecord::from_v2_parts(session_id, initial_context, entries)?;
+    Ok(Cached {
+        file_len,
+        valid_len,
+        record,
+        last_hash,
+        legacy: true,
     })
 }
 
@@ -590,7 +707,10 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artist_core::{MessageId, RunId, Source, TranscriptEntryKind};
+    use artist_core::{
+        CallId, ContentPart, EventId, MessageId, RunId, Source, TranscriptEntryKind,
+        V2TranscriptEntryKind,
+    };
 
     fn empty(id: &str) -> SessionRecord {
         SessionRecord::new(SessionId::from(id), InitialContext { fragments: vec![] })
@@ -634,6 +754,91 @@ mod tests {
     async fn file_round_trip() {
         let temporary = tempfile::tempdir().unwrap();
         round_trip(FileStore::new(temporary.path()).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn hash_chained_v2_frames_are_validated_and_migrated() {
+        let temporary = tempfile::tempdir().unwrap();
+        let session_id = SessionId::from("framed-v2");
+        let initial_context = InitialContext { fragments: vec![] };
+        let header_payload = HeaderPayload {
+            format_version: FILE_FORMAT_VERSION,
+            record_version: 2,
+            session_id: session_id.clone(),
+            initial_context: initial_context.clone(),
+        };
+        let header_hash = hash(&header_payload).unwrap();
+        let entries = vec![
+            V2TranscriptEntry {
+                event_id: EventId::from("framed-v2:event:0"),
+                sequence: 0,
+                kind: V2TranscriptEntryKind::Input {
+                    message_id: MessageId::from("input"),
+                    source: Source::User,
+                    content: "hello".into(),
+                },
+            },
+            V2TranscriptEntry {
+                event_id: EventId::from("framed-v2:event:1"),
+                sequence: 1,
+                kind: V2TranscriptEntryKind::RunStarted {
+                    run_id: RunId::from("run"),
+                    input_id: MessageId::from("input"),
+                },
+            },
+            V2TranscriptEntry {
+                event_id: EventId::from("framed-v2:event:2"),
+                sequence: 2,
+                kind: V2TranscriptEntryKind::ToolCall {
+                    run_id: RunId::from("run"),
+                    call_id: CallId::from("call"),
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+            },
+            V2TranscriptEntry {
+                event_id: EventId::from("framed-v2:event:3"),
+                sequence: 3,
+                kind: V2TranscriptEntryKind::ToolResult {
+                    run_id: RunId::from("run"),
+                    call_id: CallId::from("call"),
+                    result: "body".into(),
+                },
+            },
+        ];
+        let batch_payload = V2BatchPayload {
+            expected_sequence: 0,
+            entries: entries.clone(),
+            previous_hash: header_hash.clone(),
+        };
+        let batch_hash = hash(&batch_payload).unwrap();
+        let mut bytes = line(&V2Frame::Header {
+            format_version: FILE_FORMAT_VERSION,
+            record_version: 2,
+            session_id: session_id.clone(),
+            initial_context,
+            hash: header_hash.clone(),
+        })
+        .unwrap();
+        bytes.extend(
+            line(&V2Frame::Batch {
+                expected_sequence: 0,
+                entries,
+                previous_hash: header_hash,
+                hash: batch_hash,
+            })
+            .unwrap(),
+        );
+        std::fs::write(FileStore::path(temporary.path(), &session_id), bytes).unwrap();
+
+        let store = FileStore::new(temporary.path()).await.unwrap();
+        let record = store.load(&session_id).await.unwrap();
+        assert_eq!(record.version(), RECORD_VERSION);
+        assert!(matches!(
+            &record.entries()[3].kind,
+            TranscriptEntryKind::ToolResult { content, .. }
+                if content == &vec![ContentPart::text("body")]
+        ));
     }
 
     #[tokio::test]

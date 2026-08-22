@@ -155,7 +155,7 @@ Keep each plugin narrow. The host should only coordinate plugins, not duplicate 
 
 ## Slice 10: Unified observability and hardening
 
-Connect kernel, Rig, memory, and plugin activity to `rig-tap`.
+Connect kernel, Rig, memory, and plugin activity to Artist-owned observation sinks.
 
 - Preserve session, run, tool-call, and provider correlation IDs.
 - Emit timing, token usage, failures, interruptions, compactions, and plugin calls.

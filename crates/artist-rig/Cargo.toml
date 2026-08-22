@@ -15,9 +15,9 @@ rig-agent.workspace = true
 rig-core = { workspace = true, features = ["reqwest", "rustls"] }
 rig-memory.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 artist-store = { path = "../artist-store" }
 async-trait.workspace = true
 rig-agent = { workspace = true, features = ["test-utils"] }
-tokio.workspace = true

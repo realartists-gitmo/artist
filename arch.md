@@ -1,5 +1,6 @@
 https://rig.rs/ -- MANDATORY
-https://github.com/ForeverAngry/rig-tap
+Observability uses Artist-owned events and sinks; it must not depend on a
+second, version-skewed Rig adapter.
 
 You are not permitted to inspect the git history of this project.
 
@@ -55,7 +56,7 @@ index over the complete mount. URI queries appear as separate Unix names such as
 `rust.rs?symbols/`; shells start in the projected `file` subtree and receive the
 mount root as `ARTIST_ROOT`. FUSE attributes exist only to satisfy the kernel.
 
-The component ABI is `artist:plugin@0.3.0`. Tool providers and resource
+The component ABI is `artist:plugin@0.4.0`. Tool providers and resource
 providers are separate exports; prompt, context, hooks, model configuration,
 and event lifecycle exports remain intact. The default component supplies the
 terminal filesystem route, while the host owns native filesystem mechanics,

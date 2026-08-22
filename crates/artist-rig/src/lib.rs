@@ -1,8 +1,17 @@
 //! Rig adapter for the Artist streaming kernel.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
-use artist_core::{CallId, TokenUsage};
+use artist_core::{
+    CallId, CompletionCallMetadata, ContentPart, FailureClass, FinishReason as ArtistFinishReason,
+    ModelFailure, TokenUsage,
+};
 use artist_kernel::{
     ModelError, ModelEvent, ModelHistoryItem, ModelMessage, ModelRequest, ModelStream, Steering,
     StreamingModel,
@@ -11,14 +20,16 @@ use artist_resource::ToolRegistry;
 use futures::StreamExt;
 use rig_agent::{
     Agent, AgentBuilder, AgentHook, HookContext,
-    agent::{CompletionCallAction, CompletionCallEvent, RequestPatch},
-    completion::Document,
+    agent::{CompletionCallAction, CompletionCallEvent, RequestPatch, StreamingError},
+    completion::{Document, PromptError},
     prelude::MultiTurnStreamItem,
     tool::{DynamicTool, ToolExecutionError, ToolOutput},
 };
 use rig_core::{
-    completion::{AssistantContent, CompletionModel, Message},
-    message::{ToolCall, ToolCallId, ToolFunction, ToolResultContent},
+    completion::{AssistantContent, CompletionError, CompletionModel, FinishReason, Message},
+    message::{
+        Image, Reasoning, ToolCall, ToolCallId, ToolFunction, ToolResultContent, UserContent,
+    },
     streaming::{StreamedAssistantContent, StreamedUserContent},
 };
 use rig_memory::{
@@ -30,6 +41,7 @@ pub struct RigModel {
     agent: Agent,
     policy: Arc<dyn MemoryPolicy>,
     compact: bool,
+    tool_concurrency: usize,
 }
 
 impl RigModel {
@@ -42,13 +54,12 @@ impl RigModel {
 
     /// Build a streaming Rig model with every current registry entry exposed
     /// through Rig's runtime-defined tool surface.
-    pub async fn with_registry<M>(model: M, registry: ToolRegistry) -> Self
+    pub fn with_registry<M>(model: M, registry: ToolRegistry) -> Self
     where
         M: CompletionModel + 'static,
     {
         let tools = registry
             .definitions()
-            .await
             .into_iter()
             .map(|definition| {
                 let registry = registry.clone();
@@ -84,6 +95,7 @@ impl RigModel {
             agent,
             policy: Arc::new(NoopMemoryPolicy),
             compact: false,
+            tool_concurrency: 1,
         }
     }
 
@@ -119,6 +131,13 @@ impl RigModel {
         self.compact = true;
         self
     }
+
+    /// Opt in to parallel execution of a turn's tool calls. The default is
+    /// one so side-effecting tools remain serial unless explicitly configured.
+    pub fn tool_concurrency(mut self, concurrency: usize) -> Self {
+        self.tool_concurrency = concurrency.max(1);
+        self
+    }
 }
 
 impl StreamingModel for RigModel {
@@ -126,64 +145,117 @@ impl StreamingModel for RigModel {
         let agent = self.agent.clone();
         let policy = self.policy.clone();
         let compact = self.compact;
+        let tool_concurrency = self.tool_concurrency;
         Box::pin(async_stream::stream! {
             let sequences: Vec<_> = request.history.iter().map(|item| item.sequence).collect();
-            let (mut history, demoted) = match to_rig_history(request.history).and_then(|history| {
-                policy.apply_with_demoted(history).map_err(|error| ModelError(error.to_string()))
-            }) {
+            let history = match to_rig_history(request.history) {
                 Ok(history) => history,
                 Err(error) => {
                     yield Err(error);
                     return;
                 }
             };
-            if compact && !demoted.is_empty() {
-                let evicted_count = demoted.len();
-                let evicted_bytes = serde_json::to_vec(&demoted).map_or(0, |bytes| bytes.len());
-                let artifact = match TemplateCompactor::new()
-                    .compact(request.session_id.as_str(), &demoted, None)
-                    .await
-                {
-                    Ok(artifact) => artifact,
-                    Err(error) => {
-                        yield Err(ModelError(error.to_string()));
-                        return;
-                    }
-                };
-                let Some(through_sequence) = sequences.get(evicted_count - 1).copied() else {
-                    yield Err(ModelError("memory policy returned an invalid demoted prefix".into()));
-                    return;
-                };
-                history.insert(0, artifact.clone().into());
-                yield Ok(ModelEvent::ContextCompacted {
-                    through_sequence,
-                    evicted_count,
-                    evicted_bytes,
-                    artifact: artifact.into_string(),
-                });
-            }
+            let (memory_events, mut memory_rx) = tokio::sync::mpsc::unbounded_channel();
             let mut stream = agent
                 .runner(Message::user(request.prompt))
+                .tool_concurrency(tool_concurrency)
                 .preamble(request.context)
                 .history(history)
+                .add_hook(HistoryHook {
+                    policy,
+                    compact,
+                    session_id: request.session_id.to_string(),
+                    sequences,
+                    emitted_compaction: Arc::new(AtomicBool::new(false)),
+                    events: memory_events,
+                })
                 .add_hook(SteeringHook(steering))
                 .stream()
                 .await;
 
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(item) => {
-                        for event in translate(item) {
-                            yield Ok(event);
+            loop {
+                tokio::select! {
+                    biased;
+                    Some(event) = memory_rx.recv() => yield event,
+                    item = stream.next() => match item {
+                        Some(Ok(item)) => {
+                            for event in translate(item) {
+                                yield Ok(event);
+                            }
                         }
-                    }
-                    Err(error) => {
-                        yield Err(ModelError(error.to_string()));
-                        return;
-                    }
+                        Some(Err(error)) => {
+                            // Rig 0.42's AgentRunner emits errors only at
+                            // terminal sites (each yield is followed by a
+                            // return), so no recoverable stream item remains
+                            // to drain after this boundary.
+                            yield Err(model_error(&error));
+                            return;
+                        }
+                        None => break,
+                    },
                 }
             }
+            while let Ok(event) = memory_rx.try_recv() {
+                yield event;
+            }
         })
+    }
+}
+
+struct HistoryHook {
+    policy: Arc<dyn MemoryPolicy>,
+    compact: bool,
+    session_id: String,
+    sequences: Vec<u64>,
+    emitted_compaction: Arc<AtomicBool>,
+    events: tokio::sync::mpsc::UnboundedSender<Result<ModelEvent, ModelError>>,
+}
+
+impl AgentHook for HistoryHook {
+    fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        event: CompletionCallEvent<'_>,
+    ) -> impl Future<Output = CompletionCallAction> + Send {
+        let policy = self.policy.clone();
+        let compact = self.compact;
+        let session_id = self.session_id.clone();
+        let sequences = self.sequences.clone();
+        let emitted = self.emitted_compaction.clone();
+        let events = self.events.clone();
+        let history = event.history.to_vec();
+        async move {
+            let (mut retained, demoted) = match policy.apply_with_demoted(history) {
+                Ok(shaped) => shaped,
+                Err(error) => return CompletionCallAction::stop(error.to_string()),
+            };
+            if compact && !demoted.is_empty() {
+                let evicted_count = demoted.len();
+                let evicted_bytes = serde_json::to_vec(&demoted).map_or(0, |bytes| bytes.len());
+                let artifact = match TemplateCompactor::new()
+                    .compact(&session_id, &demoted, None)
+                    .await
+                {
+                    Ok(artifact) => artifact,
+                    Err(error) => return CompletionCallAction::stop(error.to_string()),
+                };
+                retained.insert(0, artifact.clone().into());
+                if !emitted.swap(true, Ordering::AcqRel) {
+                    let through_sequence = sequences
+                        .get(evicted_count.saturating_sub(1))
+                        .copied()
+                        .or_else(|| sequences.last().copied())
+                        .unwrap_or(0);
+                    let _ = events.send(Ok(ModelEvent::ContextCompacted {
+                        through_sequence,
+                        evicted_count,
+                        evicted_bytes,
+                        artifact: artifact.into_string(),
+                    }));
+                }
+            }
+            CompletionCallAction::patch(RequestPatch::new().history(retained))
+        }
     }
 }
 
@@ -222,7 +294,13 @@ fn to_rig_history(history: Vec<ModelHistoryItem>) -> Result<Vec<Message>, ModelE
         .into_iter()
         .map(|item| match item.message {
             ModelMessage::User(text) => Ok(Message::user(text)),
-            ModelMessage::Assistant(text) => Ok(Message::assistant(text)),
+            ModelMessage::Assistant(content) => Ok(Message::Assistant {
+                id: None,
+                content: content
+                    .into_iter()
+                    .map(to_rig_assistant_content)
+                    .collect::<Result<Vec<_>, _>>()?,
+            }),
             ModelMessage::Notification(text) => Ok(Message::user(format!("[Notification] {text}"))),
             ModelMessage::ToolCall {
                 call_id,
@@ -230,7 +308,7 @@ fn to_rig_history(history: Vec<ModelHistoryItem>) -> Result<Vec<Message>, ModelE
                 arguments,
             } => {
                 let arguments = serde_json::from_str(&arguments).map_err(|error| {
-                    ModelError(format!("invalid stored tool arguments: {error}"))
+                    ModelError::new(format!("invalid stored tool arguments: {error}"))
                 })?;
                 names.insert(call_id.clone(), name.clone());
                 Ok(Message::Assistant {
@@ -241,16 +319,53 @@ fn to_rig_history(history: Vec<ModelHistoryItem>) -> Result<Vec<Message>, ModelE
                     ))],
                 })
             }
-            ModelMessage::ToolResult { call_id, result } => {
+            ModelMessage::ToolResult { call_id, content } => {
                 let name = names.get(&call_id).cloned().ok_or_else(|| {
-                    ModelError(format!(
+                    ModelError::new(format!(
                         "stored tool result has no matching call: {call_id}"
                     ))
                 })?;
-                Ok(Message::tool_result(call_id.to_string(), name, result))
+                let content = content
+                    .into_iter()
+                    .map(to_rig_tool_result)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Message::User {
+                    content: vec![UserContent::tool_result(call_id.to_string(), name, content)],
+                })
             }
         })
         .collect()
+}
+
+fn to_rig_assistant_content(part: ContentPart) -> Result<AssistantContent, ModelError> {
+    match part {
+        ContentPart::Text { text } => Ok(AssistantContent::text(text)),
+        ContentPart::Image { value } => serde_json::from_value::<Image>(value)
+            .map(AssistantContent::Image)
+            .map_err(|error| ModelError::new(format!("invalid stored assistant image: {error}"))),
+        ContentPart::Reasoning { value } => serde_json::from_value::<Reasoning>(value)
+            .map(AssistantContent::Reasoning)
+            .map_err(|error| ModelError::new(format!("invalid stored reasoning: {error}"))),
+        ContentPart::Json { .. } | ContentPart::Opaque { .. } => Err(ModelError::new(
+            "stored assistant content cannot be represented by Rig 0.42",
+        )),
+    }
+}
+
+fn to_rig_tool_result(part: ContentPart) -> Result<ToolResultContent, ModelError> {
+    match part {
+        ContentPart::Text { text } => Ok(ToolResultContent::text(text)),
+        ContentPart::Json { value } => Ok(ToolResultContent::Json { value }),
+        ContentPart::Image { value } => serde_json::from_value::<Image>(value)
+            .map(ToolResultContent::Image)
+            .map_err(|error| ModelError::new(format!("invalid stored image content: {error}"))),
+        ContentPart::Reasoning { value } => Ok(ToolResultContent::Json {
+            value: serde_json::json!({ "artist_content_type": "reasoning", "value": value }),
+        }),
+        ContentPart::Opaque { kind, value } => Ok(ToolResultContent::Json {
+            value: serde_json::json!({ "artist_content_type": "opaque", "kind": kind, "value": value }),
+        }),
+    }
 }
 
 fn translate(item: MultiTurnStreamItem) -> Vec<ModelEvent> {
@@ -272,28 +387,47 @@ fn translate(item: MultiTurnStreamItem) -> Vec<ModelEvent> {
                 call_id: CallId::new(internal_call_id),
                 delta: serde_json::to_string(&content).unwrap_or_default(),
             }],
-            StreamedAssistantContent::Reasoning { .. }
-            | StreamedAssistantContent::ReasoningDelta { .. }
-            | StreamedAssistantContent::Final(_)
-            | StreamedAssistantContent::Unknown(_) => vec![],
+            StreamedAssistantContent::Reasoning { reasoning, .. } => {
+                vec![ModelEvent::Content(ContentPart::Reasoning {
+                    value: serde_json::to_value(reasoning).unwrap_or(serde_json::Value::Null),
+                })]
+            }
+            StreamedAssistantContent::ReasoningDelta {
+                id,
+                provider_id,
+                reasoning,
+            } => vec![ModelEvent::Content(ContentPart::Opaque {
+                kind: "reasoning_delta".into(),
+                value: serde_json::json!({
+                    "id": id,
+                    "provider_id": provider_id,
+                    "text": reasoning,
+                }),
+            })],
+            StreamedAssistantContent::Unknown(payload) => {
+                vec![ModelEvent::Content(ContentPart::Opaque {
+                    kind: "provider_native".into(),
+                    value: payload.value().clone(),
+                })]
+            }
+            StreamedAssistantContent::Final(_) => vec![],
         },
         MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
             tool_result,
             internal_call_id,
         }) => vec![ModelEvent::ToolResult {
             call_id: CallId::new(internal_call_id),
-            result: tool_result
+            content: tool_result
                 .content
                 .into_iter()
                 .map(|content| match content {
-                    ToolResultContent::Text(text) => text.text,
-                    ToolResultContent::Json { value } => value.to_string(),
-                    ToolResultContent::Image(image) => {
-                        serde_json::to_string(&image).unwrap_or_default()
-                    }
+                    ToolResultContent::Text(text) => ContentPart::Text { text: text.text },
+                    ToolResultContent::Json { value } => ContentPart::Json { value },
+                    ToolResultContent::Image(image) => ContentPart::Image {
+                        value: serde_json::to_value(image).unwrap_or(serde_json::Value::Null),
+                    },
                 })
-                .collect::<Vec<_>>()
-                .join("\n"),
+                .collect(),
         }],
         MultiTurnStreamItem::ModelTurnRetried { .. } => vec![ModelEvent::TextReset],
         MultiTurnStreamItem::FinalResponse(response) => vec![
@@ -303,12 +437,114 @@ fn translate(item: MultiTurnStreamItem) -> Vec<ModelEvent> {
                 cached_input: response.usage.cached_input_tokens,
                 reasoning: response.usage.reasoning_tokens,
             }),
+            ModelEvent::CompletionMetadata(
+                response
+                    .completion_calls
+                    .into_iter()
+                    .map(|call| CompletionCallMetadata {
+                        call_index: call.call_index,
+                        finish_reason: call.finish_reason.map(finish_reason),
+                        message_id: call.message_id,
+                        response_id: call.response_id,
+                        provider_request_id: call.provider_request_id,
+                    })
+                    .collect(),
+            ),
             ModelEvent::Finished {
                 output: Some(response.output),
             },
         ],
-        MultiTurnStreamItem::ToolExecutionCommitted { .. }
-        | MultiTurnStreamItem::CompletionCall(_) => vec![],
+        MultiTurnStreamItem::ToolExecutionCommitted {
+            tool_call,
+            internal_call_id,
+        } => vec![ModelEvent::ToolExecutionCommitted {
+            call_id: CallId::new(internal_call_id),
+            name: tool_call.function.name,
+            arguments: tool_call.function.arguments.to_string(),
+        }],
+        MultiTurnStreamItem::CompletionCall(_) => vec![],
+    }
+}
+
+fn finish_reason(reason: FinishReason) -> ArtistFinishReason {
+    match reason {
+        FinishReason::Stop => ArtistFinishReason::Stop,
+        FinishReason::Length => ArtistFinishReason::Length,
+        FinishReason::ToolCalls => ArtistFinishReason::ToolCalls,
+        FinishReason::ContentFilter => ArtistFinishReason::ContentFilter,
+        FinishReason::Other(reason) => ArtistFinishReason::Other(reason),
+    }
+}
+
+fn model_error(error: &StreamingError) -> ModelError {
+    let completion = match error {
+        StreamingError::Completion(error) => Some(error),
+        StreamingError::Prompt(error) => match error.as_ref() {
+            PromptError::CompletionError(error) => Some(error),
+            _ => None,
+        },
+    };
+    let status = completion
+        .and_then(CompletionError::provider_response_status)
+        .map(|status| status.as_u16());
+    let provider_request_id = match error {
+        StreamingError::Completion(error) => error.provider_request_id(),
+        StreamingError::Prompt(error) => error.provider_request_id(),
+    }
+    .map(str::to_owned);
+    let provider_code = completion
+        .and_then(|error| error.provider_response_json().ok().flatten())
+        .and_then(|body| {
+            body.pointer("/error/code")
+                .or_else(|| body.get("code"))
+                .and_then(|code| match code {
+                    serde_json::Value::String(code) => Some(code.clone()),
+                    serde_json::Value::Number(code) => Some(code.to_string()),
+                    _ => None,
+                })
+        });
+    let class = match error {
+        StreamingError::Completion(error) => completion_error_class(error),
+        StreamingError::Prompt(error) => match error.as_ref() {
+            PromptError::CompletionError(error) => completion_error_class(error),
+            PromptError::MemoryError(_) => FailureClass::Memory,
+            PromptError::MaxTurnsError { .. } => FailureClass::Limit,
+            PromptError::PromptCancelled { .. } => FailureClass::Cancelled,
+            PromptError::UnknownToolCall { .. } => FailureClass::Tool,
+        },
+    };
+    let retriable = matches!(class, FailureClass::Transport)
+        || status.is_some_and(|status| {
+            status == 408 || status == 409 || status == 425 || status == 429 || status >= 500
+        });
+    ModelError(ModelFailure {
+        message: error.to_string(),
+        class,
+        retriable,
+        provider_code,
+        http_status: status,
+        provider_request_id,
+    })
+}
+
+fn completion_error_class(error: &CompletionError) -> FailureClass {
+    match error {
+        CompletionError::HttpError(_) => {
+            if error.provider_response_status().is_some() {
+                FailureClass::Provider
+            } else {
+                FailureClass::Transport
+            }
+        }
+        CompletionError::JsonError(_) | CompletionError::ResponseError(_) => {
+            FailureClass::InvalidResponse
+        }
+        CompletionError::UrlError(_) | CompletionError::RequestError(_) => {
+            FailureClass::InvalidRequest
+        }
+        CompletionError::ProviderError(_) | CompletionError::ProviderResponse(_) => {
+            FailureClass::Provider
+        }
     }
 }
 
@@ -328,7 +564,7 @@ mod tests {
     use rig_agent::test_utils::{MockCompletionModel, MockError, MockStreamEvent, mock_final};
     use serde_json::{Value, json};
     use std::{
-        sync::atomic::{AtomicBool, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         time::Duration,
     };
     use tokio::sync::{Semaphore, broadcast};
@@ -342,7 +578,7 @@ mod tests {
             },
             ModelHistoryItem {
                 sequence: 1,
-                message: ModelMessage::Assistant("hi".into()),
+                message: ModelMessage::Assistant(vec![ContentPart::text("hi")]),
             },
         ];
         assert_eq!(
@@ -366,7 +602,7 @@ mod tests {
                 sequence: 1,
                 message: ModelMessage::ToolResult {
                     call_id: CallId::from("call"),
-                    result: "body".into(),
+                    content: vec![ContentPart::text("body")],
                 },
             },
         ];
@@ -378,15 +614,95 @@ mod tests {
             sequence: 0,
             message: ModelMessage::ToolResult {
                 call_id: CallId::from("missing"),
-                result: "body".into(),
+                content: vec![ContentPart::text("body")],
             },
         }];
         assert!(
             to_rig_history(orphan)
                 .unwrap_err()
                 .0
+                .message
                 .contains("no matching call")
         );
+    }
+
+    #[test]
+    fn rich_content_round_trips_through_rig_history_adaptation() {
+        let image = Image::default();
+        let parts = vec![
+            ContentPart::text("literal"),
+            ContentPart::Json {
+                value: json!({"answer": 42}),
+            },
+            ContentPart::Image {
+                value: serde_json::to_value(&image).unwrap(),
+            },
+            ContentPart::Opaque {
+                kind: "provider_native".into(),
+                value: json!({"id": "native"}),
+            },
+        ];
+        let converted = parts
+            .clone()
+            .into_iter()
+            .map(to_rig_tool_result)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(matches!(&converted[0], ToolResultContent::Text(text) if text.text == "literal"));
+        assert!(
+            matches!(&converted[1], ToolResultContent::Json { value } if value == &json!({"answer": 42}))
+        );
+        assert!(matches!(&converted[2], ToolResultContent::Image(value) if value == &image));
+        assert!(matches!(
+            &converted[3],
+            ToolResultContent::Json { value }
+                if value == &json!({
+                    "artist_content_type": "opaque",
+                    "kind": "provider_native",
+                    "value": {"id": "native"}
+                })
+        ));
+
+        let reasoning = Reasoning::new_with_signature("thinking", Some("signature".into()));
+        let assistant = to_rig_assistant_content(ContentPart::Reasoning {
+            value: serde_json::to_value(&reasoning).unwrap(),
+        })
+        .unwrap();
+        assert!(matches!(assistant, AssistantContent::Reasoning(value) if value == reasoning));
+    }
+
+    #[test]
+    fn reasoning_and_unknown_stream_parts_are_not_discarded() {
+        let reasoning = Reasoning::new("thinking");
+        assert!(matches!(
+            translate(MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::Reasoning {
+                    reasoning,
+                    id: "reasoning-part".into(),
+                }
+            ))
+            .as_slice(),
+            [ModelEvent::Content(ContentPart::Reasoning { .. })]
+        ));
+        assert!(matches!(
+            translate(MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::Unknown(rig_core::streaming::UnknownPayload::new(
+                    json!({"type": "hosted_tool", "id": "native"})
+                ))
+            )).as_slice(),
+            [ModelEvent::Content(ContentPart::Opaque { kind, value })]
+                if kind == "provider_native" && value["id"] == "native"
+        ));
+    }
+
+    #[test]
+    fn tool_concurrency_is_serial_by_default_and_explicitly_configurable() {
+        let mock = MockCompletionModel::from_stream_turns([vec![MockStreamEvent::FinalResponse(
+            mock_final(rig_core::completion::Usage::new()),
+        )]]);
+        let model = RigModel::new(mock);
+        assert_eq!(model.tool_concurrency, 1);
+        assert_eq!(model.tool_concurrency(3).tool_concurrency, 3);
     }
 
     #[test]
@@ -427,10 +743,100 @@ mod tests {
         let item = MultiTurnStreamItem::final_response(vec![AssistantContent::text("done")], usage);
         let events = translate(item);
         assert!(matches!(events[0], ModelEvent::Usage(_)));
-        assert!(matches!(events[1], ModelEvent::Finished { .. }));
+        assert!(matches!(events[1], ModelEvent::CompletionMetadata(_)));
+        assert!(matches!(events[2], ModelEvent::Finished { .. }));
+    }
+
+    #[test]
+    fn every_normalized_finish_reason_round_trips() {
+        assert_eq!(finish_reason(FinishReason::Stop), ArtistFinishReason::Stop);
+        assert_eq!(
+            finish_reason(FinishReason::Length),
+            ArtistFinishReason::Length
+        );
+        assert_eq!(
+            finish_reason(FinishReason::ToolCalls),
+            ArtistFinishReason::ToolCalls
+        );
+        assert_eq!(
+            finish_reason(FinishReason::ContentFilter),
+            ArtistFinishReason::ContentFilter
+        );
+        assert_eq!(
+            finish_reason(FinishReason::Other("provider_reason".into())),
+            ArtistFinishReason::Other("provider_reason".into())
+        );
+    }
+
+    #[test]
+    fn structured_provider_failure_fields_survive_adapter_projection() {
+        let response = rig_core::ProviderResponseError::new(
+            "429".parse().unwrap(),
+            r#"{"error":{"code":"rate_limited","message":"slow down"}}"#,
+        )
+        .with_provider_request_id(Some("request-7".into()));
+        let error = StreamingError::Completion(CompletionError::ProviderResponse(response));
+        let failure = model_error(&error).0;
+
+        assert_eq!(failure.class, FailureClass::Provider);
+        assert!(failure.retriable);
+        assert_eq!(failure.provider_code.as_deref(), Some("rate_limited"));
+        assert_eq!(failure.http_status, Some(429));
+        assert_eq!(failure.provider_request_id.as_deref(), Some("request-7"));
+    }
+
+    #[test]
+    fn execution_commits_and_terminal_metadata_are_not_discarded() {
+        let call = ToolCall::new(
+            ToolCallId::new_or_mint("provider-call"),
+            ToolFunction {
+                name: "read".into(),
+                arguments: json!({"uri":"file:///tmp/a"}),
+            },
+        );
+        assert!(matches!(
+            translate(MultiTurnStreamItem::ToolExecutionCommitted {
+                tool_call: call,
+                internal_call_id: "internal-call".into(),
+            })
+            .as_slice(),
+            [ModelEvent::ToolExecutionCommitted { call_id, name, .. }]
+                if call_id.as_str() == "internal-call" && name == "read"
+        ));
+
+        let mut response =
+            rig_agent::agent::PromptResponse::new("done", rig_core::completion::Usage::new());
+        let mut metadata =
+            rig_agent::agent::CompletionCall::new(0, rig_core::completion::Usage::new());
+        metadata.finish_reason = Some(FinishReason::Other("provider_reason".into()));
+        metadata.message_id = Some("message".into());
+        metadata.response_id = Some("response".into());
+        metadata.provider_request_id = Some("request".into());
+        response.completion_calls.push(metadata);
+        let events = translate(MultiTurnStreamItem::FinalResponse(response));
+        assert!(matches!(
+            &events[1],
+            ModelEvent::CompletionMetadata(calls)
+                if matches!(calls.as_slice(), [CompletionCallMetadata {
+                    finish_reason: Some(ArtistFinishReason::Other(reason)),
+                    response_id: Some(response_id),
+                    provider_request_id: Some(request_id),
+                    ..
+                }] if reason == "provider_reason" && response_id == "response" && request_id == "request")
+        ));
     }
 
     struct Echo(Arc<AtomicBool>);
+
+    struct CountingPolicy(Arc<AtomicUsize>);
+
+    impl MemoryPolicy for CountingPolicy {
+        fn apply(&self, messages: Vec<Message>) -> Result<Vec<Message>, rig_memory::MemoryError> {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            Ok(messages)
+        }
+    }
+
     #[async_trait]
     impl ToolHandler for Echo {
         async fn call(&self, arguments: Value, _: InvocationContext) -> Result<Value, ToolError> {
@@ -481,6 +887,7 @@ mod tests {
     async fn rig_executes_model_selected_registry_tools() {
         let registry = ToolRegistry::new();
         let called = Arc::new(AtomicBool::new(false));
+        let policy_calls = Arc::new(AtomicUsize::new(0));
         registry
             .register(
                 RegistryDefinition {
@@ -490,7 +897,6 @@ mod tests {
                 },
                 Arc::new(Echo(called.clone())),
             )
-            .await
             .unwrap();
         let model = RigModel::with_registry(
             MockCompletionModel::from_stream_turns([
@@ -502,7 +908,7 @@ mod tests {
             ]),
             registry,
         )
-        .await;
+        .with_policy(CountingPolicy(policy_calls.clone()));
         let events = model
             .stream(
                 ModelRequest {
@@ -518,9 +924,15 @@ mod tests {
             .await;
         assert!(events.iter().all(Result::is_ok), "{events:?}");
         assert!(called.load(Ordering::Acquire));
+        assert_eq!(policy_calls.load(Ordering::Acquire), 2);
         assert!(events.iter().any(|event| matches!(
             event,
-            Ok(ModelEvent::ToolResult { result, .. }) if result.contains("42")
+            Ok(ModelEvent::ToolResult { content, .. })
+                if content.iter().any(|part| match part {
+                    ContentPart::Text { text } => text.contains("42"),
+                    ContentPart::Json { value } => value.to_string().contains("42"),
+                    _ => false,
+                })
         )));
     }
 
@@ -541,7 +953,6 @@ mod tests {
                     release: release.clone(),
                 }),
             )
-            .await
             .unwrap();
         let mock = MockCompletionModel::from_stream_turns([
             vec![
@@ -550,7 +961,7 @@ mod tests {
             ],
             vec![MockStreamEvent::text("done"), final_event()],
         ]);
-        let model = Arc::new(RigModel::with_registry(mock.clone(), registry).await);
+        let model = Arc::new(RigModel::with_registry(mock.clone(), registry));
         let store = Arc::new(MemoryStore::default());
         let session = SessionHandle::create(
             SessionId::from("rig-controls"),
@@ -602,7 +1013,7 @@ mod tests {
             TranscriptEntryKind::AssistantMessage {
                 ref content,
                 ..
-            } if content == "done"
+            } if content == &vec![ContentPart::text("done")]
         ));
         let requests = mock.requests();
         assert_eq!(requests.len(), 2);
@@ -631,13 +1042,12 @@ mod tests {
                     release,
                 }),
             )
-            .await
             .unwrap();
         let mock = MockCompletionModel::from_stream_turns([vec![
             MockStreamEvent::tool_call("gate-call", "gate", json!({})),
             final_event(),
         ]]);
-        let model = Arc::new(RigModel::with_registry(mock, registry).await);
+        let model = Arc::new(RigModel::with_registry(mock, registry));
         let store = Arc::new(MemoryStore::default());
         let session = SessionHandle::create(
             SessionId::from("rig-abort"),
@@ -675,7 +1085,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rig_provider_failure_preserves_partial_output() {
+    async fn rig_agent_runner_error_is_terminal_and_preserves_partial_output() {
         let mock = MockCompletionModel::from_stream_turns([vec![
             MockStreamEvent::text("partial"),
             MockStreamEvent::Error(MockError::provider("provider failed")),
@@ -704,7 +1114,7 @@ mod tests {
             TranscriptEntryKind::AssistantMessage {
                 ref content,
                 ..
-            } if content == "partial"
+            } if content == &vec![ContentPart::text("partial")]
         ));
         assert!(matches!(
             tail[1].kind,

@@ -1,10 +1,7 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, RwLock};
 
 use globset::{Glob, GlobMatcher};
-use tokio::sync::{RwLock, watch};
+use tokio::sync::watch;
 
 use crate::{
     ResourceError, ResourceOperation, ResourceProvider, ResourceReply, ResourceRequest,
@@ -18,7 +15,6 @@ pub struct ResourceRouter {
 
 struct RouterInner {
     routes: RwLock<Vec<RegisteredRoute>>,
-    generation: AtomicU64,
     topology: watch::Sender<u64>,
 }
 
@@ -28,7 +24,6 @@ impl Default for ResourceRouter {
         Self {
             inner: Arc::new(RouterInner {
                 routes: RwLock::new(Vec::new()),
-                generation: AtomicU64::new(0),
                 topology,
             }),
         }
@@ -51,7 +46,7 @@ impl ResourceRouter {
         Self::default()
     }
     pub fn generation(&self) -> u64 {
-        self.inner.generation.load(Ordering::Acquire)
+        *self.inner.topology.borrow()
     }
 
     /// Observe route registrations and successful topology-changing requests.
@@ -60,8 +55,9 @@ impl ResourceRouter {
     }
 
     fn changed(&self) {
-        let generation = self.inner.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.inner.topology.send_replace(generation);
+        self.inner
+            .topology
+            .send_modify(|generation| *generation += 1);
     }
 
     pub async fn register(
@@ -81,7 +77,11 @@ impl ResourceRouter {
             .map_err(|e| ResourceError::Invalid(format!("invalid projection glob: {e}")))?
             .map(|g| g.compile_matcher());
         let (literals, wildcards) = specificity(&route.base_glob, route.projection_glob.as_deref());
-        let mut routes = self.inner.routes.write().await;
+        let mut routes = self
+            .inner
+            .routes
+            .write()
+            .expect("resource route lock poisoned");
         let order = routes.len();
         routes.push(RegisteredRoute {
             plugin: plugin.into(),
@@ -98,28 +98,23 @@ impl ResourceRouter {
         Ok(())
     }
 
-    pub async fn route_owner(
-        &self,
-        uri: &ResourceUri,
-        operation: ResourceOperation,
-    ) -> Option<String> {
+    pub fn route_owner(&self, uri: &ResourceUri, operation: ResourceOperation) -> Option<String> {
         self.select(uri, operation)
-            .await
             .map(|route| route.plugin.clone())
     }
 
     pub async fn handle(&self, request: ResourceRequest) -> Result<ResourceReply, ResourceError> {
         let operation = request.operation();
         let uri = request.uri().clone();
-        let route = match self.select(&uri, operation).await {
+        let route = match self.select(&uri, operation) {
             Some(route) => route,
-            None if self.has_route(&uri).await => {
+            None if self.has_route(&uri) => {
                 return Err(ResourceError::Unsupported { uri, operation });
             }
             None => return Err(ResourceError::NotFound { uri, operation }),
         };
         if let ResourceRequest::Move { to: Some(to), .. } = &request {
-            let destination = self.select(to, operation).await;
+            let destination = self.select(to, operation);
             if destination
                 .as_ref()
                 .is_none_or(|other| !Arc::ptr_eq(&route.provider, &other.provider))
@@ -131,23 +126,18 @@ impl ResourceRouter {
             }
         }
         let result = route.provider.handle(request).await;
-        if result.is_ok()
-            && matches!(
-                operation,
-                ResourceOperation::Write | ResourceOperation::Move
-            )
-        {
+        if result.is_ok() && matches!(operation, ResourceOperation::Move) {
             self.changed();
         }
         result
     }
 
-    async fn select(
-        &self,
-        uri: &ResourceUri,
-        operation: ResourceOperation,
-    ) -> Option<RouteSelection> {
-        let routes = self.inner.routes.read().await;
+    fn select(&self, uri: &ResourceUri, operation: ResourceOperation) -> Option<RouteSelection> {
+        let routes = self
+            .inner
+            .routes
+            .read()
+            .expect("resource route lock poisoned");
         routes
             .iter()
             .filter(|route| {
@@ -166,31 +156,31 @@ impl ResourceRouter {
             })
     }
 
-    async fn has_route(&self, uri: &ResourceUri) -> bool {
+    fn has_route(&self, uri: &ResourceUri) -> bool {
         self.inner
             .routes
             .read()
-            .await
+            .expect("resource route lock poisoned")
             .iter()
             .any(|route| route.matches_node(uri))
     }
 
-    pub async fn routes(&self) -> Vec<(String, ResourceRoute)> {
+    pub fn routes(&self) -> Vec<(String, ResourceRoute)> {
         self.inner
             .routes
             .read()
-            .await
+            .expect("resource route lock poisoned")
             .iter()
             .map(|r| (r.plugin.clone(), r.declaration.clone()))
             .collect()
     }
 
-    pub async fn schemes(&self) -> Vec<String> {
+    pub fn schemes(&self) -> Vec<String> {
         let mut schemes = self
             .inner
             .routes
             .read()
-            .await
+            .expect("resource route lock poisoned")
             .iter()
             .filter_map(|route| route.declaration.base_glob.split_once(':').map(|(s, _)| s))
             .filter(|scheme| {
@@ -206,8 +196,12 @@ impl ResourceRouter {
     }
 
     /// Literal first projection segments advertised for a base URI.
-    pub async fn projection_roots(&self, base: &ResourceUri) -> Vec<String> {
-        let routes = self.inner.routes.read().await;
+    pub fn projection_roots(&self, base: &ResourceUri) -> Vec<String> {
+        let routes = self
+            .inner
+            .routes
+            .read()
+            .expect("resource route lock poisoned");
         let mut roots = routes
             .iter()
             .filter(|route| route.base.is_match(base.base().to_string()))
@@ -237,26 +231,22 @@ struct RouteSelection {
 }
 impl RegisteredRoute {
     fn matches_node(&self, uri: &ResourceUri) -> bool {
-        matches_uri(&self.base, self.projection.as_ref(), uri)
-            || self.base.is_match(uri.base().to_string())
-                && self
-                    .declaration
-                    .projection_glob
-                    .as_deref()
-                    .and_then(|glob| glob.split('/').next())
-                    .is_some_and(|root| uri.projection_segments() == [root])
+        matches_uri(&self.base, self.projection.as_ref(), uri) || self.matches_projection_root(uri)
     }
 
     fn matches(&self, uri: &ResourceUri, operation: ResourceOperation) -> bool {
         matches_uri(&self.base, self.projection.as_ref(), uri)
-            || operation == ResourceOperation::Children
-                && self.base.is_match(uri.base().to_string())
-                && self
-                    .declaration
-                    .projection_glob
-                    .as_deref()
-                    .and_then(|glob| glob.split('/').next())
-                    .is_some_and(|root| uri.projection_segments() == [root])
+            || operation == ResourceOperation::Children && self.matches_projection_root(uri)
+    }
+
+    fn matches_projection_root(&self, uri: &ResourceUri) -> bool {
+        self.base.is_match(uri.base().to_string())
+            && self
+                .declaration
+                .projection_glob
+                .as_deref()
+                .and_then(|glob| glob.split('/').next())
+                .is_some_and(|root| uri.projection_segments() == [root])
     }
 }
 
@@ -354,10 +344,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            tied.route_owner(&uri("x"), Read).await.as_deref(),
-            Some("first")
-        );
+        assert_eq!(tied.route_owner(&uri("x"), Read).as_deref(), Some("first"));
     }
 
     #[tokio::test]
@@ -382,15 +369,11 @@ mod tests {
         assert_eq!(
             router
                 .route_owner(&uri("src/lib.rs?symbols/foo"), Read)
-                .await
                 .as_deref(),
             Some("ast")
         );
         assert_eq!(
-            router
-                .route_owner(&uri("src/lib.rs"), Read)
-                .await
-                .as_deref(),
+            router.route_owner(&uri("src/lib.rs"), Read).as_deref(),
             Some("file")
         );
         assert_eq!(
@@ -520,7 +503,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publishes_generation_changes_for_routes_and_mutations() {
+    async fn publishes_only_logical_topology_changes() {
         let router = ResourceRouter::new();
         let mut changes = router.subscribe_generation();
         router
@@ -538,6 +521,16 @@ mod tests {
                 uri: uri("changed"),
                 text: "body".into(),
             })
+            .await
+            .unwrap();
+        assert!(!changes.has_changed().unwrap());
+
+        router
+            .register(
+                "reader",
+                ResourceRoute::new("mem:///**", None::<String>, [ResourceOperation::Read]),
+                Arc::new(Text("body")),
+            )
             .await
             .unwrap();
         changes.changed().await.unwrap();

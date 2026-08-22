@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!();
                 return Ok(());
             }
-            StreamEventKind::Failed { error } => return Err(error.into()),
+            StreamEventKind::Failed { failure } => return Err(failure.message.into()),
             _ => {}
         }
     }

@@ -1,9 +1,8 @@
-//! Wasmtime component host for the Artist 0.3 plugin contracts.
+//! Wasmtime component host for the Artist 0.4 plugin contracts.
 
 use std::{
-    future::Future,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use artist_core::{
@@ -11,7 +10,7 @@ use artist_core::{
     PluginId,
 };
 use artist_resource::{
-    InvocationContext, ResourceError, ResourceOperation, ResourceProvider,
+    FilesystemProvider, InvocationContext, ResourceError, ResourceOperation, ResourceProvider,
     ResourceReply as CoreReply, ResourceRequest as CoreRequest, ResourceRoute as CoreRoute,
     ResourceRouter, ResourceUri, ToolDefinition as CoreTool, ToolError, ToolHandler, ToolRegistry,
     UniversalTools,
@@ -19,14 +18,19 @@ use artist_resource::{
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
-use tokio::runtime::Runtime;
+use tokio::sync::Mutex;
 use wasmtime::{
     Engine, Store,
     component::{Component, HasSelf, Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-wasmtime::component::bindgen!({ path: "../../wit", world: "artist-plugin" });
+wasmtime::component::bindgen!({
+    path: "../../wit",
+    world: "artist-plugin",
+    imports: { default: async },
+    exports: { default: async },
+});
 
 pub use artist::plugin::types::{
     ContextFragment, HookDecision, HookEvent, Message, ModelConfig, ResourceRoute, ToolDefinition,
@@ -56,37 +60,28 @@ pub struct PluginHost {
     plugins: Vec<Arc<Mutex<LoadedPlugin>>>,
     registry: ToolRegistry,
     router: ResourceRouter,
-    runtime: Arc<Runtime>,
     working_directory: PathBuf,
 }
 
 impl PluginHost {
-    pub fn new() -> Result<Self, PluginError> {
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?,
-        );
+    pub async fn new() -> Result<Self, PluginError> {
         let registry = ToolRegistry::new();
         let router = ResourceRouter::new();
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
+        config.async_support(true);
         let engine = Engine::new(&config)?;
         let mut linker = Linker::new(&engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         ArtistPlugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
         let working_directory = std::env::current_dir()?;
-        block_on(
-            &runtime,
-            UniversalTools::new(router.clone(), working_directory.clone()).register(&registry),
-        )?;
+        UniversalTools::new(router.clone(), working_directory.clone()).register(&registry)?;
         Ok(Self {
             engine,
             linker,
             plugins: Vec::new(),
             registry,
             router,
-            runtime,
             working_directory,
         })
     }
@@ -99,33 +94,29 @@ impl PluginHost {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn mount_fabric(&self) -> Result<artist_resource::ResourceFabric, PluginError> {
-        block_on(
-            &self.runtime,
-            artist_resource::ResourceFabric::mount_shared(
-                self.router.clone(),
-                self.registry.clone(),
-                self.working_directory.clone(),
-                self.runtime.handle().clone(),
-            ),
+    pub async fn mount_fabric(&self) -> Result<artist_resource::ResourceFabric, PluginError> {
+        artist_resource::ResourceFabric::mount_shared(
+            self.router.clone(),
+            self.registry.clone(),
+            self.working_directory.clone(),
+            tokio::runtime::Handle::current(),
         )
+        .await
         .map_err(PluginError::Tool)
     }
 
-    pub fn load(&mut self, path: impl AsRef<Path>) -> Result<PluginDescriptor, PluginError> {
+    pub async fn load(&mut self, path: impl AsRef<Path>) -> Result<PluginDescriptor, PluginError> {
         let component = Component::from_file(&self.engine, path)?;
         let mut store = Store::new(
             &self.engine,
-            HostState::new(
-                self.registry.clone(),
-                self.runtime.clone(),
-                self.working_directory.clone(),
-            )?,
+            HostState::new(self.registry.clone(), self.working_directory.clone())?,
         );
-        let bindings = ArtistPlugin::instantiate(&mut store, &component, &self.linker)?;
+        let bindings =
+            ArtistPlugin::instantiate_async(&mut store, &component, &self.linker).await?;
         let raw = bindings
             .artist_plugin_lifecycle()
-            .call_descriptor(&mut store)?;
+            .call_descriptor(&mut store)
+            .await?;
         let descriptor = PluginDescriptor {
             id: PluginId::new(raw.id),
             version: raw.version,
@@ -139,7 +130,8 @@ impl PluginHost {
         let tool_definitions = if descriptor.capabilities.contains(&PluginCapability::Tools) {
             bindings
                 .artist_plugin_tool_provider()
-                .call_definitions(&mut store)?
+                .call_definitions(&mut store)
+                .await?
                 .map_err(|message| socket(&descriptor, "definitions", message))?
         } else {
             Vec::new()
@@ -150,7 +142,8 @@ impl PluginHost {
         {
             bindings
                 .artist_plugin_resource_provider()
-                .call_routes(&mut store)?
+                .call_routes(&mut store)
+                .await?
                 .map_err(|message| socket(&descriptor, "routes", message))?
         } else {
             Vec::new()
@@ -172,16 +165,13 @@ impl PluginHost {
                 description: definition.description,
                 input_schema: schema,
             };
-            block_on(
-                &self.runtime,
-                self.registry.register_owned(
-                    core,
-                    Arc::new(WasmTool {
-                        plugin: plugin.clone(),
-                        name: definition.name,
-                    }),
-                    descriptor.id.to_string(),
-                ),
+            self.registry.register_owned(
+                core,
+                Arc::new(WasmTool {
+                    plugin: plugin.clone(),
+                    name: definition.name,
+                }),
+                descriptor.id.to_string(),
             )?;
         }
         let resource_provider: Arc<dyn ResourceProvider> = Arc::new(WasmResource {
@@ -193,23 +183,23 @@ impl PluginHost {
                 route.projection_glob,
                 route.operations.into_iter().map(resource_operation),
             );
-            block_on(
-                &self.runtime,
-                self.router
-                    .register(descriptor.id.to_string(), core, resource_provider.clone()),
-            )?;
+            self.router
+                .register(descriptor.id.to_string(), core, resource_provider.clone())
+                .await?;
         }
         self.plugins.push(plugin);
         Ok(descriptor)
     }
 
-    pub fn descriptors(&self) -> impl Iterator<Item = PluginDescriptor> + '_ {
-        self.plugins
-            .iter()
-            .map(|p| p.lock().unwrap().descriptor.clone())
+    pub async fn descriptors(&self) -> Vec<PluginDescriptor> {
+        let mut descriptors = Vec::with_capacity(self.plugins.len());
+        for plugin in &self.plugins {
+            descriptors.push(plugin.lock().await.descriptor.clone());
+        }
+        descriptors
     }
 
-    pub fn compose_initial_context(
+    pub async fn compose_initial_context(
         &mut self,
         context: InitialContext,
     ) -> Result<InitialContext, PluginError> {
@@ -224,7 +214,8 @@ impl PluginHost {
                             content: f.content,
                         })
                         .collect(),
-                )?
+                )
+                .await?
                 .into_iter()
                 .map(|f| CoreContextFragment {
                     source: f.source,
@@ -233,19 +224,20 @@ impl PluginHost {
                 .collect(),
         })
     }
-    pub fn compose_prompt(
+    pub async fn compose_prompt(
         &mut self,
         mut fragments: Vec<ContextFragment>,
     ) -> Result<Vec<ContextFragment>, PluginError> {
-        for plugin in self.with(PluginCapability::Prompt) {
-            let mut p = plugin.lock().unwrap();
+        for plugin in self.with(PluginCapability::Prompt).await {
+            let mut p = plugin.lock().await;
             let id = p.descriptor.id.to_string();
             let LoadedPlugin {
                 store, bindings, ..
             } = &mut *p;
             fragments = bindings
                 .artist_plugin_lifecycle()
-                .call_compose_prompt(store, &fragments)?
+                .call_compose_prompt(store, &fragments)
+                .await?
                 .map_err(|message| PluginError::Socket {
                     plugin: id,
                     socket: "compose-prompt",
@@ -254,8 +246,10 @@ impl PluginHost {
         }
         Ok(fragments)
     }
-    pub fn tools(&self) -> Result<Vec<ToolDefinition>, PluginError> {
-        Ok(block_on(&self.runtime, self.registry.definitions())
+    pub async fn tools(&self) -> Result<Vec<ToolDefinition>, PluginError> {
+        Ok(self
+            .registry
+            .definitions()
             .into_iter()
             .map(|d| ToolDefinition {
                 name: d.name,
@@ -264,31 +258,39 @@ impl PluginHost {
             })
             .collect())
     }
-    pub fn call_tool(&self, name: &str, arguments: &str) -> Result<Option<String>, PluginError> {
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<Option<String>, PluginError> {
         let arguments =
             serde_json::from_str(arguments).map_err(|e| ToolError::Arguments(e.to_string()))?;
-        match block_on(&self.runtime, self.registry.call(name, arguments)) {
+        match self.registry.call(name, arguments).await {
             Ok(value) => Ok(Some(value.to_string())),
             Err(ToolError::Unknown(_)) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
-    pub fn handle_resource(&self, request: CoreRequest) -> Result<CoreReply, PluginError> {
-        block_on(&self.runtime, self.router.handle(request)).map_err(PluginError::Resource)
+    pub async fn handle_resource(&self, request: CoreRequest) -> Result<CoreReply, PluginError> {
+        self.router
+            .handle(request)
+            .await
+            .map_err(PluginError::Resource)
     }
-    pub fn transform_context(
+    pub async fn transform_context(
         &mut self,
         mut messages: Vec<Message>,
     ) -> Result<Vec<Message>, PluginError> {
-        for plugin in self.with(PluginCapability::Context) {
-            let mut p = plugin.lock().unwrap();
+        for plugin in self.with(PluginCapability::Context).await {
+            let mut p = plugin.lock().await;
             let id = p.descriptor.id.to_string();
             let LoadedPlugin {
                 store, bindings, ..
             } = &mut *p;
             messages = bindings
                 .artist_plugin_lifecycle()
-                .call_transform_context(store, &messages)?
+                .call_transform_context(store, &messages)
+                .await?
                 .map_err(|message| PluginError::Socket {
                     plugin: id,
                     socket: "transform-context",
@@ -297,36 +299,46 @@ impl PluginHost {
         }
         Ok(messages)
     }
-    pub fn observe_hook(&mut self, event: &HookEvent) -> Result<Vec<HookDecision>, PluginError> {
-        self.with(PluginCapability::Hooks)
-            .into_iter()
-            .map(|plugin| {
-                let mut p = plugin.lock().unwrap();
+    pub async fn observe_hook(
+        &mut self,
+        event: &HookEvent,
+    ) -> Result<Vec<HookDecision>, PluginError> {
+        let mut decisions = Vec::new();
+        for plugin in self.with(PluginCapability::Hooks).await {
+            let decision = {
+                let mut p = plugin.lock().await;
                 let id = p.descriptor.id.to_string();
                 let LoadedPlugin {
                     store, bindings, ..
                 } = &mut *p;
                 bindings
                     .artist_plugin_lifecycle()
-                    .call_observe_hook(store, event)?
+                    .call_observe_hook(store, event)
+                    .await?
                     .map_err(|message| PluginError::Socket {
                         plugin: id,
                         socket: "observe-hook",
                         message,
-                    })
-            })
-            .collect()
+                    })?
+            };
+            decisions.push(decision);
+        }
+        Ok(decisions)
     }
-    pub fn configure_model(&mut self, mut config: ModelConfig) -> Result<ModelConfig, PluginError> {
-        for plugin in self.with(PluginCapability::Model) {
-            let mut p = plugin.lock().unwrap();
+    pub async fn configure_model(
+        &mut self,
+        mut config: ModelConfig,
+    ) -> Result<ModelConfig, PluginError> {
+        for plugin in self.with(PluginCapability::Model).await {
+            let mut p = plugin.lock().await;
             let id = p.descriptor.id.to_string();
             let LoadedPlugin {
                 store, bindings, ..
             } = &mut *p;
             config = bindings
                 .artist_plugin_lifecycle()
-                .call_configure_model(store, &config)?
+                .call_configure_model(store, &config)
+                .await?
                 .map_err(|message| PluginError::Socket {
                     plugin: id,
                     socket: "configure-model",
@@ -335,16 +347,17 @@ impl PluginHost {
         }
         Ok(config)
     }
-    pub fn observe_event(&mut self, event: &str) -> Result<(), PluginError> {
-        for plugin in self.with(PluginCapability::Events) {
-            let mut p = plugin.lock().unwrap();
+    pub async fn observe_event(&mut self, event: &str) -> Result<(), PluginError> {
+        for plugin in self.with(PluginCapability::Events).await {
+            let mut p = plugin.lock().await;
             let id = p.descriptor.id.to_string();
             let LoadedPlugin {
                 store, bindings, ..
             } = &mut *p;
             bindings
                 .artist_plugin_lifecycle()
-                .call_observe_event(store, event)?
+                .call_observe_event(store, event)
+                .await?
                 .map_err(|message| PluginError::Socket {
                     plugin: id,
                     socket: "observe-event",
@@ -353,18 +366,20 @@ impl PluginHost {
         }
         Ok(())
     }
-    fn with(&self, capability: PluginCapability) -> Vec<Arc<Mutex<LoadedPlugin>>> {
-        self.plugins
-            .iter()
-            .filter(|p| {
-                p.lock()
-                    .unwrap()
-                    .descriptor
-                    .capabilities
-                    .contains(&capability)
-            })
-            .cloned()
-            .collect()
+    async fn with(&self, capability: PluginCapability) -> Vec<Arc<Mutex<LoadedPlugin>>> {
+        let mut selected = Vec::new();
+        for plugin in &self.plugins {
+            if plugin
+                .lock()
+                .await
+                .descriptor
+                .capabilities
+                .contains(&capability)
+            {
+                selected.push(plugin.clone());
+            }
+        }
+        selected
     }
 }
 
@@ -388,20 +403,16 @@ struct WasmTool {
 #[async_trait]
 impl ToolHandler for WasmTool {
     async fn call(&self, arguments: Value, context: InvocationContext) -> Result<Value, ToolError> {
-        let mut plugin = self
-            .plugin
-            .lock()
-            .map_err(|_| ToolError::Failed("plugin lock poisoned".into()))?;
+        let mut plugin = self.plugin.lock().await;
         plugin.store.data_mut().invocation = Some(context);
         let result = {
             let LoadedPlugin {
                 store, bindings, ..
             } = &mut *plugin;
-            bindings.artist_plugin_tool_provider().call_invoke(
-                store,
-                &self.name,
-                &arguments.to_string(),
-            )
+            bindings
+                .artist_plugin_tool_provider()
+                .call_invoke(store, &self.name, &arguments.to_string())
+                .await
         };
         plugin.store.data_mut().invocation = None;
         let result = result
@@ -417,10 +428,7 @@ struct WasmResource {
 #[async_trait]
 impl ResourceProvider for WasmResource {
     async fn handle(&self, request: CoreRequest) -> Result<CoreReply, ResourceError> {
-        let mut plugin = self
-            .plugin
-            .lock()
-            .map_err(|_| ResourceError::Provider("plugin lock poisoned".into()))?;
+        let mut plugin = self.plugin.lock().await;
         let request = to_wit_request(request);
         let LoadedPlugin {
             store, bindings, ..
@@ -428,6 +436,7 @@ impl ResourceProvider for WasmResource {
         let reply = bindings
             .artist_plugin_resource_provider()
             .call_handle(store, &request)
+            .await
             .map_err(|e| ResourceError::Provider(e.to_string()))?
             .map_err(|e| ResourceError::Provider(format!("{}: {}", e.kind, e.message)))?;
         from_wit_reply(reply)
@@ -438,22 +447,18 @@ struct HostState {
     table: ResourceTable,
     wasi: WasiCtx,
     registry: ToolRegistry,
-    runtime: Arc<Runtime>,
+    filesystem: Arc<FilesystemProvider>,
     working_directory: PathBuf,
     invocation: Option<InvocationContext>,
     plugin_id: Option<String>,
 }
 impl HostState {
-    fn new(
-        registry: ToolRegistry,
-        runtime: Arc<Runtime>,
-        working_directory: PathBuf,
-    ) -> Result<Self, std::io::Error> {
+    fn new(registry: ToolRegistry, working_directory: PathBuf) -> Result<Self, std::io::Error> {
         Ok(Self {
             table: ResourceTable::new(),
             wasi: WasiCtx::builder().build(),
             registry,
-            runtime,
+            filesystem: Arc::new(FilesystemProvider::new(&working_directory)),
             working_directory,
             invocation: None,
             plugin_id: None,
@@ -465,9 +470,10 @@ impl HostState {
 }
 
 impl artist::plugin::host_tools::Host for HostState {
-    fn list_tools(&mut self) -> Result<Vec<artist::plugin::types::ToolDefinition>, String> {
-        let registry = self.registry.clone();
-        Ok(block_on(&self.runtime, registry.definitions())
+    async fn list_tools(&mut self) -> Result<Vec<artist::plugin::types::ToolDefinition>, String> {
+        Ok(self
+            .registry
+            .definitions()
             .into_iter()
             .map(|d| artist::plugin::types::ToolDefinition {
                 name: d.name,
@@ -476,14 +482,13 @@ impl artist::plugin::host_tools::Host for HostState {
             })
             .collect())
     }
-    fn call_tool(&mut self, name: String, arguments: String) -> Result<String, String> {
+    async fn call_tool(&mut self, name: String, arguments: String) -> Result<String, String> {
         let args = serde_json::from_str(&arguments).map_err(|e| e.to_string())?;
         let ctx = self
             .invocation
             .clone()
             .unwrap_or_else(InvocationContext::root);
-        let registry = self.registry.clone();
-        if self.plugin_id.as_deref() == block_on(&self.runtime, registry.owner(&name)).as_deref() {
+        if self.plugin_id.as_deref() == self.registry.owner(&name).as_deref() {
             let mut cycle = ctx.stack.clone();
             cycle.push(name.clone());
             return Err(ToolError::Recursive {
@@ -491,68 +496,73 @@ impl artist::plugin::host_tools::Host for HostState {
             }
             .to_string());
         }
-        block_on(&self.runtime, registry.call_with_context(&name, args, ctx))
+        self.registry
+            .call_with_context(&name, args, ctx)
+            .await
             .map(|v| v.to_string())
             .map_err(|e| e.to_string())
     }
 }
 
-fn block_on<F: Future>(runtime: &Runtime, future: F) -> F::Output {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| runtime.block_on(future))
-    } else {
-        runtime.block_on(future)
-    }
-}
-
 impl artist::plugin::native_filesystem::Host for HostState {
-    fn read(
+    async fn read(
         &mut self,
         uri: String,
         start_line: Option<u64>,
         line_count: Option<u64>,
     ) -> Result<String, String> {
         let uri = self.uri(&uri)?;
-        let path = uri.file_path().ok_or("not a file URI")?;
-        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let start = start_line.unwrap_or(1).saturating_sub(1) as usize;
-        Ok(text
-            .split_inclusive('\n')
-            .skip(start)
-            .take(line_count.unwrap_or(u64::MAX) as usize)
-            .collect())
-    }
-    fn children(&mut self, uri: String) -> Result<Vec<String>, String> {
-        let path = self.uri(&uri)?.file_path().ok_or("not a file URI")?;
-        let mut out = std::fs::read_dir(path)
-            .map_err(|e| e.to_string())?
-            .map(|e| {
-                e.map_err(|e| e.to_string()).and_then(|e| {
-                    ResourceUri::resolve(&e.path().to_string_lossy(), Path::new("/"))
-                        .map(|u| u.to_string())
-                        .map_err(|e| e.to_string())
-                })
+        match self
+            .filesystem
+            .handle(CoreRequest::Read {
+                uri,
+                start_line,
+                line_count,
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        out.sort();
-        Ok(out)
-    }
-    fn write(&mut self, uri: String, text: String) -> Result<(), String> {
-        let path = self.uri(&uri)?.file_path().ok_or("not a file URI")?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            CoreReply::Text { text } => Ok(text),
+            _ => Err("filesystem provider returned a non-text reply".into()),
         }
-        std::fs::write(path, text).map_err(|e| e.to_string())
     }
-    fn move_(&mut self, from: String, to: Option<String>) -> Result<(), String> {
-        let from = self.uri(&from)?.file_path().ok_or("not a file URI")?;
-        if let Some(to) = to {
-            let to = self.uri(&to)?.file_path().ok_or("not a file URI")?;
-            std::fs::rename(from, to).map_err(|e| e.to_string())
-        } else if from.is_dir() {
-            std::fs::remove_dir_all(from).map_err(|e| e.to_string())
-        } else {
-            std::fs::remove_file(from).map_err(|e| e.to_string())
+    async fn children(&mut self, uri: String) -> Result<Vec<String>, String> {
+        let uri = self.uri(&uri)?;
+        match self
+            .filesystem
+            .handle(CoreRequest::Children { uri })
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            CoreReply::Children { children } => {
+                Ok(children.into_iter().map(|uri| uri.to_string()).collect())
+            }
+            _ => Err("filesystem provider returned a non-children reply".into()),
+        }
+    }
+    async fn write(&mut self, uri: String, text: String) -> Result<(), String> {
+        let uri = self.uri(&uri)?;
+        match self
+            .filesystem
+            .handle(CoreRequest::Write { uri, text })
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            CoreReply::Written => Ok(()),
+            _ => Err("filesystem provider returned a non-written reply".into()),
+        }
+    }
+    async fn move_(&mut self, from: String, to: Option<String>) -> Result<(), String> {
+        let from = self.uri(&from)?;
+        let to = to.map(|uri| self.uri(&uri)).transpose()?;
+        match self
+            .filesystem
+            .handle(CoreRequest::Move { from, to })
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            CoreReply::Moved => Ok(()),
+            _ => Err("filesystem provider returned a non-moved reply".into()),
         }
     }
 }
@@ -650,4 +660,15 @@ fn from_wit_reply(reply: artist::plugin::types::ResourceReply) -> Result<CoreRep
             },
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_initializes_without_a_private_or_multithreaded_runtime() {
+        let host = PluginHost::new().await.unwrap();
+        assert_eq!(host.tools().await.unwrap().len(), 6);
+    }
 }

@@ -1,6 +1,9 @@
 use std::{collections::VecDeque, pin::Pin, sync::Arc};
 
-use artist_core::{CallId, MessageId, RunId, SessionId, Source, TokenUsage};
+use artist_core::{
+    CallId, CompletionCallMetadata, ContentPart, FailureClass, MessageId, ModelFailure, RunId,
+    SessionId, Source, TokenUsage,
+};
 use futures::Stream;
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
@@ -29,7 +32,7 @@ pub struct ModelHistoryItem {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelMessage {
     User(String),
-    Assistant(String),
+    Assistant(Vec<ContentPart>),
     Notification(String),
     ToolCall {
         call_id: CallId,
@@ -38,7 +41,7 @@ pub enum ModelMessage {
     },
     ToolResult {
         call_id: CallId,
-        result: String,
+        content: Vec<ContentPart>,
     },
 }
 
@@ -55,10 +58,16 @@ pub enum ModelEvent {
         name: String,
         arguments: String,
     },
+    ToolExecutionCommitted {
+        call_id: CallId,
+        name: String,
+        arguments: String,
+    },
     ToolResult {
         call_id: CallId,
-        result: String,
+        content: Vec<ContentPart>,
     },
+    Content(ContentPart),
     ContextCompacted {
         through_sequence: u64,
         evicted_count: usize,
@@ -66,14 +75,40 @@ pub enum ModelEvent {
         artifact: String,
     },
     Usage(TokenUsage),
+    CompletionMetadata(Vec<CompletionCallMetadata>),
     Finished {
         output: Option<String>,
     },
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
-#[error("{0}")]
-pub struct ModelError(pub String);
+#[error("{}", .0.message)]
+pub struct ModelError(pub ModelFailure);
+
+impl ModelError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(ModelFailure {
+            message: message.into(),
+            class: FailureClass::Unknown,
+            retriable: false,
+            provider_code: None,
+            http_status: None,
+            provider_request_id: None,
+        })
+    }
+}
+
+impl From<String> for ModelError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for ModelError {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteeringNotice {
@@ -99,10 +134,16 @@ impl Steering {
     }
 
     pub(crate) fn channel() -> (Self, mpsc::UnboundedReceiver<Vec<MessageId>>) {
+        Self::channel_with(VecDeque::new())
+    }
+
+    pub(crate) fn channel_with(
+        queued: VecDeque<SteeringNotice>,
+    ) -> (Self, mpsc::UnboundedReceiver<Vec<MessageId>>) {
         let (delivered, receiver) = mpsc::unbounded_channel();
         (
             Self {
-                queued: Arc::default(),
+                queued: Arc::new(Mutex::new(queued)),
                 delivered,
             },
             receiver,

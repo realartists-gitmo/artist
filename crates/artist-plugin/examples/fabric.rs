@@ -2,7 +2,8 @@ use std::{path::PathBuf, process::Command};
 
 use artist_plugin::PluginHost;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths = std::env::args_os()
         .skip(1)
         .map(PathBuf::from)
@@ -11,15 +12,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: fabric <tool-fixture.wasm> <ast-fixture.wasm>".into());
     }
     let mut paths = paths.into_iter();
-    let mut host = PluginHost::new()?;
-    host.load(paths.next().unwrap())?;
+    let mut host = PluginHost::new().await?;
+    host.load(paths.next().unwrap()).await?;
     assert!(
-        host.call_tool("read", r#"{"uri":"fixture://workspace/rust.rs"}"#)?
+        host.call_tool("read", r#"{"uri":"fixture://workspace/rust.rs"}"#)
+            .await?
             .expect("read tool")
             .contains("fixture_symbol")
     );
-    let fabric = host.mount_fabric()?;
-    host.load(paths.next().unwrap())?;
+    let fabric = host.mount_fabric().await?;
+    host.load(paths.next().unwrap()).await?;
     let projected = fabric.root().join("fixture/workspace/rust.rs");
     assert_eq!(
         std::fs::read_to_string(projected)?,
@@ -39,7 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let base = "fixture://workspace/rust.rs";
     let all = host
-        .call_tool("find", r#"{"uri":"fixture:///","limit":50}"#)?
+        .call_tool("find", r#"{"uri":"fixture:///","limit":50}"#)
+        .await?
         .expect("find tool");
     let indexed = fabric.search().indexed_resources()?;
     assert!(
@@ -50,7 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .call_tool(
             "grep",
             &serde_json::json!({"uri": base, "regex": "fixture_symbol", "limit": 5}).to_string(),
-        )?
+        )
+        .await?
         .expect("grep tool");
     assert!(
         ordinary.contains("fixture://workspace/rust.rs"),
@@ -62,27 +66,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .call_tool(
             "find",
             &serde_json::json!({"uri": projection, "max_depth": 1}).to_string(),
-        )?
+        )
+        .await?
         .expect("find tool");
     assert!(found.contains("?symbols/"), "{found}");
     let projected = host
         .call_tool(
             "grep",
             &serde_json::json!({"uri": projection, "regex": "symbol", "limit": 5}).to_string(),
-        )?
+        )
+        .await?
         .expect("grep tool");
     assert!(projected.contains("?symbols/"), "{projected}");
 
     host.call_tool(
         "write",
         r#"{"uri":"fixture://workspace/notes.txt","text":"refreshed fixture txt\n"}"#,
-    )?
+    )
+    .await?
     .expect("write tool");
     let refreshed = host
         .call_tool(
             "grep",
             r#"{"uri":"fixture://workspace/","regex":"refreshed","limit":5}"#,
-        )?
+        )
+        .await?
         .expect("grep tool");
     assert!(
         refreshed.contains("fixture://workspace/notes.txt"),

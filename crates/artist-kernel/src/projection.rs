@@ -124,13 +124,13 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
                 });
             }
             TranscriptEntryKind::ToolResult {
-                call_id, result, ..
+                call_id, content, ..
             } => {
                 history.push(ModelHistoryItem {
                     sequence: entry.sequence,
                     message: ModelMessage::ToolResult {
                         call_id: call_id.clone(),
-                        result: result.clone(),
+                        content: content.clone(),
                     },
                 });
             }
@@ -201,7 +201,7 @@ mod tests {
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("answer"),
                 run_id: run.clone(),
-                content: "old answer".into(),
+                content: vec![artist_core::ContentPart::text("old answer")],
             },
             TranscriptEntryKind::RunFinished {
                 run_id: run,
@@ -277,12 +277,12 @@ mod tests {
             TranscriptEntryKind::ToolResult {
                 run_id: run.clone(),
                 call_id: CallId::from("paired"),
-                result: "ok".into(),
+                content: vec![artist_core::ContentPart::text("ok")],
             },
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("answer"),
                 run_id: run,
-                content: "done".into(),
+                content: vec![artist_core::ContentPart::text("done")],
             },
         ] {
             let entry = record.entry(kind);
@@ -328,12 +328,14 @@ mod tests {
             TranscriptEntryKind::ToolResult {
                 run_id: run.clone(),
                 call_id: CallId::from("resource-call"),
-                result: r#"{"text":"symbol foo\n"}"#.into(),
+                content: vec![artist_core::ContentPart::Json {
+                    value: serde_json::json!({"text": "symbol foo\n"}),
+                }],
             },
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("answer"),
                 run_id: run.clone(),
-                content: "found it".into(),
+                content: vec![artist_core::ContentPart::text("found it")],
             },
             TranscriptEntryKind::RunFinished {
                 run_id: run,
@@ -361,7 +363,9 @@ mod tests {
                 },
                 ModelMessage::ToolResult {
                     call_id: CallId::from("resource-call"),
-                    result: r#"{"text":"symbol foo\n"}"#.into(),
+                    content: vec![artist_core::ContentPart::Json {
+                        value: serde_json::json!({"text": "symbol foo\n"}),
+                    }],
                 },
             ]
         );
@@ -385,7 +389,7 @@ mod tests {
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("answer"),
                 run_id: run.clone(),
-                content: "partial".into(),
+                content: vec![artist_core::ContentPart::text("partial")],
             },
             TranscriptEntryKind::RunFinished {
                 run_id: run,
@@ -406,7 +410,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ModelMessage::User("question".into()),
-                ModelMessage::Assistant("partial".into()),
+                ModelMessage::Assistant(vec![artist_core::ContentPart::text("partial")]),
                 ModelMessage::Notification(
                     "The preceding assistant response failed: provider unavailable.".into(),
                 ),

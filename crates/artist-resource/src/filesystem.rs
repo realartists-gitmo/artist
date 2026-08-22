@@ -10,14 +10,14 @@ use crate::{
     ResourceRoute, ResourceRouter, ResourceUri,
 };
 
-#[derive(Clone, Debug)]
-pub struct FilesystemProvider {
-    root: PathBuf,
-}
+#[derive(Clone, Debug, Default)]
+pub struct FilesystemProvider;
 
 impl FilesystemProvider {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    /// Construct the native provider. `scope` is organizational context for
+    /// callers; it is deliberately not a permission or confinement boundary.
+    pub fn new(_scope: impl Into<PathBuf>) -> Self {
+        Self
     }
 
     pub async fn register(
@@ -47,13 +47,7 @@ impl FilesystemProvider {
         let path = uri
             .file_path()
             .ok_or_else(|| ResourceError::Invalid(format!("not a file URI: {uri}")))?;
-        if path.starts_with(&self.root) {
-            Ok(path)
-        } else {
-            Err(ResourceError::Invalid(format!(
-                "file URI is outside provider root: {uri}"
-            )))
-        }
+        Ok(path)
     }
 }
 

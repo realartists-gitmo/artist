@@ -55,8 +55,7 @@ impl ResourceFabric {
         });
         UniversalTools::new(router, working_directory.clone())
             .with_search(search.clone())
-            .install(&registry)
-            .await;
+            .install(&registry);
         Ok(Self {
             mount,
             search,

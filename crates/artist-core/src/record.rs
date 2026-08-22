@@ -3,9 +3,12 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use crate::{CallId, EventId, InterruptionCause, MessageId, RunId, RunOutcome, SessionId, Source};
+use crate::{
+    CallId, ContentPart, EventId, InterruptionCause, MessageId, RunId, RunOutcome, SessionId,
+    Source,
+};
 
-pub const RECORD_VERSION: u32 = 2;
+pub const RECORD_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ContextFragment {
@@ -21,8 +24,8 @@ pub struct InitialContext {
 /// A validated canonical session record.
 ///
 /// Fields are private so deserialization and mutation cannot bypass the
-/// transcript reducer. Serialization emits v2; deserialization validates v2
-/// and migrates legacy v1 snapshots.
+/// transcript reducer. Serialization emits v3; deserialization validates v3
+/// and migrates v1/v2 snapshots.
 #[derive(Clone, Debug)]
 pub struct SessionRecord {
     version: u32,
@@ -216,7 +219,7 @@ impl SessionRecord {
                     kinds.push(TranscriptEntryKind::AssistantMessage {
                         message_id: message_id.clone(),
                         run_id: run_id.clone(),
-                        content,
+                        content: vec![ContentPart::text(content)],
                     });
                     if complete {
                         kinds.push(TranscriptEntryKind::RunFinished {
@@ -260,7 +263,7 @@ impl SessionRecord {
                 } => kinds.push(TranscriptEntryKind::ToolResult {
                     run_id,
                     call_id,
-                    result,
+                    content: vec![ContentPart::text(result)],
                 }),
                 LegacyEntryKind::Compaction {
                     through_sequence,
@@ -282,6 +285,21 @@ impl SessionRecord {
         }
         Ok(record)
     }
+
+    /// Migrate entries from the v2 string-result representation. This is also
+    /// used by the hash-chained physical-frame decoder after it validates the
+    /// original v2 bytes.
+    pub fn from_v2_parts(
+        session_id: SessionId,
+        initial_context: InitialContext,
+        entries: Vec<V2TranscriptEntry>,
+    ) -> Result<Self, RecordError> {
+        let entries = entries
+            .into_iter()
+            .map(V2TranscriptEntry::migrate)
+            .collect();
+        Self::from_current_parts(session_id, initial_context, entries)
+    }
 }
 
 impl Serialize for SessionRecord {
@@ -289,7 +307,7 @@ impl Serialize for SessionRecord {
     where
         S: Serializer,
     {
-        SnapshotV2 {
+        SnapshotV3 {
             version: self.version,
             session_id: self.session_id.clone(),
             initial_context: self.initial_context.clone(),
@@ -310,10 +328,20 @@ impl<'de> Deserialize<'de> for SessionRecord {
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| serde::de::Error::custom("session snapshot has no numeric version"))?;
         match version {
+            3 => {
+                let snapshot: SnapshotV3 =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Self::from_current_parts(
+                    snapshot.session_id,
+                    snapshot.initial_context,
+                    snapshot.entries,
+                )
+                .map_err(serde::de::Error::custom)
+            }
             2 => {
                 let snapshot: SnapshotV2 =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                Self::from_current_parts(
+                Self::from_v2_parts(
                     snapshot.session_id,
                     snapshot.initial_context,
                     snapshot.entries,
@@ -328,11 +356,19 @@ impl<'de> Deserialize<'de> for SessionRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct SnapshotV2 {
+struct SnapshotV3 {
     version: u32,
     session_id: SessionId,
     initial_context: InitialContext,
     entries: Vec<TranscriptEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct SnapshotV2 {
+    version: u32,
+    session_id: SessionId,
+    initial_context: InitialContext,
+    entries: Vec<V2TranscriptEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -345,6 +381,64 @@ pub struct TranscriptEntry {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "entry", rename_all = "snake_case")]
 pub enum TranscriptEntryKind {
+    Input {
+        message_id: MessageId,
+        source: Source,
+        content: String,
+    },
+    SteeringQueued {
+        message_id: MessageId,
+        source: Source,
+        content: String,
+    },
+    SteeringDelivered {
+        run_id: RunId,
+        message_ids: Vec<MessageId>,
+    },
+    RunStarted {
+        run_id: RunId,
+        input_id: MessageId,
+    },
+    AssistantMessage {
+        message_id: MessageId,
+        run_id: RunId,
+        content: Vec<ContentPart>,
+    },
+    RunFinished {
+        run_id: RunId,
+        outcome: RunOutcome,
+    },
+    ToolCall {
+        run_id: RunId,
+        call_id: CallId,
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        run_id: RunId,
+        call_id: CallId,
+        content: Vec<ContentPart>,
+    },
+    Compaction {
+        through_sequence: u64,
+        artifact: String,
+    },
+}
+
+/// Exact v2 entry representation retained solely for migration and physical
+/// hash verification. New code must use [`TranscriptEntry`].
+#[doc(hidden)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct V2TranscriptEntry {
+    pub event_id: EventId,
+    pub sequence: u64,
+    pub kind: V2TranscriptEntryKind,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "entry", rename_all = "snake_case")]
+pub enum V2TranscriptEntryKind {
     Input {
         message_id: MessageId,
         source: Source,
@@ -387,6 +481,85 @@ pub enum TranscriptEntryKind {
         through_sequence: u64,
         artifact: String,
     },
+}
+
+impl V2TranscriptEntry {
+    fn migrate(self) -> TranscriptEntry {
+        let kind = match self.kind {
+            V2TranscriptEntryKind::Input {
+                message_id,
+                source,
+                content,
+            } => TranscriptEntryKind::Input {
+                message_id,
+                source,
+                content,
+            },
+            V2TranscriptEntryKind::SteeringQueued {
+                message_id,
+                source,
+                content,
+            } => TranscriptEntryKind::SteeringQueued {
+                message_id,
+                source,
+                content,
+            },
+            V2TranscriptEntryKind::SteeringDelivered {
+                run_id,
+                message_ids,
+            } => TranscriptEntryKind::SteeringDelivered {
+                run_id,
+                message_ids,
+            },
+            V2TranscriptEntryKind::RunStarted { run_id, input_id } => {
+                TranscriptEntryKind::RunStarted { run_id, input_id }
+            }
+            V2TranscriptEntryKind::AssistantMessage {
+                message_id,
+                run_id,
+                content,
+            } => TranscriptEntryKind::AssistantMessage {
+                message_id,
+                run_id,
+                content: vec![ContentPart::text(content)],
+            },
+            V2TranscriptEntryKind::RunFinished { run_id, outcome } => {
+                TranscriptEntryKind::RunFinished { run_id, outcome }
+            }
+            V2TranscriptEntryKind::ToolCall {
+                run_id,
+                call_id,
+                name,
+                arguments,
+            } => TranscriptEntryKind::ToolCall {
+                run_id,
+                call_id,
+                name,
+                arguments,
+            },
+            V2TranscriptEntryKind::ToolResult {
+                run_id,
+                call_id,
+                result,
+            } => TranscriptEntryKind::ToolResult {
+                run_id,
+                call_id,
+                content: vec![ContentPart::text(result)],
+            },
+            V2TranscriptEntryKind::Compaction {
+                through_sequence,
+                artifact,
+            } => TranscriptEntryKind::Compaction {
+                through_sequence,
+                artifact,
+            },
+        };
+        TranscriptEntry {
+            event_id: self.event_id,
+            sequence: self.sequence,
+            kind,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -718,6 +891,28 @@ mod tests {
         )
     }
 
+    #[test]
+    fn v2_string_tool_results_migrate_to_one_text_part() {
+        let snapshot = json!({
+            "version": 2,
+            "session_id": "session",
+            "initial_context": { "fragments": [] },
+            "entries": [
+                {"event_id":"session:event:0","sequence":0,"kind":{"entry":"input","message_id":"input","source":"user","content":"hello"}},
+                {"event_id":"session:event:1","sequence":1,"kind":{"entry":"run_started","run_id":"run","input_id":"input"}},
+                {"event_id":"session:event:2","sequence":2,"kind":{"entry":"tool_call","run_id":"run","call_id":"call","name":"read","arguments":"{}"}},
+                {"event_id":"session:event:3","sequence":3,"kind":{"entry":"tool_result","run_id":"run","call_id":"call","result":"body"}}
+            ]
+        });
+        let migrated: SessionRecord = serde_json::from_value(snapshot).unwrap();
+        assert_eq!(migrated.version(), 3);
+        assert!(matches!(
+            &migrated.entries()[3].kind,
+            TranscriptEntryKind::ToolResult { content, .. }
+                if content == &vec![ContentPart::text("body")]
+        ));
+    }
+
     fn append(record: &mut SessionRecord, kind: TranscriptEntryKind) {
         record.append(record.entry(kind)).unwrap();
     }
@@ -749,7 +944,7 @@ mod tests {
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("answer-1"),
                 run_id: RunId::from("complete"),
-                content: "done".into(),
+                content: vec![ContentPart::text("done")],
             },
         );
         append(
@@ -767,7 +962,7 @@ mod tests {
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("answer-2"),
                 run_id: RunId::from("interrupted"),
-                content: "half".into(),
+                content: vec![ContentPart::text("half")],
             },
         );
         append(
@@ -848,13 +1043,13 @@ mod tests {
             TranscriptEntryKind::ToolResult {
                 run_id: RunId::from("run"),
                 call_id: CallId::from("call"),
-                result: "ok".into(),
+                content: vec![ContentPart::text("ok")],
             },
         );
         let duplicate = record.entry(TranscriptEntryKind::ToolResult {
             run_id: RunId::from("run"),
             call_id: CallId::from("call"),
-            result: "again".into(),
+            content: vec![ContentPart::text("again")],
         });
         assert_eq!(
             record.append(duplicate),
@@ -874,7 +1069,7 @@ mod tests {
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("answer"),
                 run_id: RunId::from("run"),
-                content: "done".into(),
+                content: vec![ContentPart::text("done")],
             },
         );
         let finish = record.entry(TranscriptEntryKind::RunFinished {
@@ -895,13 +1090,13 @@ mod tests {
             TranscriptEntryKind::AssistantMessage {
                 message_id: MessageId::from("answer"),
                 run_id: RunId::from("run"),
-                content: "done".into(),
+                content: vec![ContentPart::text("done")],
             },
         );
         let second_message = record.entry(TranscriptEntryKind::AssistantMessage {
             message_id: MessageId::from("another"),
             run_id: RunId::from("run"),
-            content: "duplicate".into(),
+            content: vec![ContentPart::text("duplicate")],
         });
         assert_eq!(
             record.append(second_message),
