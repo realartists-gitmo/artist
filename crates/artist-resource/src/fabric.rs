@@ -7,8 +7,7 @@ use std::{
 use tokio::runtime::Handle;
 
 use crate::{
-    ResourceRouter, ResourceUri, SearchEngine, ToolError, ToolRegistry, UniversalTools,
-    fuse::FuseMount, uri_to_mount_path,
+    ResourceRouter, ResourceUri, SearchEngine, ToolError, fuse::FuseMount, uri_to_mount_path,
 };
 
 /// Owns the ephemeral Unix projection and its one FFF index.
@@ -16,7 +15,6 @@ pub struct ResourceFabric {
     mount: FuseMount,
     search: Arc<SearchEngine>,
     refresh_task: tokio::task::JoinHandle<()>,
-    registry: ToolRegistry,
     working_directory: PathBuf,
 }
 
@@ -25,15 +23,6 @@ impl ResourceFabric {
     /// Later registrations and topology-changing operations trigger a new crawl.
     pub async fn mount(
         router: ResourceRouter,
-        working_directory: impl Into<PathBuf>,
-        runtime: Handle,
-    ) -> Result<Self, ToolError> {
-        Self::mount_shared(router, ToolRegistry::new(), working_directory, runtime).await
-    }
-
-    pub async fn mount_shared(
-        router: ResourceRouter,
-        registry: ToolRegistry,
         working_directory: impl Into<PathBuf>,
         runtime: Handle,
     ) -> Result<Self, ToolError> {
@@ -53,14 +42,10 @@ impl ResourceFabric {
                 let _ = tokio::task::spawn_blocking(move || search.synchronize(generation)).await;
             }
         });
-        UniversalTools::new(router, working_directory.clone())
-            .with_search(search.clone())
-            .install(&registry);
         Ok(Self {
             mount,
             search,
             refresh_task,
-            registry,
             working_directory,
         })
     }
@@ -71,10 +56,6 @@ impl ResourceFabric {
     pub fn search(&self) -> &Arc<SearchEngine> {
         &self.search
     }
-    pub fn registry(&self) -> &ToolRegistry {
-        &self.registry
-    }
-
     pub fn projected_working_directory(&self) -> Result<PathBuf, String> {
         let uri = ResourceUri::resolve(&self.working_directory.to_string_lossy(), Path::new("/"))
             .map_err(|e| e.to_string())?;

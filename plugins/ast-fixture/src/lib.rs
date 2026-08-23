@@ -86,11 +86,18 @@ impl Resources for AstFixture {
         let (base, projection) = uri
             .split_once('?')
             .ok_or_else(|| error("invalid", "missing symbols projection"))?;
-        let text = call("read", json!({"uri": base}))?
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let text = match artist::plugin::host_resources::handle(&ResourceRequest::Read(
+            artist::plugin::types::ReadRequest {
+                uri: base.into(),
+                start_line: None,
+                line_count: None,
+            },
+        ))
+        .map_err(|failure| error(failure.kind.as_str(), failure.message.as_str()))?
+        {
+            ResourceReply::Text(text) => text,
+            _ => return Err(error("provider", "base resource returned a non-text reply")),
+        };
         let segments: Vec<_> = projection.split('/').collect();
         if segments.first() != Some(&"symbols") {
             return Err(error("not-found", "unknown projection"));
@@ -126,11 +133,6 @@ impl Resources for AstFixture {
     }
 }
 
-fn call(name: &str, arguments: serde_json::Value) -> Result<serde_json::Value, ResourceError> {
-    artist::plugin::host_tools::call_tool(name, &arguments.to_string())
-        .map_err(|e| error("provider", &e))
-        .and_then(|v| serde_json::from_str(&v).map_err(|e| error("provider", &e.to_string())))
-}
 fn rust_functions(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| {

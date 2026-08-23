@@ -61,6 +61,21 @@ interface types {
     record move-request { source: string, to: option<string> }
     record poll-request { uri: string, match: option<string>, timeout-ms: option<u64> }
     record edit-request { uri: string, instructions: string }
+    record find-request {
+        uri: string,
+        glob: option<string>,
+        max-depth: option<u64>,
+        cursor: option<string>,
+        limit: option<u64>,
+    }
+    record grep-request {
+        uri: string,
+        regex: string,
+        include-glob: option<string>,
+        context: option<u64>,
+        cursor: option<string>,
+        limit: option<u64>,
+    }
     variant resource-request {
         read(read-request),
         children(string),
@@ -104,6 +119,16 @@ interface host-tools {
     call-tool: func(name: string, arguments: string) -> result<string, string>;
 }
 
+// Generic access to the host-owned logical resource fabric. Model-facing tool
+// policy and presentation belong in WASM tool-provider components; these
+// imports expose only the underlying resource and indexed-search mechanics.
+interface host-resources {
+    use types.{find-request, grep-request, resource-error, resource-reply, resource-request};
+    handle: func(request: resource-request) -> result<resource-reply, resource-error>;
+    find: func(request: find-request) -> result<string, string>;
+    grep: func(request: grep-request) -> result<string, string>;
+}
+
 interface native-filesystem {
     read: func(uri: string, start-line: option<u64>, line-count: option<u64>) -> result<string, string>;
     children: func(uri: string) -> result<list<string>, string>;
@@ -113,6 +138,7 @@ interface native-filesystem {
 
 world artist-plugin {
     import host-tools;
+    import host-resources;
     import native-filesystem;
     export lifecycle;
     export tool-provider;

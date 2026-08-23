@@ -7,10 +7,13 @@ use artist_resource::{ResourceReply, ResourceRequest, ResourceUri};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut paths = std::env::args_os().skip(1);
-    let path = paths
+    let path = paths.next().map(PathBuf::from).ok_or(
+        "usage: load <default.wasm> <builtin-tools.wasm> [tool-fixture.wasm] [ast-fixture.wasm]",
+    )?;
+    let builtin_tools = paths
         .next()
         .map(PathBuf::from)
-        .ok_or("usage: load <component.wasm>")?;
+        .ok_or("missing builtin-tools component")?;
     let mut host = PluginHost::new().await?;
     let untouched = host
         .compose_prompt(vec![ContextFragment {
@@ -55,7 +58,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert_eq!(composed.fragments.len(), 1);
     assert_eq!(composed.fragments[0].source, "SYSTEM.md");
+    assert!(host.tools().await?.is_empty());
+    let tools_descriptor = host.load(builtin_tools).await?;
+    assert_eq!(tools_descriptor.id.as_str(), "artist.builtin.tools");
     assert_eq!(host.tools().await?.len(), 6);
+    for name in ["read", "find", "grep", "write", "move", "poll"] {
+        assert_eq!(
+            host.registry().owner(name).as_deref(),
+            Some("artist.builtin.tools")
+        );
+    }
     let messages = vec![Message {
         role: "user".into(),
         content: "hello".into(),

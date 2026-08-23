@@ -8,11 +8,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .skip(1)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    if paths.len() != 2 {
-        return Err("usage: fabric <tool-fixture.wasm> <ast-fixture.wasm>".into());
+    if paths.len() != 3 {
+        return Err(
+            "usage: fabric <builtin-tools.wasm> <tool-fixture.wasm> <ast-fixture.wasm>".into(),
+        );
     }
     let mut paths = paths.into_iter();
     let mut host = PluginHost::new().await?;
+    host.load(paths.next().unwrap()).await?;
     host.load(paths.next().unwrap()).await?;
     assert!(
         host.call_tool("read", r#"{"uri":"fixture://workspace/rust.rs"}"#)
@@ -95,6 +98,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(
         refreshed.contains("fixture://workspace/notes.txt"),
         "{refreshed}"
+    );
+    drop(fabric);
+    let unavailable = host
+        .call_tool("find", r#"{"uri":"fixture:///"}"#)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        unavailable.contains("search index is not mounted"),
+        "{unavailable}"
     );
     Ok(())
 }

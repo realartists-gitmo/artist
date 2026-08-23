@@ -47,6 +47,9 @@ programs, and one host-owned FFF engine crawls that complete mount to drive
   - `edit(uri, instructions)` is reserved in the protocol, skeletal, and unadvertised.
 - Cross-provider move is supported only when one selected provider explicitly handles both URIs.
 - Model-facing universal tools are `read`, `find`, `grep`, `write`, `move`, and `poll`.
+  They are supplied by the bundled `artist.builtin.tools` WASM extension, not
+  registered by native host code. The host exposes only generic routed-resource
+  and indexed-search imports used by that extension.
   - `find(uri, glob?, max_depth?, cursor?, limit?)` subsumes directory listing; null glob with depth one lists immediate descendants.
   - `grep(uri, regex, include_glob?, context?, cursor?, limit?)` searches text bodies.
   - Default pagination is 50 find results and 100 grep matches.
@@ -57,8 +60,8 @@ programs, and one host-owned FFF engine crawls that complete mount to drive
   `matched`, `closed`, or `timed-out` outcome. Snapshot-only resources return a
   typed unsupported-operation error.
 
-The component ABI is `artist:plugin@0.3.0`; the original proposal's `0.2.0`
-step is superseded by the requested 0.3 package version.
+The component ABI is `artist:plugin@0.4.0`; the earlier 0.2/0.3 proposals are
+superseded by the async resource-fabric and rich lifecycle contract.
 
 ## Implementation sequence
 
@@ -72,10 +75,12 @@ step is superseded by the requested 0.3 package version.
    - Convert definitions into Rig dynamic streaming tools.
    - Keep cross-plugin callbacks in-process; there is no native plugin ABI.
 3. **WASM resource routing**
-   - Use `artist:plugin@0.3.0` for the WIT package and components.
+   - Use `artist:plugin@0.4.0` for the WIT package and components.
    - Register operation-scoped URI globs and handle plain-WIT resource requests.
    - Synthesize query-root children from projection routes.
-   - Provide a fixture that reads Rust through the shared tool bridge and exposes `?symbols/...` descendants.
+   - Provide a fixture that reads Rust through the generic host-resource bridge
+     and exposes `?symbols/...` descendants without recursively invoking a
+     model-facing tool.
 4. **FUSE projection**
    - Use `fuser` 0.17 as host infrastructure.
    - Mount one ephemeral scheme-rooted tree; launch shells/REPLs in the `file` subtree and expose `ARTIST_ROOT`.
@@ -93,6 +98,11 @@ step is superseded by the requested 0.3 package version.
    - Replace `read_file`, `write_file`, and `list_directory` with universal tools.
    - Register terminal `file://**` routes and delegate native mechanics through focused host imports.
    - Keep the router, URI model, tool bridge, FUSE projection, and search engine domain-neutral.
+7. **Bundled tool component**
+   - Export the six universal definitions and invocation behavior from a
+     tools-only WASM component.
+   - Resolve routed operations and FFF searches through generic host imports.
+   - Leave the native registry empty until components register their tools.
 
 ## Verification plan
 

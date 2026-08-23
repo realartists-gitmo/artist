@@ -128,7 +128,6 @@ dependencies = [
  "libc",
  "percent-encoding",
  "regex",
- "schemars",
  "serde",
  "serde_json",
  "tempfile",

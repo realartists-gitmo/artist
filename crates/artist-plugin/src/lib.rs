@@ -1,8 +1,10 @@
 //! Wasmtime component host for the Artist 0.4 plugin contracts.
 
 use std::{
+    ops::Deref,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
+    time::Duration,
 };
 
 use artist_core::{
@@ -12,8 +14,8 @@ use artist_core::{
 use artist_resource::{
     FilesystemProvider, InvocationContext, ResourceError, ResourceOperation, ResourceProvider,
     ResourceReply as CoreReply, ResourceRequest as CoreRequest, ResourceRoute as CoreRoute,
-    ResourceRouter, ResourceUri, ToolDefinition as CoreTool, ToolError, ToolHandler, ToolRegistry,
-    UniversalTools,
+    ResourceRouter, ResourceUri, SearchEngine, ToolDefinition as CoreTool, ToolError, ToolHandler,
+    ToolRegistry,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -60,13 +62,44 @@ pub struct PluginHost {
     plugins: Vec<Arc<Mutex<LoadedPlugin>>>,
     registry: ToolRegistry,
     router: ResourceRouter,
+    search: Arc<RwLock<Option<Arc<SearchEngine>>>>,
     working_directory: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+pub struct PluginFabric {
+    fabric: artist_resource::ResourceFabric,
+    slot: Arc<RwLock<Option<Arc<SearchEngine>>>>,
+    mounted_search: Arc<SearchEngine>,
+}
+
+#[cfg(target_os = "linux")]
+impl Deref for PluginFabric {
+    type Target = artist_resource::ResourceFabric;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fabric
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PluginFabric {
+    fn drop(&mut self) {
+        let mut slot = self.slot.write().expect("search service lock poisoned");
+        if slot
+            .as_ref()
+            .is_some_and(|search| Arc::ptr_eq(search, &self.mounted_search))
+        {
+            *slot = None;
+        }
+    }
 }
 
 impl PluginHost {
     pub async fn new() -> Result<Self, PluginError> {
         let registry = ToolRegistry::new();
         let router = ResourceRouter::new();
+        let search = Arc::new(RwLock::new(None));
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
         config.async_support(true);
@@ -75,13 +108,13 @@ impl PluginHost {
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         ArtistPlugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
         let working_directory = std::env::current_dir()?;
-        UniversalTools::new(router.clone(), working_directory.clone()).register(&registry)?;
         Ok(Self {
             engine,
             linker,
             plugins: Vec::new(),
             registry,
             router,
+            search,
             working_directory,
         })
     }
@@ -94,22 +127,33 @@ impl PluginHost {
     }
 
     #[cfg(target_os = "linux")]
-    pub async fn mount_fabric(&self) -> Result<artist_resource::ResourceFabric, PluginError> {
-        artist_resource::ResourceFabric::mount_shared(
+    pub async fn mount_fabric(&self) -> Result<PluginFabric, PluginError> {
+        let fabric = artist_resource::ResourceFabric::mount(
             self.router.clone(),
-            self.registry.clone(),
             self.working_directory.clone(),
             tokio::runtime::Handle::current(),
         )
         .await
-        .map_err(PluginError::Tool)
+        .map_err(PluginError::Tool)?;
+        let mounted_search = fabric.search().clone();
+        *self.search.write().expect("search service lock poisoned") = Some(mounted_search.clone());
+        Ok(PluginFabric {
+            fabric,
+            slot: self.search.clone(),
+            mounted_search,
+        })
     }
 
     pub async fn load(&mut self, path: impl AsRef<Path>) -> Result<PluginDescriptor, PluginError> {
         let component = Component::from_file(&self.engine, path)?;
         let mut store = Store::new(
             &self.engine,
-            HostState::new(self.registry.clone(), self.working_directory.clone())?,
+            HostState::new(
+                self.registry.clone(),
+                self.router.clone(),
+                self.search.clone(),
+                self.working_directory.clone(),
+            )?,
         );
         let bindings =
             ArtistPlugin::instantiate_async(&mut store, &component, &self.linker).await?;
@@ -447,17 +491,26 @@ struct HostState {
     table: ResourceTable,
     wasi: WasiCtx,
     registry: ToolRegistry,
+    router: ResourceRouter,
+    search: Arc<RwLock<Option<Arc<SearchEngine>>>>,
     filesystem: Arc<FilesystemProvider>,
     working_directory: PathBuf,
     invocation: Option<InvocationContext>,
     plugin_id: Option<String>,
 }
 impl HostState {
-    fn new(registry: ToolRegistry, working_directory: PathBuf) -> Result<Self, std::io::Error> {
+    fn new(
+        registry: ToolRegistry,
+        router: ResourceRouter,
+        search: Arc<RwLock<Option<Arc<SearchEngine>>>>,
+        working_directory: PathBuf,
+    ) -> Result<Self, std::io::Error> {
         Ok(Self {
             table: ResourceTable::new(),
             wasi: WasiCtx::builder().build(),
             registry,
+            router,
+            search,
             filesystem: Arc::new(FilesystemProvider::new(&working_directory)),
             working_directory,
             invocation: None,
@@ -466,6 +519,48 @@ impl HostState {
     }
     fn uri(&self, text: &str) -> Result<ResourceUri, String> {
         ResourceUri::resolve(text, &self.working_directory).map_err(|e| e.to_string())
+    }
+
+    fn search(&self) -> Result<Arc<SearchEngine>, String> {
+        self.search
+            .read()
+            .expect("search service lock poisoned")
+            .clone()
+            .ok_or_else(|| "search index is not mounted".into())
+    }
+
+    fn decode_wit_request(
+        &self,
+        request: artist::plugin::types::ResourceRequest,
+    ) -> Result<CoreRequest, String> {
+        use artist::plugin::types::ResourceRequest as W;
+        Ok(match request {
+            W::Read(request) => CoreRequest::Read {
+                uri: self.uri(&request.uri)?,
+                start_line: request.start_line,
+                line_count: request.line_count,
+            },
+            W::Children(uri) => CoreRequest::Children {
+                uri: self.uri(&uri)?,
+            },
+            W::Write(request) => CoreRequest::Write {
+                uri: self.uri(&request.uri)?,
+                text: request.text,
+            },
+            W::Move(request) => CoreRequest::Move {
+                from: self.uri(&request.source)?,
+                to: request.to.as_deref().map(|uri| self.uri(uri)).transpose()?,
+            },
+            W::Poll(request) => CoreRequest::Poll {
+                uri: self.uri(&request.uri)?,
+                pattern: request.match_,
+                timeout: request.timeout_ms.map(Duration::from_millis),
+            },
+            W::Edit(request) => CoreRequest::Edit {
+                uri: self.uri(&request.uri)?,
+                instructions: request.instructions,
+            },
+        })
     }
 }
 
@@ -501,6 +596,57 @@ impl artist::plugin::host_tools::Host for HostState {
             .await
             .map(|v| v.to_string())
             .map_err(|e| e.to_string())
+    }
+}
+
+impl artist::plugin::host_resources::Host for HostState {
+    async fn handle(
+        &mut self,
+        request: artist::plugin::types::ResourceRequest,
+    ) -> Result<artist::plugin::types::ResourceReply, artist::plugin::types::ResourceError> {
+        let request = self
+            .decode_wit_request(request)
+            .map_err(|message| wit_resource_error("invalid", message))?;
+        self.router
+            .handle(request)
+            .await
+            .map(core_to_wit_reply)
+            .map_err(core_to_wit_error)
+    }
+
+    async fn find(
+        &mut self,
+        request: artist::plugin::types::FindRequest,
+    ) -> Result<String, String> {
+        let search = self.search()?;
+        search.synchronize(self.router.generation())?;
+        search
+            .find(
+                &self.uri(&request.uri)?,
+                request.glob.as_deref(),
+                optional_usize(request.max_depth, "max_depth")?,
+                request.cursor.as_deref(),
+                optional_usize(request.limit, "limit")?.unwrap_or(50),
+            )
+            .map(|value| value.to_string())
+    }
+
+    async fn grep(
+        &mut self,
+        request: artist::plugin::types::GrepRequest,
+    ) -> Result<String, String> {
+        let search = self.search()?;
+        search.synchronize(self.router.generation())?;
+        search
+            .grep(
+                &self.uri(&request.uri)?,
+                &request.regex,
+                request.include_glob.as_deref(),
+                optional_usize(request.context, "context")?.unwrap_or(0),
+                request.cursor.as_deref(),
+                optional_usize(request.limit, "limit")?.unwrap_or(100),
+            )
+            .map(|value| value.to_string())
     }
 }
 
@@ -662,13 +808,61 @@ fn from_wit_reply(reply: artist::plugin::types::ResourceReply) -> Result<CoreRep
     })
 }
 
+fn core_to_wit_reply(reply: CoreReply) -> artist::plugin::types::ResourceReply {
+    use artist::plugin::types::{PollOutcome as W, ResourceReply as R};
+    match reply {
+        CoreReply::Text { text } => R::Text(text),
+        CoreReply::Children { children } => {
+            R::Children(children.into_iter().map(|uri| uri.to_string()).collect())
+        }
+        CoreReply::Written => R::Written,
+        CoreReply::Moved => R::Moved,
+        CoreReply::Poll { text, outcome } => R::Poll(artist::plugin::types::PollReply {
+            text,
+            outcome: match outcome {
+                artist_resource::PollOutcome::Matched => W::Matched,
+                artist_resource::PollOutcome::Closed => W::Closed,
+                artist_resource::PollOutcome::TimedOut => W::TimedOut,
+            },
+        }),
+    }
+}
+
+fn core_to_wit_error(error: ResourceError) -> artist::plugin::types::ResourceError {
+    let kind = match &error {
+        ResourceError::NotFound { .. } => "not-found",
+        ResourceError::Unsupported { .. } => "unsupported",
+        ResourceError::Invalid(_) => "invalid",
+        ResourceError::Provider(_) => "provider",
+    };
+    wit_resource_error(kind, error.to_string())
+}
+
+fn wit_resource_error(
+    kind: &str,
+    message: impl Into<String>,
+) -> artist::plugin::types::ResourceError {
+    artist::plugin::types::ResourceError {
+        kind: kind.into(),
+        message: message.into(),
+    }
+}
+
+fn optional_usize(value: Option<u64>, field: &str) -> Result<Option<usize>, String> {
+    value
+        .map(|value| {
+            usize::try_from(value).map_err(|_| format!("{field} is too large for this host"))
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test(flavor = "current_thread")]
-    async fn host_initializes_without_a_private_or_multithreaded_runtime() {
+    async fn host_initializes_without_native_model_tools_or_a_private_runtime() {
         let host = PluginHost::new().await.unwrap();
-        assert_eq!(host.tools().await.unwrap().len(), 6);
+        assert!(host.tools().await.unwrap().is_empty());
     }
 }

@@ -12,11 +12,12 @@ access. Deployments that need a boundary must provide it outside Artist.
 - `artist-store`: in-memory and JSONL session stores behind one narrow trait
 - `artist-kernel`: the single-owner session actor, streaming state machine, and transcript projection
 - `artist-rig`: thin Rig streaming adapter and `rig-memory` policies
-- `artist-resource`: canonical URI tree, deterministic routing, universal tools, FUSE projection, and FFF search
+- `artist-resource`: canonical URI tree, deterministic routing, FUSE projection, and FFF search
 - `artist-plugin`: versioned WIT component host and ordered capability chains
 - `artist-observe`: backend-neutral observations projected from public stream events
 - `plugins/default`: lifecycle defaults and the terminal `file:///**` resource provider
-- `plugins/ast-fixture`: Rust `?symbols/...` projections backed by the shared tool bridge
+- `plugins/builtin-tools`: the six bundled model-facing tools, implemented as a WASM extension
+- `plugins/ast-fixture`: Rust `?symbols/...` projections backed by the shared resource bridge
 - `plugins/tool-fixture`: cross-component tool-call and recursion smoke fixture
 
 The canonical transcript is the memory boundary. The kernel projects it into Rig messages for every request instead of letting Rig keep a second conversation log. This is intentional: Rig's automatic memory append only sees successful turns, while Artist must also preserve partial output and typed interruptions. `rig-memory` policies shape the projection without rewriting the transcript. The permanent record and physical-log contracts are specified in [`TRANSCRIPT_V1.md`](TRANSCRIPT_V1.md).
@@ -70,7 +71,7 @@ OPENAI_API_KEY=... cargo run -p artist-rig --example openai -- <streaming-model-
 - With locked Rig 0.42, `AgentRunner` stream errors are terminal; Artist
   preserves partial output and closes the run instead of expecting a later
   recovery item from that stream.
-- The plugin ABI is `artist:plugin@0.4.0` in `wit/plugin.wit`; tool and resource providers are separate interoperable contracts.
+- The plugin ABI is `artist:plugin@0.4.0` in `wit/plugin.wit`; tool and resource providers are separate interoperable contracts. The host has no native model-facing tools: even bundled tools register from WASM components into the shared registry below Rig.
 - Telemetry is derived from stream events and is never required to load or resume a session.
 
 The complete resource-fabric contract and verification checklist live in

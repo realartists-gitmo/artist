@@ -59,5 +59,7 @@ mount root as `ARTIST_ROOT`. FUSE attributes exist only to satisfy the kernel.
 The component ABI is `artist:plugin@0.4.0`. Tool providers and resource
 providers are separate exports; prompt, context, hooks, model configuration,
 and event lifecycle exports remain intact. The default component supplies the
-terminal filesystem route, while the host owns native filesystem mechanics,
-FUSE, FFF, and the universal verbs.
+terminal filesystem route. A separate bundled WASM component owns the six
+universal model-facing verbs and calls generic host resource/search imports.
+The host owns only native filesystem mechanics, routing, FUSE, and FFF; it
+registers no model-facing tools itself.
