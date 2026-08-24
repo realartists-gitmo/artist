@@ -1,6 +1,6 @@
 {
-  "format": 1,
+  "format": 2,
   "id": "artist.profiles.children",
-  "cargo_package": "artist-profiles-children",
+  "build": {"adapter": "cargo", "package": "artist-profiles-children"},
   "component": "artist_profiles_children.wasm"
 }

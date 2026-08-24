@@ -25,6 +25,11 @@ fn unsupported() -> ResourceError {
 artist_plugin_sdk::resource_component!(
     FileRead,
     "artist.file.read",
-    ResourceOperation::Read,
+    vec![ResourceRoute {
+        base_glob: "file:///**".into(),
+        projection_glob: None,
+        operations: vec![ResourceOperation::Read],
+        signals: Vec::new(),
+    }],
     handle
 );

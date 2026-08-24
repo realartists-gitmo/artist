@@ -9,7 +9,7 @@ fn compose(fragments: Vec<ContextFragment>) -> Result<Vec<ContextFragment>, Stri
         .collect())
 }
 
-artist_plugin_sdk::prompt_component!(Prompt, "artist.prompt", compose);
+artist_plugin_sdk::prompt_component!(Prompt, "artist.prompt", 0, compose);
 
 #[cfg(test)]
 mod tests {

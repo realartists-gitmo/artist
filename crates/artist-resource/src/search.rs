@@ -10,9 +10,74 @@ use fff_search::{
     SharedFilePicker, SharedFrecency,
 };
 use globset::Glob;
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use serde_json::{Value, json};
 
 use crate::ResourceUri;
+
+const MOUNT_NAME_ENCODE: &AsciiSet = &CONTROLS
+    .add(b'%')
+    .add(b'~')
+    .add(b'/')
+    .add(b'\\')
+    .add(b'?')
+    .add(b':')
+    .add(b'*')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'|')
+    .add(b' ');
+
+pub(crate) fn encode_mount_name(name: &str) -> String {
+    let mut encoded = utf8_percent_encode(name, MOUNT_NAME_ENCODE).to_string();
+    if encoded.ends_with('.') {
+        encoded.pop();
+        encoded.push_str("%2E");
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) && !encoded.is_empty()
+    {
+        let first = encoded.remove(0);
+        encoded.insert_str(0, &format!("%{:02X}", first as u8));
+    }
+    encoded
+}
+
+pub(crate) fn decode_mount_name(name: &str) -> Result<String, String> {
+    percent_decode_str(name)
+        .decode_utf8()
+        .map(|decoded| decoded.into_owned())
+        .map_err(|_| "mount path contains an invalid encoded UTF-8 name".into())
+}
 
 /// The single native FFF index over the complete Artist mount.
 pub struct SearchEngine {
@@ -313,20 +378,24 @@ fn parse_cursor(cursor: Option<&str>, kind: &str) -> Result<usize, String> {
 pub fn uri_to_mount_path(mount: &Path, uri: &ResourceUri) -> Result<PathBuf, String> {
     let mut path = mount.join(uri.as_url().scheme());
     if uri.as_url().scheme() == "file" {
-        path.extend(
-            uri.file_path()
-                .ok_or("invalid file URI")?
-                .components()
-                .filter_map(|c| match c {
-                    std::path::Component::Normal(v) => Some(v),
-                    _ => None,
-                }),
-        );
+        for component in uri
+            .file_path()
+            .ok_or("invalid file URI")?
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(value) => Some(value),
+                _ => None,
+            })
+        {
+            path.push(encode_mount_name(&component.to_string_lossy()));
+        }
     } else {
         if let Some(host) = uri.as_url().host_str() {
-            path.push(host);
+            path.push(encode_mount_name(host));
         }
-        path.extend(uri.as_url().path_segments().into_iter().flatten());
+        for segment in uri.as_url().path_segments().into_iter().flatten() {
+            path.push(encode_mount_name(&decode_mount_name(segment)?));
+        }
     }
     let projection = uri.projection_segments();
     if let Some(first) = projection.first() {
@@ -334,8 +403,10 @@ pub fn uri_to_mount_path(mount: &Path, uri: &ResourceUri) -> Result<PathBuf, Str
             .file_name()
             .ok_or("projected URI has no base name")?
             .to_string_lossy();
-        path.set_file_name(format!("{name}?{first}"));
-        path.extend(&projection[1..]);
+        path.set_file_name(format!("{name}~{}", encode_mount_name(first)));
+        for segment in &projection[1..] {
+            path.push(encode_mount_name(segment));
+        }
     }
     Ok(path)
 }
@@ -355,15 +426,15 @@ pub fn mount_path_to_uri(mount: &Path, path: &Path) -> Result<ResourceUri, Strin
     let mut projected = false;
     for component in components {
         if !projected {
-            if let Some((name, first)) = component.split_once('?') {
-                base.push(name.to_owned());
-                projection.push(first.to_owned());
+            if let Some((name, first)) = component.split_once('~') {
+                base.push(decode_mount_name(name)?);
+                projection.push(decode_mount_name(first)?);
                 projected = true;
             } else {
-                base.push(component);
+                base.push(decode_mount_name(&component)?);
             }
         } else {
-            projection.push(component);
+            projection.push(decode_mount_name(&component)?);
         }
     }
     let text = if matches!(scheme.as_str(), "file" | "profiles" | "plugins") {
@@ -393,7 +464,7 @@ mod tests {
         let path = uri_to_mount_path(mount, &uri).unwrap();
         assert_eq!(
             path,
-            Path::new("/mnt/artist/file/work/rust.rs?symbols/foo/callers")
+            Path::new("/mnt/artist/file/work/rust.rs~symbols/foo/callers")
         );
         assert_eq!(mount_path_to_uri(mount, &path).unwrap(), uri);
     }
@@ -406,8 +477,17 @@ mod tests {
         let path = uri_to_mount_path(mount, &uri).unwrap();
         assert_eq!(
             path,
-            Path::new("/mnt/artist/process/run-7/stdout?chunks/latest")
+            Path::new("/mnt/artist/process/run-7/stdout~chunks/latest")
         );
+        assert_eq!(mount_path_to_uri(mount, &path).unwrap(), uri);
+    }
+
+    #[test]
+    fn encoded_hosted_path_segments_round_trip() {
+        let mount = Path::new("/mnt/artist");
+        let uri = ResourceUri::resolve("process://run-7/a%20b/~value", Path::new("/")).unwrap();
+        let path = uri_to_mount_path(mount, &uri).unwrap();
+        assert_eq!(path, Path::new("/mnt/artist/process/run-7/a%20b/%7Evalue"));
         assert_eq!(mount_path_to_uri(mount, &path).unwrap(), uri);
     }
 
@@ -421,6 +501,28 @@ mod tests {
     }
 
     #[test]
+    fn mount_names_are_legal_on_windows_and_round_trip_without_collisions() {
+        for name in [
+            "literal?query",
+            "literal~separator",
+            "100%",
+            "CON",
+            "trail.",
+            "a b",
+        ] {
+            let encoded = encode_mount_name(name);
+            assert!(
+                !encoded
+                    .chars()
+                    .any(|character| "\\/:*?\"<>|".contains(character))
+            );
+            assert!(!encoded.ends_with(' ') && !encoded.ends_with('.'));
+            assert_eq!(decode_mount_name(&encoded).unwrap(), name);
+        }
+        assert_ne!(encode_mount_name("base?projection"), "base~projection");
+    }
+
+    #[test]
     fn one_fff_index_finds_and_greps_canonical_resources() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("file/workspace/src/lib.rs");
@@ -431,7 +533,7 @@ mod tests {
             "pub fn indexed_symbol_too() {}\n*.rs !excluded type:rust path/to/file\n",
         )
         .unwrap();
-        let projected_file = file.with_file_name("lib.rs?symbols").join("foo");
+        let projected_file = file.with_file_name("lib.rs~symbols").join("foo");
         std::fs::create_dir_all(projected_file.parent().unwrap()).unwrap();
         std::fs::write(&projected_file, "projected_body\n").unwrap();
         let index = SearchEngine::new(temp.path()).unwrap();

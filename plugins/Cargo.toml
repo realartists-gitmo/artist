@@ -30,6 +30,7 @@ members = [
     "tool-signal",
     "tool-yield",
     "tool-handoff",
+    "concurrent-resource-fixture",
 ]
 resolver = "3"
 

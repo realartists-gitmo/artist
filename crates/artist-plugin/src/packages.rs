@@ -14,7 +14,7 @@ use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const PACKAGE_FORMAT: u32 = 1;
+pub const PACKAGE_FORMAT: u32 = 2;
 pub const MANIFEST_FILE: &str = "plugin.json";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -22,8 +22,17 @@ pub const MANIFEST_FILE: &str = "plugin.json";
 pub struct PluginPackageManifest {
     pub format: u32,
     pub id: String,
-    pub cargo_package: String,
     pub component: String,
+    /// Optional source-build adapter. Without one, `component` names a
+    /// language-neutral, already-built component inside the package.
+    #[serde(default)]
+    pub build: Option<PluginBuild>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "adapter", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum PluginBuild {
+    Cargo { package: String },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -117,13 +126,18 @@ impl PluginPackages {
             )));
         }
         if manifest.id.trim().is_empty()
-            || manifest.cargo_package.trim().is_empty()
             || validate_segment(&manifest.component).is_err()
             || !manifest.component.ends_with(".wasm")
         {
             return Err(ResourceError::Invalid(
-                "plugin manifest identity, Cargo package, and component must be non-empty; component must be one file name"
+                "plugin manifest identity and component must be non-empty; component must be one .wasm file name"
                     .into(),
+            ));
+        }
+        if matches!(&manifest.build, Some(PluginBuild::Cargo { package }) if package.trim().is_empty())
+        {
+            return Err(ResourceError::Invalid(
+                "Cargo build adapter package must not be empty".into(),
             ));
         }
         Ok(manifest)
@@ -131,6 +145,13 @@ impl PluginPackages {
 
     pub fn active_component(&self, package: &str) -> Result<PathBuf, ResourceError> {
         self.manifest(package)?;
+        let status = self.status(package);
+        let current_source_revision = source_revision(&self.root, &self.root.join(package))?;
+        if status.active_source_revision.as_deref() != Some(&current_source_revision) {
+            return Err(ResourceError::Invalid(format!(
+                "plugin package `{package}` has no active component for its current source revision"
+            )));
+        }
         let path = self.generated(package)?.join("active.wasm");
         path.is_file().then_some(path).ok_or_else(|| {
             ResourceError::Invalid(format!(
@@ -263,63 +284,83 @@ impl PluginPackages {
     async fn build_unlocked(&self, package: &str) -> Result<PathBuf, ResourceError> {
         let manifest = self.manifest(package)?;
         let root = self.root.clone();
-        let cargo_package = manifest.cargo_package.clone();
         let component = manifest.component.clone();
         let package_dir = self.root.join(package);
         let built_from_revision = source_revision(&self.root, &package_dir)?;
-        let output = tokio::task::spawn_blocking(move || {
-            Command::new("cargo")
-                .current_dir(&root)
-                .arg("test")
-                .arg("--manifest-path")
-                .arg(root.join("Cargo.toml"))
-                .arg("-p")
-                .arg(&cargo_package)
-                .arg("--target-dir")
-                .arg(root.join("target"))
-                .output()
-                .and_then(|tests| {
-                    if !tests.status.success() {
-                        return Ok((tests, None));
-                    }
+        let (artifact, mut diagnostics) = match manifest.build.clone() {
+            Some(PluginBuild::Cargo {
+                package: cargo_package,
+            }) => {
+                let output = tokio::task::spawn_blocking(move || {
                     Command::new("cargo")
                         .current_dir(&root)
-                        .arg("build")
+                        .arg("test")
                         .arg("--manifest-path")
                         .arg(root.join("Cargo.toml"))
                         .arg("-p")
-                        .arg(cargo_package)
-                        .arg("--target")
-                        .arg("wasm32-wasip2")
+                        .arg(&cargo_package)
                         .arg("--target-dir")
-                        .arg(root.join("target"))
+                        // Keep native test build scripts separate from the
+                        // WASI candidate tree. Alternating targets in one
+                        // directory invalidates shared host build artifacts
+                        // and makes a catalog activation rebuild them once
+                        // per package.
+                        .arg(root.join("target/package-tests"))
                         .output()
-                        .map(|build| (tests, Some(build)))
+                        .and_then(|tests| {
+                            if !tests.status.success() {
+                                return Ok((tests, None));
+                            }
+                            Command::new("cargo")
+                                .current_dir(&root)
+                                .arg("build")
+                                .arg("--manifest-path")
+                                .arg(root.join("Cargo.toml"))
+                                .arg("-p")
+                                .arg(cargo_package)
+                                .arg("--target")
+                                .arg("wasm32-wasip2")
+                                .arg("--target-dir")
+                                .arg(root.join("target"))
+                                .output()
+                                .map(|build| (tests, Some(build)))
+                        })
                 })
-        })
-        .await
-        .map_err(|error| ResourceError::Provider(error.to_string()))?
-        .map_err(provider)?;
-        let mut diagnostics = command_output(&output.0);
-        let success = output.0.status.success()
-            && output.1.as_ref().is_some_and(|build| {
-                diagnostics.push_str(&command_output(build));
-                build.status.success()
-            });
-        if !success {
-            self.write_status(
-                package,
-                PackageStatus {
-                    state: PackageState::Failed,
-                    source_revision: Some(built_from_revision),
+                .await
+                .map_err(|error| ResourceError::Provider(error.to_string()))?
+                .map_err(provider)?;
+                let mut diagnostics = command_output(&output.0);
+                let success = output.0.status.success()
+                    && output.1.as_ref().is_some_and(|build| {
+                        diagnostics.push_str(&command_output(build));
+                        build.status.success()
+                    });
+                if !success {
+                    self.write_status(
+                        package,
+                        PackageStatus {
+                            state: PackageState::Failed,
+                            source_revision: Some(built_from_revision),
+                            diagnostics,
+                            ..self.status(package)
+                        },
+                    )?;
+                    return Err(ResourceError::Provider(format!(
+                        "plugin package `{package}` did not build; inspect plugins:///{package}/.artist/status.json"
+                    )));
+                }
+                (
+                    self.root
+                        .join("target/wasm32-wasip2/debug")
+                        .join(&component),
                     diagnostics,
-                    ..self.status(package)
-                },
-            )?;
-            return Err(ResourceError::Provider(format!(
-                "plugin package `{package}` did not build; inspect plugins:///{package}/.artist/status.json"
-            )));
-        }
+                )
+            }
+            None => (
+                package_dir.join(&component),
+                "staged prebuilt language-neutral component\n".into(),
+            ),
+        };
         let current_source_revision = source_revision(&self.root, &package_dir)?;
         if current_source_revision != built_from_revision {
             diagnostics.push_str("source changed while the candidate was building\n");
@@ -338,7 +379,7 @@ impl PluginPackages {
                 current_revision: current_source_revision,
             });
         }
-        self.stage_artifact(package, &component, built_from_revision, diagnostics)
+        self.stage_artifact(package, &artifact, built_from_revision, diagnostics)
     }
 
     pub async fn activate(&self, package: &str) -> Result<PathBuf, ResourceError> {
@@ -410,13 +451,12 @@ impl PluginPackages {
     fn stage_artifact(
         &self,
         package: &str,
-        component: &str,
+        artifact: &Path,
         source_revision: String,
         diagnostics: String,
     ) -> Result<PathBuf, ResourceError> {
-        let artifact = self.root.join("target/wasm32-wasip2/debug").join(component);
         let candidate = self.generated(package)?.join("candidate.wasm");
-        std::fs::copy(&artifact, &candidate).map_err(provider)?;
+        std::fs::copy(artifact, &candidate).map_err(provider)?;
         let candidate_revision = sha256(&std::fs::read(&candidate).map_err(provider)?);
         let previous = self.status(package);
         self.write_status(
@@ -626,30 +666,36 @@ fn source_revision(catalog: &Path, package: &Path) -> Result<String, ResourceErr
     }
     let mut files = BTreeMap::new();
     visit(Path::new("package"), package, package, &mut files).map_err(provider)?;
-    for name in ["Cargo.toml", "Cargo.lock"] {
+    let uses_cargo = std::fs::read_to_string(package.join(MANIFEST_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<PluginPackageManifest>(&text).ok())
+        .is_some_and(|manifest| matches!(manifest.build, Some(PluginBuild::Cargo { .. })));
+    if uses_cargo {
+        for name in ["Cargo.toml", "Cargo.lock"] {
+            visit(
+                Path::new(name),
+                &catalog.join(name),
+                &catalog.join(name),
+                &mut files,
+            )
+            .map_err(provider)?;
+        }
         visit(
-            Path::new(name),
-            &catalog.join(name),
-            &catalog.join(name),
+            Path::new("sdk"),
+            &catalog.join("sdk"),
+            &catalog.join("sdk"),
             &mut files,
         )
         .map_err(provider)?;
-    }
-    visit(
-        Path::new("sdk"),
-        &catalog.join("sdk"),
-        &catalog.join("sdk"),
-        &mut files,
-    )
-    .map_err(provider)?;
-    if let Some(parent) = catalog.parent() {
-        visit(
-            Path::new("wit"),
-            &parent.join("wit"),
-            &parent.join("wit"),
-            &mut files,
-        )
-        .map_err(provider)?;
+        if let Some(parent) = catalog.parent() {
+            visit(
+                Path::new("wit"),
+                &parent.join("wit"),
+                &parent.join("wit"),
+                &mut files,
+            )
+            .map_err(provider)?;
+        }
     }
     let mut digest = Sha256::new();
     for (path, bytes) in files {
@@ -719,13 +765,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn language_neutral_prebuilt_component_stages_without_cargo() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("foreign-language");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join(MANIFEST_FILE),
+            r#"{"format": 2,"id":"example.foreign","component":"plugin.wasm"}"#,
+        )
+        .unwrap();
+        std::fs::write(package.join("plugin.wasm"), b"component bytes").unwrap();
+        let store = PluginPackages::new(temp.path());
+
+        let candidate = store.build("foreign-language").await.unwrap();
+        assert_eq!(std::fs::read(candidate).unwrap(), b"component bytes");
+        assert_eq!(store.status("foreign-language").state, PackageState::Built);
+    }
+
+    #[tokio::test]
     async fn package_sources_are_inspectable_editable_and_generated_state_is_protected() {
         let temp = tempfile::tempdir().unwrap();
         let package = temp.path().join("read");
         std::fs::create_dir_all(package.join("src")).unwrap();
         std::fs::write(
             package.join(MANIFEST_FILE),
-            r#"{"format":1,"id":"artist.tool.read","cargo_package":"artist-tool-read","component":"artist_tool_read.wasm"}"#,
+            r#"{"format": 2,"id":"artist.tool.read","build": {"adapter": "cargo", "package": "artist-tool-read"},"component":"artist_tool_read.wasm"}"#,
         )
         .unwrap();
         std::fs::write(package.join("src/lib.rs"), "old\n").unwrap();
@@ -769,7 +833,7 @@ mod tests {
         std::fs::create_dir_all(package.join(".artist")).unwrap();
         std::fs::write(
             package.join(MANIFEST_FILE),
-            r#"{"format":1,"id":"artist.tool.read","cargo_package":"artist-tool-read","component":"artist_tool_read.wasm"}"#,
+            r#"{"format": 2,"id":"artist.tool.read","build": {"adapter": "cargo", "package": "artist-tool-read"},"component":"artist_tool_read.wasm"}"#,
         )
         .unwrap();
         std::fs::write(package.join(".artist/candidate.wasm"), b"candidate").unwrap();
@@ -808,7 +872,7 @@ mod tests {
         std::fs::create_dir_all(package.join(".artist")).unwrap();
         std::fs::write(
             package.join(MANIFEST_FILE),
-            r#"{"format":1,"id":"artist.tool.read","cargo_package":"artist-tool-read","component":"artist_tool_read.wasm"}"#,
+            r#"{"format": 2,"id":"artist.tool.read","build": {"adapter": "cargo", "package": "artist-tool-read"},"component":"artist_tool_read.wasm"}"#,
         )
         .unwrap();
         std::fs::write(package.join("src/lib.rs"), "before\n").unwrap();
@@ -845,13 +909,50 @@ mod tests {
     }
 
     #[test]
+    fn stale_active_component_is_not_loaded_after_source_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("read");
+        std::fs::create_dir_all(package.join("src")).unwrap();
+        std::fs::create_dir_all(package.join(".artist")).unwrap();
+        std::fs::write(
+            package.join(MANIFEST_FILE),
+            r#"{"format": 2,"id":"artist.tool.read","component":"artist_tool_read.wasm"}"#,
+        )
+        .unwrap();
+        std::fs::write(package.join("src/lib.rs"), "before\n").unwrap();
+        std::fs::write(package.join(".artist/active.wasm"), b"active").unwrap();
+        let store = PluginPackages::new(temp.path());
+        let revision = source_revision(temp.path(), &package).unwrap();
+        store
+            .write_status(
+                "read",
+                PackageStatus {
+                    state: PackageState::Active,
+                    active_source_revision: Some(revision),
+                    ..PackageStatus::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.active_component("read").unwrap(),
+            package.join(".artist/active.wasm")
+        );
+        std::fs::write(package.join("src/lib.rs"), "after\n").unwrap();
+        assert!(matches!(
+            store.active_component("read"),
+            Err(ResourceError::Invalid(message)) if message.contains("current source revision")
+        ));
+    }
+
+    #[test]
     fn stale_package_formats_are_rejected_without_a_compatibility_path() {
         let temp = tempfile::tempdir().unwrap();
         let package = temp.path().join("read");
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
             package.join(MANIFEST_FILE),
-            r#"{"format":0,"id":"artist.tool.read","cargo_package":"artist-tool-read","component":"artist_tool_read.wasm"}"#,
+            r#"{"format":0,"id":"artist.tool.read","build": {"adapter": "cargo", "package": "artist-tool-read"},"component":"artist_tool_read.wasm"}"#,
         )
         .unwrap();
         assert!(matches!(

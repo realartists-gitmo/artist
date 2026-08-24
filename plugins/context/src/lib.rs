@@ -7,7 +7,7 @@ fn transform(messages: Vec<Message>) -> Result<Vec<Message>, String> {
     Ok(messages.into_iter().skip(from).collect())
 }
 
-artist_plugin_sdk::context_component!(Context, "artist.context", transform);
+artist_plugin_sdk::context_component!(Context, "artist.context", 0, transform);
 
 #[cfg(test)]
 mod tests {

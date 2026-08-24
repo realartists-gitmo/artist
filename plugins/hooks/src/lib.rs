@@ -6,4 +6,4 @@ fn observe(_: HookEvent) -> Result<HookDecision, String> {
     Ok(HookDecision::Proceed)
 }
 
-artist_plugin_sdk::hooks_component!(Hooks, "artist.hooks", observe);
+artist_plugin_sdk::hooks_component!(Hooks, "artist.hooks", 0, observe);

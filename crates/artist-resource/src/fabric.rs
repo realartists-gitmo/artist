@@ -7,12 +7,12 @@ use std::{
 use tokio::runtime::Handle;
 
 use crate::{
-    ResourceRouter, ResourceUri, SearchEngine, ToolError, fuse::FuseMount, uri_to_mount_path,
+    PlatformMount, ResourceRouter, ResourceUri, SearchEngine, ToolError, uri_to_mount_path,
 };
 
-/// Owns the ephemeral Unix projection and its one FFF index.
+/// Owns the native filesystem projection and its one FFF index.
 pub struct ResourceFabric {
-    mount: FuseMount,
+    mount: PlatformMount,
     search: Arc<SearchEngine>,
     refresh_task: tokio::task::JoinHandle<()>,
     working_directory: PathBuf,
@@ -28,7 +28,7 @@ impl ResourceFabric {
     ) -> Result<Self, ToolError> {
         let working_directory = working_directory.into();
         let mut generations = router.subscribe_generation();
-        let mount = FuseMount::mount(router.clone(), runtime)
+        let mount = PlatformMount::mount(router.clone(), runtime)
             .map_err(|e| ToolError::Failed(e.to_string()))?;
         let search = Arc::new(SearchEngine::new(mount.root()).map_err(ToolError::Failed)?);
         search

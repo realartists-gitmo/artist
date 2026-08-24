@@ -12,7 +12,7 @@ access. Deployments that need a boundary must provide it outside Artist.
 - `artist-store`: in-memory and JSONL session stores behind one narrow trait
 - `artist-kernel`: the single-owner session actor, streaming state machine, and transcript projection
 - `artist-rig`: thin Rig streaming adapter and `rig-memory` policies
-- `artist-resource`: canonical URI tree, deterministic routing, FUSE projection, and FFF search
+- `artist-resource`: canonical URI tree, deterministic routing, platform mount adapters, and FFF search
 - `artist-plugin`: versioned WIT component host and ordered capability chains
 - `artist-observe`: backend-neutral observations projected from public stream events
 - `plugins/{prompt,context,hooks,model,events}`: one lifecycle capability per WASM component
@@ -50,12 +50,15 @@ This formats and lints the Rust workspace, builds every `wasm32-wasip2`
 component, verifies that each advertises exactly one capability, invokes the
 production sockets through Wasmtime, and runs deterministic tests.
 
-On Linux with a usable `/dev/fuse`, the full Unix projection and shared FFF
+With a usable native mount driver (FUSE, macFUSE, or WinFsp), the full filesystem projection and shared FFF
 index smoke test is:
 
 ```sh
 make fuse-test
 ```
+
+Windows builds either place the matching WinFsp DLL beside the executable or
+enable `artist-resource/winfsp-system` to discover a system installation.
 
 An opt-in real-provider smoke test is available without becoming a product path:
 
@@ -75,7 +78,7 @@ OPENAI_API_KEY=... cargo run -p artist-rig --example openai -- <streaming-model-
 - With locked Rig 0.42, `AgentRunner` stream errors are terminal; Artist
   preserves partial output and closes the run instead of expecting a later
   recovery item from that stream.
-- The plugin ABI is `artist:plugin@0.6.0` in `wit/plugin.wit`; tool, resource,
+- The plugin ABI is `artist:plugin@0.7.0` in `wit/plugin.wit`; tool, resource,
   and slash-command providers are separate interoperable contracts. Slash
   commands have globally unique names, receive raw trailing arguments, return
   harness-facing output plus typed kernel actions, and are never profile-gated.

@@ -199,8 +199,44 @@ impl ResourceRouter {
                 });
             }
         }
+        if let ResourceRequest::Signal { name, payload, .. } = &request {
+            let signal = route
+                .signals
+                .iter()
+                .find(|signal| signal.name == *name)
+                .ok_or_else(|| {
+                    ResourceError::Invalid(format!(
+                        "signal `{name}` is not declared by the selected route"
+                    ))
+                })?;
+            let payload = payload
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|error| {
+                    ResourceError::Invalid(format!("signal payload is not valid JSON: {error}"))
+                })?
+                .unwrap_or(serde_json::Value::Null);
+            let validator = jsonschema::validator_for(&signal.payload_schema).map_err(|error| {
+                ResourceError::Invalid(format!("invalid signal payload schema: {error}"))
+            })?;
+            if let Err(error) = validator.validate(&payload) {
+                return Err(ResourceError::Invalid(format!(
+                    "payload for signal `{name}` does not match its schema: {error}"
+                )));
+            }
+        }
         let result = route.provider.handle(request).await;
-        if result.is_ok() && matches!(operation, ResourceOperation::Move) {
+        if result.is_ok()
+            && matches!(
+                operation,
+                ResourceOperation::Write
+                    | ResourceOperation::Edit
+                    | ResourceOperation::Move
+                    | ResourceOperation::Run
+                    | ResourceOperation::Signal
+            )
+        {
             self.changed();
         }
         result
@@ -339,6 +375,26 @@ fn validate_declaration(route: &ResourceRoute) -> Result<(), ResourceError> {
         return Err(ResourceError::Invalid(
             "signal definitions require the signal operation".into(),
         ));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for signal in &route.signals {
+        if signal.name.is_empty() {
+            return Err(ResourceError::Invalid(
+                "signal names must not be empty".into(),
+            ));
+        }
+        if !names.insert(&signal.name) {
+            return Err(ResourceError::Invalid(format!(
+                "signal `{}` is declared more than once",
+                signal.name
+            )));
+        }
+        jsonschema::validator_for(&signal.payload_schema).map_err(|error| {
+            ResourceError::Invalid(format!(
+                "invalid payload schema for signal `{}`: {error}",
+                signal.name
+            ))
+        })?;
     }
     Ok(())
 }
@@ -688,7 +744,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publishes_only_logical_topology_changes() {
+    async fn publishes_conservative_topology_invalidations() {
         let router = ResourceRouter::new();
         let mut changes = router.subscribe_generation();
         router
@@ -708,7 +764,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(!changes.has_changed().unwrap());
+        changes.changed().await.unwrap();
+        assert_eq!(*changes.borrow_and_update(), 2);
 
         router
             .register(
@@ -719,7 +776,7 @@ mod tests {
             .await
             .unwrap();
         changes.changed().await.unwrap();
-        assert_eq!(*changes.borrow_and_update(), 2);
+        assert_eq!(*changes.borrow_and_update(), 3);
 
         assert!(matches!(
             router
@@ -733,6 +790,185 @@ mod tests {
                 operation: ResourceOperation::Read,
                 ..
             })
+        ));
+    }
+
+    #[tokio::test]
+    async fn successful_mutations_notify_topology_watchers_but_reads_do_not() {
+        let cases = [
+            (
+                ResourceOperation::Edit,
+                ResourceRequest::Edit {
+                    uri: uri("changed"),
+                    expected_sha256: "0".repeat(64),
+                    replacements: vec![crate::TextReplacement {
+                        start_byte: 0,
+                        end_byte: 0,
+                        text: "x".into(),
+                    }],
+                },
+            ),
+            (
+                ResourceOperation::Move,
+                ResourceRequest::Move {
+                    from: uri("changed"),
+                    to: None,
+                },
+            ),
+            (
+                ResourceOperation::Run,
+                ResourceRequest::Run {
+                    target: uri("changed"),
+                    input: String::new(),
+                    cwd: None,
+                    env: Vec::new(),
+                    timeout: None,
+                },
+            ),
+        ];
+        for (operation, request) in cases {
+            let router = ResourceRouter::new();
+            router
+                .register(
+                    "provider",
+                    ResourceRoute::new("file:///**", None::<String>, [operation]),
+                    Arc::new(Text("ok")),
+                )
+                .await
+                .unwrap();
+            let mut changes = router.subscribe_generation();
+            assert!(router.handle(request).await.is_ok());
+            changes.changed().await.unwrap();
+        }
+
+        let router = ResourceRouter::new();
+        router
+            .register(
+                "signaler",
+                ResourceRoute::new("file:///**", None::<String>, [ResourceOperation::Signal])
+                    .with_signals(vec![SignalDefinition {
+                        name: "refresh".into(),
+                        description: "refresh topology".into(),
+                        payload_schema: json!({"type": "null"}),
+                    }]),
+                Arc::new(Text("ok")),
+            )
+            .await
+            .unwrap();
+        let mut changes = router.subscribe_generation();
+        router
+            .handle(ResourceRequest::Signal {
+                uri: uri("changed"),
+                name: "refresh".into(),
+                payload: None,
+            })
+            .await
+            .unwrap();
+        changes.changed().await.unwrap();
+
+        let router = ResourceRouter::new();
+        router
+            .register(
+                "observer",
+                ResourceRoute::new(
+                    "file:///**",
+                    None::<String>,
+                    [Read, ResourceOperation::Children, ResourceOperation::Poll],
+                ),
+                Arc::new(Text("ok")),
+            )
+            .await
+            .unwrap();
+        let requests = [
+            ResourceRequest::Read {
+                uri: uri("changed"),
+                start_line: None,
+                line_count: None,
+            },
+            ResourceRequest::Children {
+                uri: uri("changed"),
+            },
+            ResourceRequest::Poll {
+                uri: uri("changed"),
+                pattern: None,
+                timeout: None,
+                cursor: None,
+            },
+        ];
+        for request in requests {
+            let changes = router.subscribe_generation();
+            router.handle(request).await.unwrap();
+            assert!(!changes.has_changed().unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn signal_declarations_and_payload_schemas_are_enforced() {
+        let router = ResourceRouter::new();
+        router
+            .register(
+                "signals",
+                ResourceRoute::new("file:///**", None::<String>, [ResourceOperation::Signal])
+                    .with_signals(vec![
+                        SignalDefinition {
+                            name: "resize".into(),
+                            description: "resize it".into(),
+                            payload_schema: json!({
+                                "type": "object",
+                                "required": ["width"],
+                                "properties": {"width": {"type": "integer"}}
+                            }),
+                        },
+                        SignalDefinition {
+                            name: "reset".into(),
+                            description: "reset it".into(),
+                            payload_schema: json!({"type": "null"}),
+                        },
+                    ]),
+                Arc::new(Text("accepted")),
+            )
+            .await
+            .unwrap();
+        let signal = |name: &str, payload: Option<&str>| ResourceRequest::Signal {
+            uri: uri("source.rs"),
+            name: name.into(),
+            payload: payload.map(str::to_owned),
+        };
+        assert!(matches!(
+            router.handle(signal("missing", Some("null"))).await,
+            Err(ResourceError::Invalid(message)) if message.contains("not declared")
+        ));
+        assert!(matches!(
+            router.handle(signal("resize", Some("not-json"))).await,
+            Err(ResourceError::Invalid(message)) if message.contains("valid JSON")
+        ));
+        assert!(matches!(
+            router.handle(signal("resize", Some(r#"{"width":"wide"}"#))).await,
+            Err(ResourceError::Invalid(message)) if message.contains("does not match")
+        ));
+        assert_eq!(
+            router
+                .handle(signal("resize", Some(r#"{"width":80}"#)))
+                .await
+                .unwrap(),
+            ResourceReply::Text {
+                text: "accepted".into()
+            }
+        );
+        assert!(router.handle(signal("reset", None)).await.is_ok());
+
+        let empty = ResourceRouter::new();
+        empty
+            .register(
+                "empty",
+                ResourceRoute::new("file:///**", None::<String>, [ResourceOperation::Signal]),
+                Arc::new(Text("unreachable")),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            empty.handle(signal("anything", None)).await,
+            Err(ResourceError::Invalid(message)) if message.contains("not declared")
         ));
     }
 
@@ -833,6 +1069,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_replacement_accepts_multiple_routes_and_operations_atomically() {
+        let router = ResourceRouter::new();
+        let old: Arc<dyn ResourceProvider> = Arc::new(Text("old"));
+        router
+            .register(
+                "owner",
+                ResourceRoute::new("file:///**", None::<String>, [Read]),
+                old,
+            )
+            .await
+            .unwrap();
+        let provider: Arc<dyn ResourceProvider> = Arc::new(Text("new"));
+        router
+            .replace_owner(
+                "owner",
+                vec![
+                    (
+                        ResourceRoute::new(
+                            "file:///work/**",
+                            None::<String>,
+                            [Read, ResourceOperation::Write],
+                        ),
+                        provider.clone(),
+                    ),
+                    (
+                        ResourceRoute::new("mem:///**", None::<String>, [Read]),
+                        provider.clone(),
+                    ),
+                ],
+            )
+            .unwrap();
+        assert_eq!(router.routes().len(), 2);
+        assert_eq!(
+            router.route_owner(&uri("source.rs"), ResourceOperation::Write),
+            Some("owner".into())
+        );
+
+        let result = router.replace_owner(
+            "owner",
+            vec![
+                (
+                    ResourceRoute::new("file:///**", None::<String>, [Read]),
+                    provider.clone(),
+                ),
+                (
+                    ResourceRoute::new("[invalid", None::<String>, [Read]),
+                    provider,
+                ),
+            ],
+        );
+        assert!(result.is_err());
+        assert_eq!(router.routes().len(), 2);
+        assert_eq!(
+            router.route_owner(&uri("source.rs"), ResourceOperation::Write),
+            Some("owner".into())
+        );
+    }
+
+    #[tokio::test]
     async fn run_and_signal_are_forwarded_without_interpretation() {
         struct Control;
         #[async_trait]
@@ -871,7 +1166,7 @@ mod tests {
                     } => {
                         assert_eq!(target, uri("control"));
                         assert_eq!(name, "pause");
-                        assert_eq!(payload.as_deref(), Some("because"));
+                        assert_eq!(payload.as_deref(), Some("\"because\""));
                         Ok(ResourceReply::Signaled)
                     }
                     other => Err(ResourceError::Unsupported {
@@ -890,7 +1185,12 @@ mod tests {
                     "file:///**",
                     None::<String>,
                     [ResourceOperation::Run, ResourceOperation::Signal],
-                ),
+                )
+                .with_signals(vec![SignalDefinition {
+                    name: "pause".into(),
+                    description: "pause execution".into(),
+                    payload_schema: json!({"type": "string"}),
+                }]),
                 Arc::new(Control),
             )
             .await
@@ -918,7 +1218,7 @@ mod tests {
                 .handle(ResourceRequest::Signal {
                     uri: uri("control"),
                     name: "pause".into(),
-                    payload: Some("because".into()),
+                    payload: Some("\"because\"".into()),
                 })
                 .await
                 .unwrap(),

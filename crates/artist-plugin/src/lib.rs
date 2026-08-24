@@ -1,10 +1,10 @@
-//! Wasmtime component host for the Artist 0.6 plugin contracts.
+//! Wasmtime component host for the Artist 0.7 plugin contracts.
 
 mod packages;
 
 pub use packages::{
-    PACKAGE_FORMAT, PackageState, PackageStatus, PluginActivator, PluginPackageManifest,
-    PluginPackages,
+    PACKAGE_FORMAT, PackageState, PackageStatus, PluginActivator, PluginBuild,
+    PluginPackageManifest, PluginPackages,
 };
 
 use std::{
@@ -78,17 +78,16 @@ pub struct PluginHost {
     working_directory: PathBuf,
     packages: Arc<PluginPackages>,
     slash_commands: Arc<RwLock<HashMap<String, RegisteredSlashCommand>>>,
+    _provider_state: ProviderState,
     _activator: Arc<HostActivation>,
 }
 
-#[cfg(target_os = "linux")]
 pub struct PluginFabric {
     fabric: artist_resource::ResourceFabric,
     slot: Arc<RwLock<Option<Arc<SearchEngine>>>>,
     mounted_search: Arc<SearchEngine>,
 }
 
-#[cfg(target_os = "linux")]
 impl Deref for PluginFabric {
     type Target = artist_resource::ResourceFabric;
 
@@ -97,7 +96,6 @@ impl Deref for PluginFabric {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Drop for PluginFabric {
     fn drop(&mut self) {
         let mut slot = self.slot.write().expect("search service lock poisoned");
@@ -156,6 +154,7 @@ impl PluginHost {
         let linker = Arc::new(linker);
         let plugins = Arc::new(RwLock::new(Vec::new()));
         let slash_commands = Arc::new(RwLock::new(HashMap::new()));
+        let provider_state = ProviderState::default();
         let activator = Arc::new(HostActivation {
             engine: engine.clone(),
             linker: linker.clone(),
@@ -167,6 +166,7 @@ impl PluginHost {
             profiles: profiles.clone(),
             packages: packages.clone(),
             slash_commands: slash_commands.clone(),
+            provider_state: provider_state.clone(),
             activation: Mutex::new(()),
         });
         let package_activator: Arc<dyn PluginActivator> = activator.clone();
@@ -179,6 +179,7 @@ impl PluginHost {
             working_directory,
             packages,
             slash_commands,
+            _provider_state: provider_state,
             _activator: activator,
         };
         host.load_active_packages().await?;
@@ -239,7 +240,6 @@ impl PluginHost {
         Some(plugin.lock().await.descriptor.clone())
     }
 
-    #[cfg(target_os = "linux")]
     pub async fn mount_fabric(&self) -> Result<PluginFabric, PluginError> {
         let fabric = artist_resource::ResourceFabric::mount(
             self.router.clone(),
@@ -267,6 +267,14 @@ impl PluginHost {
         for slot in plugins {
             descriptors.push(slot.plugin.lock().await.descriptor.clone());
         }
+        descriptors.sort_by(|left, right| {
+            lifecycle_order(
+                left.priority,
+                left.id.as_str(),
+                right.priority,
+                right.id.as_str(),
+            )
+        });
         descriptors
     }
 
@@ -432,6 +440,8 @@ impl PluginHost {
         validate_schema(&profile.yield_schema)?;
         Ok(profile)
     }
+    /// Compose as a deterministic pipeline ordered by `(priority, plugin id)`.
+    /// Each provider receives the complete output of its predecessor.
     pub async fn compose_prompt(
         &mut self,
         mut fragments: Vec<ContextFragment>,
@@ -486,6 +496,8 @@ impl PluginHost {
             .await
             .map_err(PluginError::Resource)
     }
+    /// Transform context sequentially in lifecycle order; later transforms see
+    /// the complete result of earlier transforms.
     pub async fn transform_context(
         &mut self,
         mut messages: Vec<Message>,
@@ -508,6 +520,8 @@ impl PluginHost {
         }
         Ok(messages)
     }
+    /// Observe hooks in lifecycle order. Rewrites are retained in that order;
+    /// the first Stop is terminal and lower-precedence hooks are not invoked.
     pub async fn observe_hook(
         &mut self,
         event: &HookEvent,
@@ -530,10 +544,15 @@ impl PluginHost {
                         message,
                     })?
             };
+            let terminal = hook_is_terminal(&decision);
             decisions.push(decision);
+            if terminal {
+                break;
+            }
         }
         Ok(decisions)
     }
+    /// Configure the model as a deterministic pipeline in lifecycle order.
     pub async fn configure_model(
         &mut self,
         mut config: ModelConfig,
@@ -556,6 +575,8 @@ impl PluginHost {
         }
         Ok(config)
     }
+    /// Deliver events in lifecycle order, failing fast on the first observer
+    /// error so lower-precedence observers never see a partially failed event.
     pub async fn observe_event(&mut self, event: &str) -> Result<(), PluginError> {
         for plugin in self.with(PluginCapability::Events).await {
             let mut p = plugin.lock().await;
@@ -582,6 +603,10 @@ impl PluginHost {
             .read()
             .expect("loaded plugin lock poisoned")
             .clone();
+        let mut plugins = plugins;
+        plugins.sort_by(|left, right| {
+            lifecycle_order(left.priority, &left.id, right.priority, &right.id)
+        });
         for slot in plugins {
             if slot
                 .plugin
@@ -596,6 +621,21 @@ impl PluginHost {
         }
         selected
     }
+}
+
+fn lifecycle_order(
+    left_priority: i32,
+    left_id: &str,
+    right_priority: i32,
+    right_id: &str,
+) -> std::cmp::Ordering {
+    left_priority
+        .cmp(&right_priority)
+        .then_with(|| left_id.cmp(right_id))
+}
+
+fn hook_is_terminal(decision: &HookDecision) -> bool {
+    matches!(decision, HookDecision::Stop(_))
 }
 
 #[async_trait]
@@ -632,6 +672,7 @@ struct LoadedPlugin {
 #[derive(Clone)]
 struct LoadedPluginSlot {
     id: String,
+    priority: i32,
     plugin: Arc<Mutex<LoadedPlugin>>,
 }
 
@@ -646,6 +687,7 @@ struct HostActivation {
     profiles: Arc<ProfilesProvider>,
     packages: Arc<PluginPackages>,
     slash_commands: Arc<RwLock<HashMap<String, RegisteredSlashCommand>>>,
+    provider_state: ProviderState,
     activation: Mutex<()>,
 }
 
@@ -669,6 +711,7 @@ impl PluginActivator for HostActivation {
                 self.working_directory.clone(),
                 self.profiles.clone(),
                 self.packages.clone(),
+                self.provider_state.clone(),
             )
             .map_err(|error| error.to_string())?,
         );
@@ -683,6 +726,7 @@ impl PluginActivator for HostActivation {
         let descriptor = PluginDescriptor {
             id: PluginId::new(raw.id),
             version: raw.version,
+            priority: raw.priority,
             capabilities: raw.capabilities.into_iter().map(capability).collect(),
         };
         if descriptor.id.as_str() != manifest.id {
@@ -733,10 +777,8 @@ impl PluginActivator for HostActivation {
             PluginCapability::Tools if tool_definitions.len() != 1 => {
                 return Err("a tool component must define exactly one tool".into());
             }
-            PluginCapability::Resources if routes.len() != 1 || routes[0].operations.len() != 1 => {
-                return Err(
-                    "a resource component must define exactly one route and one operation".into(),
-                );
+            PluginCapability::Resources if routes.is_empty() => {
+                return Err("a resource component must define at least one route".into());
             }
             PluginCapability::Commands if slash_definitions.len() != 1 => {
                 return Err("a slash-command component must define exactly one command".into());
@@ -779,8 +821,22 @@ impl PluginActivator for HostActivation {
                 }),
             ));
         }
+        // Resource calls use independent component stores so an awaited call
+        // cannot serialize unrelated calls into the same logical provider.
+        // All provider-visible host state remains shared through the cloned
+        // registries/providers in HostState.
         let resource_provider: Arc<dyn ResourceProvider> = Arc::new(WasmResource {
-            plugin: plugin.clone(),
+            engine: self.engine.clone(),
+            linker: self.linker.clone(),
+            component: component.clone(),
+            registry: self.registry.clone(),
+            router: self.router.clone(),
+            search: self.search.clone(),
+            working_directory: self.working_directory.clone(),
+            profiles: self.profiles.clone(),
+            packages: self.packages.clone(),
+            provider_state: self.provider_state.clone(),
+            plugin_id: owner.clone(),
         });
         let mut resource_routes = Vec::new();
         for route in routes {
@@ -834,9 +890,14 @@ impl PluginActivator for HostActivation {
         }
         let mut plugins = self.plugins.write().expect("loaded plugin lock poisoned");
         if let Some(slot) = plugins.iter_mut().find(|slot| slot.id == owner) {
+            slot.priority = descriptor.priority;
             slot.plugin = plugin;
         } else {
-            plugins.push(LoadedPluginSlot { id: owner, plugin });
+            plugins.push(LoadedPluginSlot {
+                id: owner,
+                priority: descriptor.priority,
+                plugin,
+            });
         }
         Ok(())
     }
@@ -899,19 +960,126 @@ impl ToolHandler for WasmTool {
 }
 
 struct WasmResource {
-    plugin: Arc<Mutex<LoadedPlugin>>,
+    engine: Engine,
+    linker: Arc<Linker<HostState>>,
+    component: Component,
+    registry: ToolRegistry,
+    router: ResourceRouter,
+    search: Arc<RwLock<Option<Arc<SearchEngine>>>>,
+    working_directory: PathBuf,
+    profiles: Arc<ProfilesProvider>,
+    packages: Arc<PluginPackages>,
+    provider_state: ProviderState,
+    plugin_id: String,
 }
+
+#[derive(Clone, Default)]
+struct ProviderState {
+    namespaces: Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
+}
+
+impl ProviderState {
+    fn validate(key: &str, value: Option<&str>) -> Result<(), String> {
+        if key.is_empty() || key.len() > 4096 {
+            return Err("provider state keys must contain 1..=4096 UTF-8 bytes".into());
+        }
+        if value.is_some_and(|value| value.len() > 1024 * 1024) {
+            return Err("provider state values must not exceed 1 MiB".into());
+        }
+        Ok(())
+    }
+
+    fn get(&self, owner: &str, key: &str) -> Result<Option<String>, String> {
+        Self::validate(key, None)?;
+        Ok(self
+            .namespaces
+            .read()
+            .expect("provider state lock poisoned")
+            .get(owner)
+            .and_then(|namespace| namespace.get(key))
+            .cloned())
+    }
+
+    fn set(&self, owner: &str, key: String, value: String) -> Result<(), String> {
+        Self::validate(&key, Some(&value))?;
+        self.namespaces
+            .write()
+            .expect("provider state lock poisoned")
+            .entry(owner.to_owned())
+            .or_default()
+            .insert(key, value);
+        Ok(())
+    }
+
+    fn delete(&self, owner: &str, key: &str) -> Result<(), String> {
+        Self::validate(key, None)?;
+        let mut namespaces = self
+            .namespaces
+            .write()
+            .expect("provider state lock poisoned");
+        if let Some(namespace) = namespaces.get_mut(owner) {
+            namespace.remove(key);
+            if namespace.is_empty() {
+                namespaces.remove(owner);
+            }
+        }
+        Ok(())
+    }
+
+    fn compare_and_swap(
+        &self,
+        owner: &str,
+        key: String,
+        expected: Option<String>,
+        value: Option<String>,
+    ) -> Result<bool, String> {
+        Self::validate(&key, expected.as_deref())?;
+        Self::validate(&key, value.as_deref())?;
+        let mut namespaces = self
+            .namespaces
+            .write()
+            .expect("provider state lock poisoned");
+        let namespace = namespaces.entry(owner.to_owned()).or_default();
+        if namespace.get(&key) != expected.as_ref() {
+            return Ok(false);
+        }
+        match value {
+            Some(value) => {
+                namespace.insert(key, value);
+            }
+            None => {
+                namespace.remove(&key);
+            }
+        }
+        if namespace.is_empty() {
+            namespaces.remove(owner);
+        }
+        Ok(true)
+    }
+}
+
 #[async_trait]
 impl ResourceProvider for WasmResource {
     async fn handle(&self, request: CoreRequest) -> Result<CoreReply, ResourceError> {
-        let mut plugin = self.plugin.lock().await;
+        let mut state = HostState::new(
+            self.registry.clone(),
+            self.router.clone(),
+            self.search.clone(),
+            self.working_directory.clone(),
+            self.profiles.clone(),
+            self.packages.clone(),
+            self.provider_state.clone(),
+        )
+        .map_err(|error| ResourceError::Provider(error.to_string()))?;
+        state.plugin_id = Some(self.plugin_id.clone());
+        let mut store = Store::new(&self.engine, state);
+        let bindings = ArtistPlugin::instantiate_async(&mut store, &self.component, &self.linker)
+            .await
+            .map_err(|error| ResourceError::Provider(error.to_string()))?;
         let request = to_wit_request(request);
-        let LoadedPlugin {
-            store, bindings, ..
-        } = &mut *plugin;
         let reply = bindings
             .artist_plugin_resource_provider()
-            .call_handle(store, &request)
+            .call_handle(&mut store, &request)
             .await
             .map_err(|e| ResourceError::Provider(e.to_string()))?
             .map_err(from_wit_error)?;
@@ -928,6 +1096,7 @@ struct HostState {
     filesystem: Arc<FilesystemProvider>,
     profiles: Arc<ProfilesProvider>,
     packages: Arc<PluginPackages>,
+    provider_state: ProviderState,
     working_directory: PathBuf,
     invocation: Option<InvocationContext>,
     plugin_id: Option<String>,
@@ -941,6 +1110,7 @@ impl HostState {
         working_directory: PathBuf,
         profiles: Arc<ProfilesProvider>,
         packages: Arc<PluginPackages>,
+        provider_state: ProviderState,
     ) -> Result<Self, std::io::Error> {
         Ok(Self {
             table: ResourceTable::new(),
@@ -951,6 +1121,7 @@ impl HostState {
             filesystem: Arc::new(FilesystemProvider::new(&working_directory)),
             profiles,
             packages,
+            provider_state,
             working_directory,
             invocation: None,
             plugin_id: None,
@@ -1098,6 +1269,7 @@ impl HostState {
                 uri: self.uri(&request.uri)?,
                 pattern: request.match_,
                 timeout: request.timeout_ms.map(Duration::from_millis),
+                cursor: request.cursor,
             },
             W::Edit(request) => CoreRequest::Edit {
                 uri: self.uri(&request.uri)?,
@@ -1654,6 +1826,45 @@ impl artist::plugin::native_plugins::Host for HostState {
         }
     }
 }
+impl artist::plugin::provider_state::Host for HostState {
+    async fn get(&mut self, key: String) -> Result<Option<String>, String> {
+        let owner = self
+            .plugin_id
+            .as_deref()
+            .ok_or_else(|| "provider state requires an activated plugin identity".to_owned())?;
+        self.provider_state.get(owner, &key)
+    }
+
+    async fn set(&mut self, key: String, value: String) -> Result<(), String> {
+        let owner = self
+            .plugin_id
+            .as_deref()
+            .ok_or_else(|| "provider state requires an activated plugin identity".to_owned())?;
+        self.provider_state.set(owner, key, value)
+    }
+
+    async fn delete(&mut self, key: String) -> Result<(), String> {
+        let owner = self
+            .plugin_id
+            .as_deref()
+            .ok_or_else(|| "provider state requires an activated plugin identity".to_owned())?;
+        self.provider_state.delete(owner, &key)
+    }
+
+    async fn compare_and_swap(
+        &mut self,
+        key: String,
+        expected: Option<String>,
+        value: Option<String>,
+    ) -> Result<bool, String> {
+        let owner = self
+            .plugin_id
+            .as_deref()
+            .ok_or_else(|| "provider state requires an activated plugin identity".to_owned())?;
+        self.provider_state
+            .compare_and_swap(owner, key, expected, value)
+    }
+}
 impl artist::plugin::types::Host for HostState {}
 impl WasiView for HostState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
@@ -1814,10 +2025,12 @@ fn to_wit_request(request: CoreRequest) -> artist::plugin::types::ResourceReques
             uri,
             pattern,
             timeout,
+            cursor,
         } => w::ResourceRequest::Poll(w::PollRequest {
             uri: uri.to_string(),
             match_: pattern,
             timeout_ms: timeout.map(|d| d.as_millis() as u64),
+            cursor,
         }),
         CoreRequest::Edit {
             uri,
@@ -1888,6 +2101,7 @@ fn from_wit_reply(reply: artist::plugin::types::ResourceReply) -> Result<CoreRep
         R::Signaled => CoreReply::Signaled,
         R::Poll(p) => CoreReply::Poll {
             text: p.text,
+            next_cursor: p.next_cursor,
             outcome: match p.outcome {
                 W::Matched => artist_resource::PollOutcome::Matched,
                 W::Closed => artist_resource::PollOutcome::Closed,
@@ -1911,8 +2125,13 @@ fn core_to_wit_reply(reply: CoreReply) -> artist::plugin::types::ResourceReply {
         CoreReply::Moved => R::Moved,
         CoreReply::Started { uri } => R::Started(uri.to_string()),
         CoreReply::Signaled => R::Signaled,
-        CoreReply::Poll { text, outcome } => R::Poll(artist::plugin::types::PollReply {
+        CoreReply::Poll {
             text,
+            outcome,
+            next_cursor,
+        } => R::Poll(artist::plugin::types::PollReply {
+            text,
+            next_cursor,
             outcome: match outcome {
                 artist_resource::PollOutcome::Matched => W::Matched,
                 artist_resource::PollOutcome::Closed => W::Closed,
@@ -2146,6 +2365,76 @@ fn optional_usize(value: Option<u64>, field: &str) -> Result<Option<usize>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wasm_resource_provider_is_shareable_across_concurrent_router_calls() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<WasmResource>();
+    }
+
+    #[test]
+    fn concurrent_component_instances_share_namespaced_provider_state_atomically() {
+        let state = ProviderState::default();
+        let workers = (0..8)
+            .map(|_| {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        loop {
+                            let expected = state.get("resource-a", "count").unwrap();
+                            let current =
+                                expected.as_deref().unwrap_or("0").parse::<u64>().unwrap();
+                            if state
+                                .compare_and_swap(
+                                    "resource-a",
+                                    "count".into(),
+                                    expected,
+                                    Some((current + 1).to_string()),
+                                )
+                                .unwrap()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(
+            state.get("resource-a", "count").unwrap().as_deref(),
+            Some("800")
+        );
+        assert_eq!(state.get("resource-b", "count").unwrap(), None);
+        state
+            .set("resource-b", "count".into(), "private".into())
+            .unwrap();
+        state.delete("resource-a", "count").unwrap();
+        assert_eq!(state.get("resource-a", "count").unwrap(), None);
+        assert_eq!(
+            state.get("resource-b", "count").unwrap().as_deref(),
+            Some("private")
+        );
+    }
+
+    #[test]
+    fn lifecycle_order_is_priority_then_id_not_activation_order() {
+        let mut providers = vec![(10, "zeta"), (-5, "last-loaded"), (10, "alpha")];
+        providers.sort_by(|left, right| lifecycle_order(left.0, left.1, right.0, right.1));
+        assert_eq!(
+            providers,
+            [(-5, "last-loaded"), (10, "alpha"), (10, "zeta")]
+        );
+    }
+
+    #[test]
+    fn hook_stop_is_the_only_terminal_composition_decision() {
+        assert!(!hook_is_terminal(&HookDecision::Proceed));
+        assert!(!hook_is_terminal(&HookDecision::Rewrite("next".into())));
+        assert!(hook_is_terminal(&HookDecision::Stop("done".into())));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn host_initializes_without_native_model_tools_or_a_private_runtime() {

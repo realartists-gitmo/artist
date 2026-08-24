@@ -51,22 +51,27 @@ The model-facing verbs are `read`, `find`, `grep`, `write`, `edit`, `move`,
 callbacks. Calls carry one correlation ID and a stack, so direct and indirect
 plugin recursion fails before component re-entry.
 
-On Linux, `ResourceFabric` owns an ephemeral FUSE projection and one FFF 0.10.5
-index over the complete mount. URI queries appear as separate Unix names such as
-`rust.rs?symbols/`; shells start in the projected `file` subtree and receive the
-mount root as `ARTIST_ROOT`. FUSE attributes exist only to satisfy the kernel.
+`ResourceFabric` owns a native projection (FUSE on Linux, macFUSE on macOS,
+WinFsp on Windows) behind a platform adapter and one FFF 0.10.5 index over the
+complete mount. URI queries appear as separate, cross-platform-safe names such
+as `rust.rs~symbols/`; shells start in the projected `file` subtree and receive the
+mount root as `ARTIST_ROOT`. Native filesystem attributes exist only to satisfy
+the platform driver.
 
-The component ABI is `artist:plugin@0.6.0`. Tool providers, resource providers,
+The component ABI is `artist:plugin@0.7.0`. Tool providers, resource providers,
 and harness-facing slash-command providers are separate exports; prompt,
 context, hooks, model configuration, and event lifecycle exports remain intact.
 Slash command registration is globally unique and deliberately bypasses model
 profile policy. Separate filesystem components own
 the terminal read, children, write, edit, and move routes. Two profile resource
-components own `profiles:///` read and children routes. Eleven additional narrow
-WASM components each own one model-facing verb and call typed host imports.
-Six package resource components expose the host-owned `plugins:///` catalog one
-operation at a time. Packages include source and build inputs; lifecycle signals
-test and compile inactive candidates, validate them, and replace live
+components own `profiles:///` read and children routes. Additional WASM
+components own model-facing verbs and call typed host imports. Resource
+components may advertise multiple routes and operations. Packages are
+language-neutral components with optional source-build adapters; lifecycle
+signals build or stage inactive candidates, validate them, and replace live
 registrations by owner without invalidating in-flight calls.
-The host owns only native filesystem mechanics, routing, FUSE, and FFF; it
+Concurrent resource calls use independent component instances. Shared
+provider-lifetime state is host-owned, namespaced by plugin ID, and exposes atomic
+compare-and-swap; guest memory is request-local.
+The host owns only native filesystem mechanics, routing, mount adapters, and FFF; it
 registers no model-facing tools itself.

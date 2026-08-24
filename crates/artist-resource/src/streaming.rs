@@ -52,6 +52,7 @@ impl ResourceProvider for AppendOnlyResource {
                 uri: _,
                 pattern,
                 timeout,
+                cursor,
             } => {
                 let regex = pattern
                     .map(|p| {
@@ -59,7 +60,10 @@ impl ResourceProvider for AppendOnlyResource {
                             .map_err(|e| ResourceError::Invalid(format!("invalid poll regex: {e}")))
                     })
                     .transpose()?;
-                let start = self.state.lock().unwrap().text.len();
+                let start = match cursor {
+                    Some(cursor) => parse_cursor(&cursor, &self.state.lock().unwrap().text)?,
+                    None => self.state.lock().unwrap().text.len(),
+                };
                 let wait = async {
                     loop {
                         let notified = self.changed.notified();
@@ -86,7 +90,12 @@ impl ResourceProvider for AppendOnlyResource {
                     },
                     None => wait.await,
                 };
-                Ok(ResourceReply::Poll { text, outcome })
+                let next_cursor = format_cursor(start + text.len());
+                Ok(ResourceReply::Poll {
+                    text,
+                    outcome,
+                    next_cursor,
+                })
             }
             other => Err(ResourceError::Unsupported {
                 uri: other.uri().clone(),
@@ -94,6 +103,19 @@ impl ResourceProvider for AppendOnlyResource {
             }),
         }
     }
+}
+
+fn format_cursor(offset: usize) -> String {
+    format!("append-v1:{offset}")
+}
+
+fn parse_cursor(cursor: &str, text: &str) -> Result<usize, ResourceError> {
+    let offset = cursor
+        .strip_prefix("append-v1:")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|offset| *offset <= text.len() && text.is_char_boundary(*offset))
+        .ok_or_else(|| ResourceError::Invalid("invalid or stale poll cursor".into()))?;
+    Ok(offset)
 }
 
 #[cfg(test)]
@@ -114,6 +136,7 @@ mod tests {
                         uri: ResourceUri::resolve("process://run/out", Path::new("/")).unwrap(),
                         pattern: Some("done".into()),
                         timeout: Some(Duration::from_secs(1)),
+                        cursor: None,
                     })
                     .await
                     .unwrap()
@@ -125,7 +148,8 @@ mod tests {
             pending.await.unwrap(),
             ResourceReply::Poll {
                 text: "new done\n".into(),
-                outcome: PollOutcome::Matched
+                outcome: PollOutcome::Matched,
+                next_cursor: "append-v1:13".into(),
             }
         );
     }
@@ -141,6 +165,7 @@ mod tests {
                         uri: ResourceUri::resolve("process://run/out", Path::new("/")).unwrap(),
                         pattern: None,
                         timeout: Some(Duration::from_secs(1)),
+                        cursor: None,
                     })
                     .await
                     .unwrap()
@@ -171,6 +196,7 @@ mod tests {
                         uri: ResourceUri::resolve("process://run/out", Path::new("/")).unwrap(),
                         pattern: None,
                         timeout: Some(Duration::from_millis(20)),
+                        cursor: None,
                     })
                     .await
                     .unwrap()
@@ -182,8 +208,55 @@ mod tests {
             pending.await.unwrap(),
             ResourceReply::Poll {
                 text: "later".into(),
-                outcome: PollOutcome::TimedOut
+                outcome: PollOutcome::TimedOut,
+                next_cursor: "append-v1:5".into(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn continuation_delivers_output_emitted_between_polls_exactly_once() {
+        let resource = AppendOnlyResource::default();
+        let uri = ResourceUri::resolve("process://run/out", Path::new("/")).unwrap();
+        let first = resource
+            .handle(ResourceRequest::Poll {
+                uri: uri.clone(),
+                pattern: None,
+                timeout: Some(Duration::from_millis(1)),
+                cursor: None,
+            })
+            .await
+            .unwrap();
+        let ResourceReply::Poll { next_cursor, .. } = first else {
+            panic!("expected poll reply");
+        };
+        resource.append("between");
+        let second = resource
+            .handle(ResourceRequest::Poll {
+                uri: uri.clone(),
+                pattern: None,
+                timeout: Some(Duration::from_millis(1)),
+                cursor: Some(next_cursor),
+            })
+            .await
+            .unwrap();
+        let ResourceReply::Poll {
+            text, next_cursor, ..
+        } = second
+        else {
+            panic!("expected poll reply");
+        };
+        assert_eq!(text, "between");
+        resource.append("after");
+        let third = resource
+            .handle(ResourceRequest::Poll {
+                uri,
+                pattern: None,
+                timeout: Some(Duration::from_millis(1)),
+                cursor: Some(next_cursor),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(third, ResourceReply::Poll { text, .. } if text == "after"));
     }
 }

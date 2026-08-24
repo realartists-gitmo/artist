@@ -56,6 +56,7 @@ pub fn resource_reply(reply: ResourceReply) -> String {
         ResourceReply::Signaled => json!({"signaled": true}),
         ResourceReply::Poll(reply) => json!({
             "text": reply.text,
+            "next_cursor": reply.next_cursor,
             "outcome": match reply.outcome {
                 PollOutcome::Matched => "matched",
                 PollOutcome::Closed => "closed",
@@ -70,6 +71,28 @@ pub fn call_resource(request: ResourceRequest) -> Result<String, String> {
     artist::plugin::host_resources::handle(&request)
         .map(resource_reply)
         .map_err(resource_error)
+}
+
+pub fn provider_state_get(key: &str) -> Result<Option<String>, String> {
+    artist::plugin::provider_state::get(key)
+}
+
+pub fn provider_state_set(key: &str, value: &str) -> Result<(), String> {
+    artist::plugin::provider_state::set(key, value)
+}
+
+pub fn provider_state_delete(key: &str) -> Result<(), String> {
+    artist::plugin::provider_state::delete(key)
+}
+
+/// Atomically replace a state value only when it still equals `expected`.
+/// `None` represents an absent key and may also be used to delete it.
+pub fn provider_state_compare_and_swap(
+    key: &str,
+    expected: Option<&str>,
+    value: Option<&str>,
+) -> Result<bool, String> {
+    artist::plugin::provider_state::compare_and_swap(key, expected, value)
 }
 
 pub fn resource_error(error: artist::plugin::types::ResourceError) -> String {
@@ -155,11 +178,12 @@ macro_rules! unadvertised_slash_commands {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! lifecycle_stubs {
-    ($plugin:ident, $id:literal, $capability:expr) => {
+    ($plugin:ident, $id:literal, $priority:expr, $capability:expr) => {
         fn descriptor() -> $crate::artist::plugin::types::PluginDescriptor {
             $crate::artist::plugin::types::PluginDescriptor {
                 id: $id.into(),
                 version: env!("CARGO_PKG_VERSION").into(),
+                priority: $priority,
                 capabilities: vec![$capability],
             }
         }
@@ -168,9 +192,9 @@ macro_rules! lifecycle_stubs {
 
 #[macro_export]
 macro_rules! prompt_component {
-    ($plugin:ident, $id:literal, $compose:path) => {
+    ($plugin:ident, $id:literal, $priority:expr, $compose:path) => {
         impl $crate::exports::artist::plugin::lifecycle::Guest for $plugin {
-            $crate::lifecycle_stubs!($plugin, $id, $crate::artist::plugin::types::Capability::Prompt);
+            $crate::lifecycle_stubs!($plugin, $id, $priority, $crate::artist::plugin::types::Capability::Prompt);
             fn compose_prompt(fragments: Vec<$crate::artist::plugin::types::ContextFragment>) -> Result<Vec<$crate::artist::plugin::types::ContextFragment>, String> { $compose(fragments) }
             fn transform_context(_: Vec<$crate::artist::plugin::types::Message>) -> Result<Vec<$crate::artist::plugin::types::Message>, String> { Err("context socket is not advertised".into()) }
             fn observe_hook(_: $crate::artist::plugin::types::HookEvent) -> Result<$crate::artist::plugin::types::HookDecision, String> { Err("hook socket is not advertised".into()) }
@@ -186,9 +210,9 @@ macro_rules! prompt_component {
 
 #[macro_export]
 macro_rules! context_component {
-    ($plugin:ident, $id:literal, $transform:path) => {
+    ($plugin:ident, $id:literal, $priority:expr, $transform:path) => {
         impl $crate::exports::artist::plugin::lifecycle::Guest for $plugin {
-            $crate::lifecycle_stubs!($plugin, $id, $crate::artist::plugin::types::Capability::Context);
+            $crate::lifecycle_stubs!($plugin, $id, $priority, $crate::artist::plugin::types::Capability::Context);
             fn compose_prompt(_: Vec<$crate::artist::plugin::types::ContextFragment>) -> Result<Vec<$crate::artist::plugin::types::ContextFragment>, String> { Err("prompt socket is not advertised".into()) }
             fn transform_context(messages: Vec<$crate::artist::plugin::types::Message>) -> Result<Vec<$crate::artist::plugin::types::Message>, String> { $transform(messages) }
             fn observe_hook(_: $crate::artist::plugin::types::HookEvent) -> Result<$crate::artist::plugin::types::HookDecision, String> { Err("hook socket is not advertised".into()) }
@@ -204,9 +228,9 @@ macro_rules! context_component {
 
 #[macro_export]
 macro_rules! hooks_component {
-    ($plugin:ident, $id:literal, $observe:path) => {
+    ($plugin:ident, $id:literal, $priority:expr, $observe:path) => {
         impl $crate::exports::artist::plugin::lifecycle::Guest for $plugin {
-            $crate::lifecycle_stubs!($plugin, $id, $crate::artist::plugin::types::Capability::Hooks);
+            $crate::lifecycle_stubs!($plugin, $id, $priority, $crate::artist::plugin::types::Capability::Hooks);
             fn compose_prompt(_: Vec<$crate::artist::plugin::types::ContextFragment>) -> Result<Vec<$crate::artist::plugin::types::ContextFragment>, String> { Err("prompt socket is not advertised".into()) }
             fn transform_context(_: Vec<$crate::artist::plugin::types::Message>) -> Result<Vec<$crate::artist::plugin::types::Message>, String> { Err("context socket is not advertised".into()) }
             fn observe_hook(event: $crate::artist::plugin::types::HookEvent) -> Result<$crate::artist::plugin::types::HookDecision, String> { $observe(event) }
@@ -222,9 +246,9 @@ macro_rules! hooks_component {
 
 #[macro_export]
 macro_rules! model_component {
-    ($plugin:ident, $id:literal, $configure:path) => {
+    ($plugin:ident, $id:literal, $priority:expr, $configure:path) => {
         impl $crate::exports::artist::plugin::lifecycle::Guest for $plugin {
-            $crate::lifecycle_stubs!($plugin, $id, $crate::artist::plugin::types::Capability::Model);
+            $crate::lifecycle_stubs!($plugin, $id, $priority, $crate::artist::plugin::types::Capability::Model);
             fn compose_prompt(_: Vec<$crate::artist::plugin::types::ContextFragment>) -> Result<Vec<$crate::artist::plugin::types::ContextFragment>, String> { Err("prompt socket is not advertised".into()) }
             fn transform_context(_: Vec<$crate::artist::plugin::types::Message>) -> Result<Vec<$crate::artist::plugin::types::Message>, String> { Err("context socket is not advertised".into()) }
             fn observe_hook(_: $crate::artist::plugin::types::HookEvent) -> Result<$crate::artist::plugin::types::HookDecision, String> { Err("hook socket is not advertised".into()) }
@@ -240,9 +264,9 @@ macro_rules! model_component {
 
 #[macro_export]
 macro_rules! events_component {
-    ($plugin:ident, $id:literal, $observe:path) => {
+    ($plugin:ident, $id:literal, $priority:expr, $observe:path) => {
         impl $crate::exports::artist::plugin::lifecycle::Guest for $plugin {
-            $crate::lifecycle_stubs!($plugin, $id, $crate::artist::plugin::types::Capability::Events);
+            $crate::lifecycle_stubs!($plugin, $id, $priority, $crate::artist::plugin::types::Capability::Events);
             fn compose_prompt(_: Vec<$crate::artist::plugin::types::ContextFragment>) -> Result<Vec<$crate::artist::plugin::types::ContextFragment>, String> { Err("prompt socket is not advertised".into()) }
             fn transform_context(_: Vec<$crate::artist::plugin::types::Message>) -> Result<Vec<$crate::artist::plugin::types::Message>, String> { Err("context socket is not advertised".into()) }
             fn observe_hook(_: $crate::artist::plugin::types::HookEvent) -> Result<$crate::artist::plugin::types::HookDecision, String> { Err("hook socket is not advertised".into()) }
@@ -261,7 +285,7 @@ macro_rules! events_component {
 macro_rules! unadvertised_lifecycle {
     ($plugin:ident, $id:literal, $capability:expr) => {
         impl $crate::exports::artist::plugin::lifecycle::Guest for $plugin {
-            $crate::lifecycle_stubs!($plugin, $id, $capability);
+            $crate::lifecycle_stubs!($plugin, $id, 0, $capability);
             fn compose_prompt(
                 _: Vec<$crate::artist::plugin::types::ContextFragment>,
             ) -> Result<Vec<$crate::artist::plugin::types::ContextFragment>, String> {
@@ -310,18 +334,13 @@ macro_rules! tool_component {
 
 #[macro_export]
 macro_rules! resource_component {
-    ($plugin:ident, $id:literal, $operation:expr, $handle:path) => {
+    ($plugin:ident, $id:literal, $routes:expr, $handle:path) => {
         $crate::unadvertised_lifecycle!($plugin, $id, $crate::artist::plugin::types::Capability::Resources);
         $crate::unadvertised_tools!($plugin);
         $crate::unadvertised_slash_commands!($plugin);
         impl $crate::exports::artist::plugin::resource_provider::Guest for $plugin {
             fn routes() -> Result<Vec<$crate::artist::plugin::types::ResourceRoute>, String> {
-                Ok(vec![$crate::artist::plugin::types::ResourceRoute {
-                    base_glob: "file:///**".into(),
-                    projection_glob: None,
-                    operations: vec![$operation],
-                    signals: Vec::new(),
-                }])
+                Ok($routes)
             }
             fn handle(request: $crate::artist::plugin::types::ResourceRequest) -> Result<$crate::artist::plugin::types::ResourceReply, $crate::artist::plugin::types::ResourceError> {
                 $handle(request)

@@ -10,15 +10,17 @@ mod search;
 mod streaming;
 mod uri;
 
-#[cfg(target_os = "linux")]
 mod fabric;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod fuse;
+mod mount;
+#[cfg(target_os = "windows")]
+mod winfsp;
 
 pub use anchor::*;
-#[cfg(target_os = "linux")]
 pub use fabric::*;
 pub use filesystem::*;
+pub use mount::*;
 pub use profiles::*;
 pub use registry::*;
 pub use resource::*;

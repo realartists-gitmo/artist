@@ -1,6 +1,6 @@
 {
-  "format": 1,
+  "format": 2,
   "id": "artist.tool.grep",
-  "cargo_package": "artist-tool-grep",
+  "build": {"adapter": "cargo", "package": "artist-tool-grep"},
   "component": "artist_tool_grep.wasm"
 }

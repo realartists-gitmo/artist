@@ -1,6 +1,6 @@
 // PRE-PRODUCTION POLICY: bump this ABI directly when it changes. Do not add
 // compatibility worlds, legacy interfaces, or migration adapters.
-package artist:plugin@0.6.0;
+package artist:plugin@0.7.0;
 
 interface types {
     enum capability {
@@ -17,6 +17,8 @@ interface types {
     record plugin-descriptor {
         id: string,
         version: string,
+        // Lifecycle providers run by ascending priority, then id.
+        priority: s32,
         capabilities: list<capability>,
     }
 
@@ -91,7 +93,12 @@ interface types {
     record read-request { uri: string, start-line: option<u64>, line-count: option<u64> }
     record write-request { uri: string, text: string }
     record move-request { source: string, to: option<string> }
-    record poll-request { uri: string, match: option<string>, timeout-ms: option<u64> }
+    record poll-request {
+        uri: string,
+        match: option<string>,
+        timeout-ms: option<u64>,
+        cursor: option<string>,
+    }
     record environment-entry { name: string, value: string }
     record run-request {
         target: string,
@@ -165,7 +172,7 @@ interface types {
         poll(poll-request),
     }
     enum poll-outcome { matched, closed, timed-out }
-    record poll-reply { text: string, outcome: poll-outcome }
+    record poll-reply { text: string, outcome: poll-outcome, next-cursor: string }
     record edited-reply { revision: string }
     variant resource-reply {
         text(string),
@@ -246,6 +253,16 @@ interface host-resources {
     grep: func(request: grep-request) -> result<string, string>;
 }
 
+// Provider-lifetime state for one logical component provider. Resource calls may run
+// in separate component instances, so guest memory is request-local; this
+// host-owned namespace is shared by every concurrent call from the same plugin.
+interface provider-state {
+    get: func(key: string) -> result<option<string>, string>;
+    set: func(key: string, value: string) -> result<_, string>;
+    delete: func(key: string) -> result<_, string>;
+    compare-and-swap: func(key: string, expected: option<string>, value: option<string>) -> result<bool, string>;
+}
+
 interface native-filesystem {
     use types.{edit-request, resource-error};
     read: func(uri: string, start-line: option<u64>, line-count: option<u64>) -> result<string, string>;
@@ -276,6 +293,7 @@ world artist-plugin {
     import host-tools;
     import host-control;
     import host-resources;
+    import provider-state;
     import native-filesystem;
     import native-profiles;
     import native-plugins;

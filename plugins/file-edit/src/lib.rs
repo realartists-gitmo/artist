@@ -16,6 +16,11 @@ fn handle(request: ResourceRequest) -> Result<ResourceReply, ResourceError> {
 artist_plugin_sdk::resource_component!(
     FileEdit,
     "artist.file.edit",
-    ResourceOperation::Edit,
+    vec![ResourceRoute {
+        base_glob: "file:///**".into(),
+        projection_glob: None,
+        operations: vec![ResourceOperation::Edit],
+        signals: Vec::new(),
+    }],
     handle
 );

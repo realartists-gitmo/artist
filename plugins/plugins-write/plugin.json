@@ -1,6 +1,6 @@
 {
-  "format": 1,
+  "format": 2,
   "id": "artist.plugins.write",
-  "cargo_package": "artist-plugins-write",
+  "build": {"adapter": "cargo", "package": "artist-plugins-write"},
   "component": "artist_plugins_write.wasm"
 }

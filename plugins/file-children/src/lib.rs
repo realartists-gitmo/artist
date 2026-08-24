@@ -25,6 +25,11 @@ fn unsupported() -> ResourceError {
 artist_plugin_sdk::resource_component!(
     FileChildren,
     "artist.file.children",
-    ResourceOperation::Children,
+    vec![ResourceRoute {
+        base_glob: "file:///**".into(),
+        projection_glob: None,
+        operations: vec![ResourceOperation::Children],
+        signals: Vec::new(),
+    }],
     handle
 );

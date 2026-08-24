@@ -1,6 +1,6 @@
 {
-  "format": 1,
+  "format": 2,
   "id": "artist.tool.yield",
-  "cargo_package": "artist-tool-yield",
+  "build": {"adapter": "cargo", "package": "artist-tool-yield"},
   "component": "artist_tool_yield.wasm"
 }

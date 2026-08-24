@@ -6,4 +6,4 @@ fn configure(config: ModelConfig) -> Result<ModelConfig, String> {
     Ok(config)
 }
 
-artist_plugin_sdk::model_component!(Model, "artist.model", configure);
+artist_plugin_sdk::model_component!(Model, "artist.model", 0, configure);

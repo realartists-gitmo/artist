@@ -1,4 +1,11 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use artist_core::{
     ContextFragment as CoreContextFragment, ContextRole as CoreContextRole, InitialContext,
@@ -6,8 +13,11 @@ use artist_core::{
 };
 use artist_plugin::{ContextFragment, ContextRole, HookEvent, Message, ModelConfig, PluginHost};
 use artist_resource::{
-    InvocationContext, ResourceReply, ResourceRequest, ResourceUri, TextReplacement, sha256,
+    InvocationContext, ResourceError, ResourceOperation, ResourceProvider, ResourceReply,
+    ResourceRequest, ResourceRoute, ResourceUri, TextReplacement, sha256,
 };
+use async_trait::async_trait;
+use tokio::sync::Notify;
 
 const COMPONENT_IDS: [&str; 29] = [
     "artist.prompt",
@@ -41,6 +51,107 @@ const COMPONENT_IDS: [&str; 29] = [
     "artist.tool.handoff",
 ];
 
+struct TwoCallBarrier {
+    entered: AtomicUsize,
+    release: Notify,
+}
+
+#[async_trait]
+impl ResourceProvider for TwoCallBarrier {
+    async fn handle(&self, request: ResourceRequest) -> Result<ResourceReply, ResourceError> {
+        let entered = self.entered.fetch_add(1, Ordering::AcqRel) + 1;
+        if entered >= 2 {
+            self.release.notify_waiters();
+        }
+        while self.entered.load(Ordering::Acquire) < 2 {
+            let notified = self.release.notified();
+            if self.entered.load(Ordering::Acquire) >= 2 {
+                break;
+            }
+            notified.await;
+        }
+        Ok(ResourceReply::Text {
+            text: request.uri().to_string(),
+        })
+    }
+}
+
+async fn verify_concurrent_resource_instances(
+    profiles: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let plugins = tempfile::tempdir()?;
+    let package = plugins.path().join("concurrency");
+    std::fs::create_dir_all(&package)?;
+    std::fs::copy(
+        "plugins/target/wasm32-wasip2/debug/artist_concurrent_resource_fixture.wasm",
+        package.join("fixture.wasm"),
+    )?;
+    std::fs::write(
+        package.join("plugin.json"),
+        serde_json::json!({
+            "format": 2,
+            "id": "artist.test.concurrent-resource",
+            "component": "fixture.wasm"
+        })
+        .to_string(),
+    )?;
+    let host = PluginHost::new_with_roots(profiles, plugins.path()).await?;
+    host.packages().build("concurrency").await?;
+    host.packages().activate("concurrency").await?;
+    let router = host.router();
+    assert_eq!(
+        router.route_owner(
+            &ResourceUri::resolve("concurrent:///child", std::path::Path::new("/"))?,
+            ResourceOperation::Children,
+        ),
+        Some("artist.test.concurrent-resource".into())
+    );
+    assert_eq!(
+        router.route_owner(
+            &ResourceUri::resolve("parallel:///read", std::path::Path::new("/"))?,
+            ResourceOperation::Read,
+        ),
+        Some("artist.test.concurrent-resource".into())
+    );
+    router
+        .register(
+            "test.barrier",
+            ResourceRoute::new("barrier:///**", None::<String>, [ResourceOperation::Read]),
+            Arc::new(TwoCallBarrier {
+                entered: AtomicUsize::new(0),
+                release: Notify::new(),
+            }),
+        )
+        .await?;
+    let request = |name: &str| ResourceRequest::Read {
+        uri: ResourceUri::resolve(&format!("concurrent:///{name}"), std::path::Path::new("/"))
+            .unwrap(),
+        start_line: None,
+        line_count: None,
+    };
+    let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(
+            router.handle(request("first")),
+            router.handle(request("second"))
+        )
+    })
+    .await?;
+    let mut values = [first?, second?]
+        .into_iter()
+        .map(|reply| match reply {
+            ResourceReply::Text { text } => text,
+            other => panic!("unexpected concurrent reply: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    values.sort();
+    assert_eq!(values, ["1", "2"]);
+    assert_eq!(
+        router.handle(request("third")).await?,
+        ResourceReply::Text { text: "3".into() }
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = tempfile::tempdir()?;
@@ -64,12 +175,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert_eq!(untouched.len(), 1, "the host must not shape prompts");
 
+    verify_concurrent_resource_instances(profiles.path()).await?;
+
     let mut host = PluginHost::new_with_profiles(profiles.path()).await?;
 
     let packages = host.packages();
     for package in packages.package_names()? {
-        packages.build(&package).await?;
-        packages.activate(&package).await?;
+        if packages.active_component(&package).is_err() {
+            packages.build(&package).await?;
+            packages.activate(&package).await?;
+        }
     }
     let mut loaded = BTreeSet::new();
     for descriptor in host.descriptors().await {
@@ -188,7 +303,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             line_count: None,
         })
         .await?,
-        ResourceReply::Text { text } if text.contains("package artist:plugin@0.6.0")
+        ResourceReply::Text { text } if text.contains("package artist:plugin@0.7.0")
     ));
     assert!(matches!(
         host.handle_resource(ResourceRequest::Children {

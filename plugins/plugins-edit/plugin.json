@@ -1,6 +1,6 @@
 {
-  "format": 1,
+  "format": 2,
   "id": "artist.plugins.edit",
-  "cargo_package": "artist-plugins-edit",
+  "build": {"adapter": "cargo", "package": "artist-plugins-edit"},
   "component": "artist_plugins_edit.wasm"
 }

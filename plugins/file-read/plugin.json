@@ -1,6 +1,6 @@
 {
-  "format": 1,
+  "format": 2,
   "id": "artist.file.read",
-  "cargo_package": "artist-file-read",
+  "build": {"adapter": "cargo", "package": "artist-file-read"},
   "component": "artist_file_read.wasm"
 }

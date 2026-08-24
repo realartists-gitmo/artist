@@ -123,6 +123,8 @@ pub enum ResourceRequest {
         uri: ResourceUri,
         pattern: Option<String>,
         timeout: Option<Duration>,
+        /// Opaque provider continuation returned by the preceding poll.
+        cursor: Option<String>,
     },
 }
 
@@ -157,14 +159,26 @@ impl ResourceRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ResourceReply {
-    Text { text: String },
-    Children { children: Vec<ResourceUri> },
+    Text {
+        text: String,
+    },
+    Children {
+        children: Vec<ResourceUri>,
+    },
     Written,
-    Edited { revision: String },
+    Edited {
+        revision: String,
+    },
     Moved,
-    Started { uri: ResourceUri },
+    Started {
+        uri: ResourceUri,
+    },
     Signaled,
-    Poll { text: String, outcome: PollOutcome },
+    Poll {
+        text: String,
+        outcome: PollOutcome,
+        next_cursor: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

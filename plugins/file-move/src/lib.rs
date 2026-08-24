@@ -25,6 +25,11 @@ fn unsupported() -> ResourceError {
 artist_plugin_sdk::resource_component!(
     FileMove,
     "artist.file.move",
-    ResourceOperation::Move,
+    vec![ResourceRoute {
+        base_glob: "file:///**".into(),
+        projection_glob: None,
+        operations: vec![ResourceOperation::Move],
+        signals: Vec::new(),
+    }],
     handle
 );

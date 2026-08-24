@@ -227,6 +227,7 @@ mod tests {
                     uri,
                     pattern: None,
                     timeout: Some(std::time::Duration::ZERO),
+                    cursor: None,
                 })
                 .await,
             Err(ResourceError::Unsupported {

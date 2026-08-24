@@ -256,6 +256,8 @@ pub struct TokenUsage {
 pub struct PluginDescriptor {
     pub id: crate::PluginId,
     pub version: String,
+    /// Lifecycle composition order: lower values run first, then plugin id.
+    pub priority: i32,
     pub capabilities: Vec<PluginCapability>,
 }
 
@@ -345,6 +347,7 @@ mod tests {
         let descriptor = PluginDescriptor {
             id: PluginId::from("artist.prompt"),
             version: "0.3.0".into(),
+            priority: 0,
             capabilities: vec![PluginCapability::Prompt],
         };
         round_trip(&descriptor);

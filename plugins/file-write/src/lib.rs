@@ -25,6 +25,11 @@ fn unsupported() -> ResourceError {
 artist_plugin_sdk::resource_component!(
     FileWrite,
     "artist.file.write",
-    ResourceOperation::Write,
+    vec![ResourceRoute {
+        base_glob: "file:///**".into(),
+        projection_glob: None,
+        operations: vec![ResourceOperation::Write],
+        signals: Vec::new(),
+    }],
     handle
 );

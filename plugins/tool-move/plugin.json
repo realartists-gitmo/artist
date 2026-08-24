@@ -1,6 +1,6 @@
 {
-  "format": 1,
+  "format": 2,
   "id": "artist.tool.move",
-  "cargo_package": "artist-tool-move",
+  "build": {"adapter": "cargo", "package": "artist-tool-move"},
   "component": "artist_tool_move.wasm"
 }
