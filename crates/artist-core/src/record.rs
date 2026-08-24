@@ -4,16 +4,19 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::{
-    CallId, ContentPart, EventId, InterruptionCause, MessageId, RunId, RunOutcome, SessionId,
-    Source,
+    CallId, ContentPart, ContextRole, EventId, MessageId, ProfileSnapshot, RunId, RunOutcome,
+    SessionId, SlashCommandAction, SlashCommandId, Source,
 };
 
-pub const RECORD_VERSION: u32 = 3;
+pub const RECORD_VERSION: u32 = 5;
+// PRE-PRODUCTION POLICY: bump this freely when the schema changes. Do not add
+// migration code or legacy decoders; stale development data must be discarded.
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ContextFragment {
     pub source: String,
     pub content: String,
+    pub role: ContextRole,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -24,8 +27,7 @@ pub struct InitialContext {
 /// A validated canonical session record.
 ///
 /// Fields are private so deserialization and mutation cannot bypass the
-/// transcript reducer. Serialization emits v3; deserialization validates v3
-/// and migrates v1/v2 snapshots.
+/// transcript reducer. Only the current record version is accepted.
 #[derive(Clone, Debug)]
 pub struct SessionRecord {
     version: u32,
@@ -84,6 +86,26 @@ impl SessionRecord {
             .active
             .as_ref()
             .and_then(|active| active.message_id.as_ref())
+    }
+
+    pub fn current_profile(&self) -> Option<&ProfileSnapshot> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                TranscriptEntryKind::ProfileActivated { profile, .. } => Some(profile),
+                _ => None,
+            })
+    }
+
+    pub fn current_profile_epoch(&self) -> Option<u64> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry.kind {
+                TranscriptEntryKind::ProfileActivated { .. } => Some(entry.sequence),
+                _ => None,
+            })
     }
 
     pub fn entry(&self, kind: TranscriptEntryKind) -> TranscriptEntry {
@@ -155,151 +177,6 @@ impl SessionRecord {
     fn validation_steps(&self) -> u64 {
         self.state.validation_steps
     }
-
-    fn migrate_v1(snapshot: SnapshotV1) -> Result<Self, RecordError> {
-        if snapshot.version != 1 {
-            return Err(RecordError::Version(snapshot.version));
-        }
-        let session_id = snapshot.session_id;
-        let mut record = Self::new(session_id.clone(), snapshot.initial_context);
-        let mut old_to_new = Vec::<u64>::with_capacity(snapshot.entries.len());
-        let mut messages = HashMap::<RunId, MessageId>::new();
-        for (expected_sequence, legacy) in snapshot.entries.into_iter().enumerate() {
-            let expected_sequence = expected_sequence as u64;
-            if legacy.sequence != expected_sequence {
-                return Err(RecordError::Sequence {
-                    expected: expected_sequence,
-                    actual: legacy.sequence,
-                });
-            }
-            let expected_id = event_id(&session_id, expected_sequence);
-            if legacy.event_id != expected_id {
-                return Err(RecordError::EventId {
-                    expected: expected_id,
-                    actual: legacy.event_id,
-                });
-            }
-            let mut kinds = Vec::new();
-            match legacy.kind {
-                LegacyEntryKind::Input {
-                    message_id,
-                    source,
-                    content,
-                } => kinds.push(TranscriptEntryKind::Input {
-                    message_id,
-                    source,
-                    content,
-                }),
-                LegacyEntryKind::SteeringQueued {
-                    message_id,
-                    source,
-                    content,
-                } => kinds.push(TranscriptEntryKind::SteeringQueued {
-                    message_id,
-                    source,
-                    content,
-                }),
-                LegacyEntryKind::SteeringDelivered {
-                    run_id,
-                    message_ids,
-                } => kinds.push(TranscriptEntryKind::SteeringDelivered {
-                    run_id,
-                    message_ids,
-                }),
-                LegacyEntryKind::RunStarted { run_id, input_id } => {
-                    kinds.push(TranscriptEntryKind::RunStarted { run_id, input_id });
-                }
-                LegacyEntryKind::AssistantMessage {
-                    message_id,
-                    run_id,
-                    content,
-                    complete,
-                } => {
-                    messages.insert(run_id.clone(), message_id.clone());
-                    kinds.push(TranscriptEntryKind::AssistantMessage {
-                        message_id: message_id.clone(),
-                        run_id: run_id.clone(),
-                        content: vec![ContentPart::text(content)],
-                    });
-                    if complete {
-                        kinds.push(TranscriptEntryKind::RunFinished {
-                            run_id,
-                            outcome: RunOutcome::Completed { message_id },
-                        });
-                    }
-                }
-                LegacyEntryKind::Interrupted { run_id, cause } => {
-                    let message_id = messages
-                        .get(&run_id)
-                        .cloned()
-                        .ok_or(RecordError::MissingAssistantMessage)?;
-                    kinds.push(TranscriptEntryKind::RunFinished {
-                        run_id,
-                        outcome: RunOutcome::Interrupted { message_id, cause },
-                    });
-                }
-                LegacyEntryKind::RunFailed { run_id, error } => {
-                    let message_id = messages.get(&run_id).cloned();
-                    kinds.push(TranscriptEntryKind::RunFinished {
-                        run_id,
-                        outcome: RunOutcome::Failed { message_id, error },
-                    });
-                }
-                LegacyEntryKind::ToolCall {
-                    run_id,
-                    call_id,
-                    name,
-                    arguments,
-                } => kinds.push(TranscriptEntryKind::ToolCall {
-                    run_id,
-                    call_id,
-                    name,
-                    arguments,
-                }),
-                LegacyEntryKind::ToolResult {
-                    run_id,
-                    call_id,
-                    result,
-                } => kinds.push(TranscriptEntryKind::ToolResult {
-                    run_id,
-                    call_id,
-                    content: vec![ContentPart::text(result)],
-                }),
-                LegacyEntryKind::Compaction {
-                    through_sequence,
-                    artifact,
-                } => {
-                    let through_sequence = old_to_new
-                        .get(through_sequence as usize)
-                        .copied()
-                        .ok_or(RecordError::InvalidCompaction)?;
-                    kinds.push(TranscriptEntryKind::Compaction {
-                        through_sequence,
-                        artifact,
-                    });
-                }
-            }
-            let entries = record.entries_for(kinds);
-            record.append_batch(&entries)?;
-            old_to_new.push(record.next_sequence() - 1);
-        }
-        Ok(record)
-    }
-
-    /// Migrate entries from the v2 string-result representation. This is also
-    /// used by the hash-chained physical-frame decoder after it validates the
-    /// original v2 bytes.
-    pub fn from_v2_parts(
-        session_id: SessionId,
-        initial_context: InitialContext,
-        entries: Vec<V2TranscriptEntry>,
-    ) -> Result<Self, RecordError> {
-        let entries = entries
-            .into_iter()
-            .map(V2TranscriptEntry::migrate)
-            .collect();
-        Self::from_current_parts(session_id, initial_context, entries)
-    }
 }
 
 impl Serialize for SessionRecord {
@@ -307,7 +184,7 @@ impl Serialize for SessionRecord {
     where
         S: Serializer,
     {
-        SnapshotV3 {
+        Snapshot {
             version: self.version,
             session_id: self.session_id.clone(),
             initial_context: self.initial_context.clone(),
@@ -322,53 +199,29 @@ impl<'de> Deserialize<'de> for SessionRecord {
     where
         D: Deserializer<'de>,
     {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let version = value
-            .get("version")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| serde::de::Error::custom("session snapshot has no numeric version"))?;
-        match version {
-            3 => {
-                let snapshot: SnapshotV3 =
-                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                Self::from_current_parts(
-                    snapshot.session_id,
-                    snapshot.initial_context,
-                    snapshot.entries,
-                )
-                .map_err(serde::de::Error::custom)
-            }
-            2 => {
-                let snapshot: SnapshotV2 =
-                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                Self::from_v2_parts(
-                    snapshot.session_id,
-                    snapshot.initial_context,
-                    snapshot.entries,
-                )
-                .map_err(serde::de::Error::custom)
-            }
-            1 => Self::migrate_v1(serde_json::from_value(value).map_err(serde::de::Error::custom)?)
-                .map_err(serde::de::Error::custom),
-            other => Err(serde::de::Error::custom(RecordError::Version(other as u32))),
+        let snapshot = Snapshot::deserialize(deserializer)?;
+        // PRE-PRODUCTION POLICY: reject every non-current version. Do not add a
+        // compatibility match here; change the version and delete old data.
+        if snapshot.version != RECORD_VERSION {
+            return Err(serde::de::Error::custom(RecordError::Version(
+                snapshot.version,
+            )));
         }
+        Self::from_current_parts(
+            snapshot.session_id,
+            snapshot.initial_context,
+            snapshot.entries,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct SnapshotV3 {
+struct Snapshot {
     version: u32,
     session_id: SessionId,
     initial_context: InitialContext,
     entries: Vec<TranscriptEntry>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-struct SnapshotV2 {
-    version: u32,
-    session_id: SessionId,
-    initial_context: InitialContext,
-    entries: Vec<V2TranscriptEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -381,6 +234,14 @@ pub struct TranscriptEntry {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "entry", rename_all = "snake_case")]
 pub enum TranscriptEntryKind {
+    ProfileActivated {
+        profile: ProfileSnapshot,
+        brief: Option<String>,
+        steering_message_ids: Vec<MessageId>,
+    },
+    InputsSuperseded {
+        message_ids: Vec<MessageId>,
+    },
     Input {
         message_id: MessageId,
         source: Source,
@@ -394,6 +255,13 @@ pub enum TranscriptEntryKind {
     SteeringDelivered {
         run_id: RunId,
         message_ids: Vec<MessageId>,
+    },
+    SlashCommand {
+        command_id: SlashCommandId,
+        name: String,
+        arguments: String,
+        output: Option<String>,
+        actions: Vec<SlashCommandAction>,
     },
     RunStarted {
         run_id: RunId,
@@ -423,143 +291,6 @@ pub enum TranscriptEntryKind {
         through_sequence: u64,
         artifact: String,
     },
-}
-
-/// Exact v2 entry representation retained solely for migration and physical
-/// hash verification. New code must use [`TranscriptEntry`].
-#[doc(hidden)]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct V2TranscriptEntry {
-    pub event_id: EventId,
-    pub sequence: u64,
-    pub kind: V2TranscriptEntryKind,
-}
-
-#[doc(hidden)]
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "entry", rename_all = "snake_case")]
-pub enum V2TranscriptEntryKind {
-    Input {
-        message_id: MessageId,
-        source: Source,
-        content: String,
-    },
-    SteeringQueued {
-        message_id: MessageId,
-        source: Source,
-        content: String,
-    },
-    SteeringDelivered {
-        run_id: RunId,
-        message_ids: Vec<MessageId>,
-    },
-    RunStarted {
-        run_id: RunId,
-        input_id: MessageId,
-    },
-    AssistantMessage {
-        message_id: MessageId,
-        run_id: RunId,
-        content: String,
-    },
-    RunFinished {
-        run_id: RunId,
-        outcome: RunOutcome,
-    },
-    ToolCall {
-        run_id: RunId,
-        call_id: CallId,
-        name: String,
-        arguments: String,
-    },
-    ToolResult {
-        run_id: RunId,
-        call_id: CallId,
-        result: String,
-    },
-    Compaction {
-        through_sequence: u64,
-        artifact: String,
-    },
-}
-
-impl V2TranscriptEntry {
-    fn migrate(self) -> TranscriptEntry {
-        let kind = match self.kind {
-            V2TranscriptEntryKind::Input {
-                message_id,
-                source,
-                content,
-            } => TranscriptEntryKind::Input {
-                message_id,
-                source,
-                content,
-            },
-            V2TranscriptEntryKind::SteeringQueued {
-                message_id,
-                source,
-                content,
-            } => TranscriptEntryKind::SteeringQueued {
-                message_id,
-                source,
-                content,
-            },
-            V2TranscriptEntryKind::SteeringDelivered {
-                run_id,
-                message_ids,
-            } => TranscriptEntryKind::SteeringDelivered {
-                run_id,
-                message_ids,
-            },
-            V2TranscriptEntryKind::RunStarted { run_id, input_id } => {
-                TranscriptEntryKind::RunStarted { run_id, input_id }
-            }
-            V2TranscriptEntryKind::AssistantMessage {
-                message_id,
-                run_id,
-                content,
-            } => TranscriptEntryKind::AssistantMessage {
-                message_id,
-                run_id,
-                content: vec![ContentPart::text(content)],
-            },
-            V2TranscriptEntryKind::RunFinished { run_id, outcome } => {
-                TranscriptEntryKind::RunFinished { run_id, outcome }
-            }
-            V2TranscriptEntryKind::ToolCall {
-                run_id,
-                call_id,
-                name,
-                arguments,
-            } => TranscriptEntryKind::ToolCall {
-                run_id,
-                call_id,
-                name,
-                arguments,
-            },
-            V2TranscriptEntryKind::ToolResult {
-                run_id,
-                call_id,
-                result,
-            } => TranscriptEntryKind::ToolResult {
-                run_id,
-                call_id,
-                content: vec![ContentPart::text(result)],
-            },
-            V2TranscriptEntryKind::Compaction {
-                through_sequence,
-                artifact,
-            } => TranscriptEntryKind::Compaction {
-                through_sequence,
-                artifact,
-            },
-        };
-        TranscriptEntry {
-            event_id: self.event_id,
-            sequence: self.sequence,
-            kind,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -569,6 +300,7 @@ struct RecordState {
     messages: HashSet<MessageId>,
     inputs: HashSet<MessageId>,
     started_inputs: HashSet<MessageId>,
+    superseded_inputs: HashSet<MessageId>,
     steering: HashSet<MessageId>,
     delivered_steering: HashSet<MessageId>,
     runs: HashSet<RunId>,
@@ -617,10 +349,47 @@ impl RecordState {
             });
         }
         match &entry.kind {
+            TranscriptEntryKind::ProfileActivated {
+                profile,
+                steering_message_ids,
+                ..
+            } => {
+                if self.active.is_some() {
+                    return Err(RecordError::RunAlreadyActive);
+                }
+                if profile.name.is_empty() {
+                    return Err(RecordError::InvalidProfile);
+                }
+                let mut in_entry = HashSet::new();
+                for message_id in steering_message_ids {
+                    if !self.steering.contains(message_id) {
+                        return Err(RecordError::UnknownSteering);
+                    }
+                    if self.delivered_steering.contains(message_id) || !in_entry.insert(message_id)
+                    {
+                        return Err(RecordError::SteeringAlreadyDelivered);
+                    }
+                }
+                self.delivered_steering
+                    .extend(steering_message_ids.iter().cloned());
+            }
             TranscriptEntryKind::Input { message_id, .. } => {
                 self.require_new_message(message_id)?;
                 self.messages.insert(message_id.clone());
                 self.inputs.insert(message_id.clone());
+            }
+            TranscriptEntryKind::InputsSuperseded { message_ids } => {
+                let mut in_entry = HashSet::new();
+                for message_id in message_ids {
+                    if !self.inputs.contains(message_id)
+                        || self.started_inputs.contains(message_id)
+                        || self.superseded_inputs.contains(message_id)
+                        || !in_entry.insert(message_id)
+                    {
+                        return Err(RecordError::InvalidSupersededInput);
+                    }
+                }
+                self.superseded_inputs.extend(message_ids.iter().cloned());
             }
             TranscriptEntryKind::SteeringQueued { message_id, .. } => {
                 self.require_new_message(message_id)?;
@@ -643,6 +412,11 @@ impl RecordState {
                     }
                 }
                 self.delivered_steering.extend(message_ids.iter().cloned());
+            }
+            TranscriptEntryKind::SlashCommand { name, .. } => {
+                if name.is_empty() {
+                    return Err(RecordError::InvalidSlashCommand);
+                }
             }
             TranscriptEntryKind::RunStarted { run_id, input_id } => {
                 if !self.inputs.contains(input_id) {
@@ -696,6 +470,18 @@ impl RecordState {
                     RunOutcome::Failed { message_id, .. } => {
                         if active.message_id.as_ref() != message_id.as_ref() {
                             return Err(RecordError::WrongAssistantMessage);
+                        }
+                    }
+                    RunOutcome::Yielded { call_id, .. } | RunOutcome::HandedOff { call_id, .. } => {
+                        let call = self
+                            .calls
+                            .get(call_id)
+                            .ok_or(RecordError::UnknownToolCall)?;
+                        if &call.run_id != run_id || !call.resolved {
+                            return Err(RecordError::UnknownToolCall);
+                        }
+                        if active.open_tools != 0 {
+                            return Err(RecordError::UnresolvedToolCalls);
                         }
                     }
                 }
@@ -810,78 +596,18 @@ pub enum RecordError {
     UnresolvedToolCalls,
     #[error("compaction must refer to an earlier transcript sequence")]
     InvalidCompaction,
-}
-
-#[derive(Deserialize)]
-struct SnapshotV1 {
-    version: u32,
-    session_id: SessionId,
-    initial_context: InitialContext,
-    entries: Vec<LegacyTranscriptEntry>,
-}
-
-#[derive(Deserialize)]
-struct LegacyTranscriptEntry {
-    event_id: EventId,
-    sequence: u64,
-    kind: LegacyEntryKind,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "entry", rename_all = "snake_case")]
-enum LegacyEntryKind {
-    Input {
-        message_id: MessageId,
-        source: Source,
-        content: String,
-    },
-    SteeringQueued {
-        message_id: MessageId,
-        source: Source,
-        content: String,
-    },
-    SteeringDelivered {
-        run_id: RunId,
-        message_ids: Vec<MessageId>,
-    },
-    RunStarted {
-        run_id: RunId,
-        input_id: MessageId,
-    },
-    AssistantMessage {
-        message_id: MessageId,
-        run_id: RunId,
-        content: String,
-        complete: bool,
-    },
-    Interrupted {
-        run_id: RunId,
-        cause: InterruptionCause,
-    },
-    RunFailed {
-        run_id: RunId,
-        error: String,
-    },
-    ToolCall {
-        run_id: RunId,
-        call_id: CallId,
-        name: String,
-        arguments: String,
-    },
-    ToolResult {
-        run_id: RunId,
-        call_id: CallId,
-        result: String,
-    },
-    Compaction {
-        through_sequence: u64,
-        artifact: String,
-    },
+    #[error("profile activation is invalid")]
+    InvalidProfile,
+    #[error("slash command name must not be empty")]
+    InvalidSlashCommand,
+    #[error("only queued, unsuperseded inputs may be superseded")]
+    InvalidSupersededInput,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InterruptionCause;
     use serde_json::json;
 
     fn record() -> SessionRecord {
@@ -889,28 +615,6 @@ mod tests {
             SessionId::from("session"),
             InitialContext { fragments: vec![] },
         )
-    }
-
-    #[test]
-    fn v2_string_tool_results_migrate_to_one_text_part() {
-        let snapshot = json!({
-            "version": 2,
-            "session_id": "session",
-            "initial_context": { "fragments": [] },
-            "entries": [
-                {"event_id":"session:event:0","sequence":0,"kind":{"entry":"input","message_id":"input","source":"user","content":"hello"}},
-                {"event_id":"session:event:1","sequence":1,"kind":{"entry":"run_started","run_id":"run","input_id":"input"}},
-                {"event_id":"session:event:2","sequence":2,"kind":{"entry":"tool_call","run_id":"run","call_id":"call","name":"read","arguments":"{}"}},
-                {"event_id":"session:event:3","sequence":3,"kind":{"entry":"tool_result","run_id":"run","call_id":"call","result":"body"}}
-            ]
-        });
-        let migrated: SessionRecord = serde_json::from_value(snapshot).unwrap();
-        assert_eq!(migrated.version(), 3);
-        assert!(matches!(
-            &migrated.entries()[3].kind,
-            TranscriptEntryKind::ToolResult { content, .. }
-                if content == &vec![ContentPart::text("body")]
-        ));
     }
 
     fn append(record: &mut SessionRecord, kind: TranscriptEntryKind) {
@@ -1195,48 +899,15 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v1_and_rejects_unknown_versions() {
-        let legacy = json!({
-            "version": 1, "session_id": "legacy", "initial_context": {"fragments": []},
-            "entries": [
-                {"event_id":"legacy:event:0","sequence":0,"kind":{"entry":"input","message_id":"input","source":"user","content":"hello"}},
-                {"event_id":"legacy:event:1","sequence":1,"kind":{"entry":"run_started","run_id":"run","input_id":"input"}},
-                {"event_id":"legacy:event:2","sequence":2,"kind":{"entry":"assistant_message","message_id":"answer","run_id":"run","content":"done","complete":true}}
-            ]
-        });
-        let migrated: SessionRecord = serde_json::from_value(legacy).unwrap();
-        assert_eq!(migrated.version(), RECORD_VERSION);
-        assert!(matches!(
-            migrated.entries().last().unwrap().kind,
-            TranscriptEntryKind::RunFinished {
-                outcome: RunOutcome::Completed { .. },
-                ..
-            }
-        ));
-        let unknown = json!({"version":99,"session_id":"future","initial_context":{"fragments":[]},"entries":[]});
-        assert!(serde_json::from_value::<SessionRecord>(unknown).is_err());
-        let unknown_entry = json!({
-            "version": 2,
-            "session_id": "future-entry",
-            "initial_context": {"fragments": []},
-            "entries": [{
-                "event_id": "future-entry:event:0",
-                "sequence": 0,
-                "kind": {"entry": "future_semantics"}
-            }]
-        });
-        assert!(serde_json::from_value::<SessionRecord>(unknown_entry).is_err());
-
-        let corrupt_legacy = json!({
-            "version": 1,
-            "session_id": "legacy",
-            "initial_context": {"fragments": []},
-            "entries": [{
-                "event_id": "forged",
-                "sequence": 7,
-                "kind": {"entry": "input", "message_id": "input", "source": "user", "content": "hello"}
-            }]
-        });
-        assert!(serde_json::from_value::<SessionRecord>(corrupt_legacy).is_err());
+    fn rejects_every_non_current_version() {
+        for version in [1, 2, 3, 4, 6, 99] {
+            let snapshot = json!({
+                "version": version,
+                "session_id": "stale",
+                "initial_context": {"fragments": []},
+                "entries": []
+            });
+            assert!(serde_json::from_value::<SessionRecord>(snapshot).is_err());
+        }
     }
 }

@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, fmt, time::Duration};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::ResourceUri;
@@ -12,9 +13,24 @@ pub enum ResourceOperation {
     Read,
     Children,
     Write,
-    Move,
-    Poll,
     Edit,
+    Move,
+    Run,
+    Signal,
+    Poll,
+}
+
+impl ResourceOperation {
+    pub const ALL: [Self; 8] = [
+        Self::Read,
+        Self::Children,
+        Self::Write,
+        Self::Edit,
+        Self::Move,
+        Self::Run,
+        Self::Signal,
+        Self::Poll,
+    ];
 }
 
 impl fmt::Display for ResourceOperation {
@@ -25,6 +41,47 @@ impl fmt::Display for ResourceOperation {
             serde_json::to_value(self).unwrap().as_str().unwrap()
         )
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentEntry {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TextReplacement {
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum AnchoredEditOperation {
+    Replace {
+        start: String,
+        end: Option<String>,
+        content: String,
+    },
+    Delete {
+        start: String,
+        end: Option<String>,
+    },
+    InsertBefore {
+        anchor: String,
+        content: String,
+    },
+    InsertAfter {
+        anchor: String,
+        content: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AnchoredEditRequest {
+    pub uri: String,
+    pub operations: Vec<AnchoredEditOperation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,19 +98,31 @@ pub enum ResourceRequest {
         uri: ResourceUri,
         text: String,
     },
+    Edit {
+        uri: ResourceUri,
+        expected_sha256: String,
+        replacements: Vec<TextReplacement>,
+    },
     Move {
         from: ResourceUri,
         to: Option<ResourceUri>,
+    },
+    Run {
+        target: ResourceUri,
+        input: String,
+        cwd: Option<ResourceUri>,
+        env: Vec<EnvironmentEntry>,
+        timeout: Option<Duration>,
+    },
+    Signal {
+        uri: ResourceUri,
+        name: String,
+        payload: Option<String>,
     },
     Poll {
         uri: ResourceUri,
         pattern: Option<String>,
         timeout: Option<Duration>,
-    },
-    /// Reserved. Providers should not advertise this operation yet.
-    Edit {
-        uri: ResourceUri,
-        instructions: String,
     },
 }
 
@@ -63,19 +132,24 @@ impl ResourceRequest {
             Self::Read { .. } => ResourceOperation::Read,
             Self::Children { .. } => ResourceOperation::Children,
             Self::Write { .. } => ResourceOperation::Write,
-            Self::Move { .. } => ResourceOperation::Move,
-            Self::Poll { .. } => ResourceOperation::Poll,
             Self::Edit { .. } => ResourceOperation::Edit,
+            Self::Move { .. } => ResourceOperation::Move,
+            Self::Run { .. } => ResourceOperation::Run,
+            Self::Signal { .. } => ResourceOperation::Signal,
+            Self::Poll { .. } => ResourceOperation::Poll,
         }
     }
+
     pub fn uri(&self) -> &ResourceUri {
         match self {
             Self::Read { uri, .. }
             | Self::Children { uri }
             | Self::Write { uri, .. }
-            | Self::Poll { uri, .. }
-            | Self::Edit { uri, .. } => uri,
+            | Self::Edit { uri, .. }
+            | Self::Signal { uri, .. }
+            | Self::Poll { uri, .. } => uri,
             Self::Move { from, .. } => from,
+            Self::Run { target, .. } => target,
         }
     }
 }
@@ -86,7 +160,10 @@ pub enum ResourceReply {
     Text { text: String },
     Children { children: Vec<ResourceUri> },
     Written,
+    Edited { revision: String },
     Moved,
+    Started { uri: ResourceUri },
+    Signaled,
     Poll { text: String, outcome: PollOutcome },
 }
 
@@ -111,10 +188,29 @@ pub enum ResourceError {
         uri: ResourceUri,
         operation: ResourceOperation,
     },
+    #[error("resource conflict on {uri}; current revision is {current_revision}")]
+    Conflict {
+        uri: ResourceUri,
+        current_revision: String,
+    },
     #[error("invalid resource request: {0}")]
     Invalid(String),
     #[error("resource provider failed: {0}")]
     Provider(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SignalDefinition {
+    pub name: String,
+    pub description: String,
+    pub payload_schema: Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ResourceMetadata {
+    pub uri: ResourceUri,
+    pub operations: Vec<ResourceOperation>,
+    pub signals: Vec<SignalDefinition>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,6 +218,7 @@ pub struct ResourceRoute {
     pub base_glob: String,
     pub projection_glob: Option<String>,
     pub operations: BTreeSet<ResourceOperation>,
+    pub signals: Vec<SignalDefinition>,
 }
 
 impl ResourceRoute {
@@ -134,7 +231,13 @@ impl ResourceRoute {
             base_glob: base_glob.into(),
             projection_glob: projection_glob.map(Into::into),
             operations: operations.into_iter().collect(),
+            signals: Vec::new(),
         }
+    }
+
+    pub fn with_signals(mut self, signals: Vec<SignalDefinition>) -> Self {
+        self.signals = signals;
+        self
     }
 }
 

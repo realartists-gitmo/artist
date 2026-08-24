@@ -1,0 +1,6 @@
+{
+  "format": 1,
+  "id": "artist.tool.read",
+  "cargo_package": "artist-tool-read",
+  "component": "artist_tool_read.wasm"
+}

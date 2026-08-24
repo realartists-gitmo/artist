@@ -1,0 +1,6 @@
+{
+  "format": 1,
+  "id": "artist.tool.handoff",
+  "cargo_package": "artist-tool-handoff",
+  "component": "artist_tool_handoff.wasm"
+}

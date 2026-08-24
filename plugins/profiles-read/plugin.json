@@ -1,0 +1,6 @@
+{
+  "format": 1,
+  "id": "artist.profiles.read",
+  "cargo_package": "artist-profiles-read",
+  "component": "artist_profiles_read.wasm"
+}

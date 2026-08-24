@@ -1,4 +1,6 @@
-package artist:plugin@0.4.0;
+// PRE-PRODUCTION POLICY: bump this ABI directly when it changes. Do not add
+// compatibility worlds, legacy interfaces, or migration adapters.
+package artist:plugin@0.6.0;
 
 interface types {
     enum capability {
@@ -9,6 +11,7 @@ interface types {
         hooks,
         model,
         events,
+        commands,
     }
 
     record plugin-descriptor {
@@ -17,9 +20,11 @@ interface types {
         capabilities: list<capability>,
     }
 
+    enum context-role { system, agents, profile, identity, other }
     record context-fragment {
         source: string,
         content: string,
+        role: context-role,
     }
 
     record message {
@@ -27,10 +32,31 @@ interface types {
         content: string,
     }
 
+    enum tool-effect { observe, mutate, execute, session-control, unknown }
     record tool-definition {
         name: string,
         description: string,
         input-schema: string,
+        effects: list<tool-effect>,
+    }
+
+    record slash-command-definition {
+        name: string,
+        description: string,
+    }
+    record profile-activation {
+        profile: string,
+        brief: option<string>,
+    }
+    variant slash-command-action {
+        input(string),
+        steer(string),
+        abort(string),
+        activate-profile(profile-activation),
+    }
+    record slash-command-result {
+        output: option<string>,
+        actions: list<slash-command-action>,
     }
 
     record model-config {
@@ -50,17 +76,69 @@ interface types {
         rewrite(string),
     }
 
-    enum resource-operation { read, children, write, move, poll, edit }
+    enum resource-operation { read, children, write, edit, move, run, signal, poll }
+    record signal-definition {
+        name: string,
+        description: string,
+        payload-schema: string,
+    }
     record resource-route {
         base-glob: string,
         projection-glob: option<string>,
         operations: list<resource-operation>,
+        signals: list<signal-definition>,
     }
     record read-request { uri: string, start-line: option<u64>, line-count: option<u64> }
     record write-request { uri: string, text: string }
     record move-request { source: string, to: option<string> }
     record poll-request { uri: string, match: option<string>, timeout-ms: option<u64> }
-    record edit-request { uri: string, instructions: string }
+    record environment-entry { name: string, value: string }
+    record run-request {
+        target: string,
+        input: string,
+        cwd: option<string>,
+        env: list<environment-entry>,
+        timeout-ms: option<u64>,
+    }
+    record signal-request { uri: string, name: string, payload: option<string> }
+    record text-replacement { start-byte: u64, end-byte: u64, text: string }
+    record edit-request {
+        uri: string,
+        expected-sha256: string,
+        replacements: list<text-replacement>,
+    }
+    record replace-operation {
+        start: string,
+        end: option<string>,
+        content: string,
+    }
+    record delete-operation { start: string, end: option<string> }
+    record insert-operation { anchor: string, content: string }
+    variant anchored-edit-operation {
+        replace(replace-operation),
+        delete(delete-operation),
+        insert-before(insert-operation),
+        insert-after(insert-operation),
+    }
+    record anchored-edit-request { uri: string, operations: list<anchored-edit-operation> }
+    record anchored-line { line-number: u64, anchor: string, text: string }
+    record anchored-read-reply {
+        revision: string,
+        total-lines: u64,
+        lines: list<anchored-line>,
+    }
+    record anchored-edit-reply {
+        revision: string,
+        diff: string,
+        updated-lines: list<anchored-line>,
+        diff-truncated: bool,
+        anchors-truncated: bool,
+    }
+    record resource-metadata {
+        uri: string,
+        operations: list<resource-operation>,
+        signals: list<signal-definition>,
+    }
     record find-request {
         uri: string,
         glob: option<string>,
@@ -80,14 +158,34 @@ interface types {
         read(read-request),
         children(string),
         write(write-request),
-        move(move-request),
-        poll(poll-request),
         edit(edit-request),
+        move(move-request),
+        run(run-request),
+        signal(signal-request),
+        poll(poll-request),
     }
     enum poll-outcome { matched, closed, timed-out }
     record poll-reply { text: string, outcome: poll-outcome }
-    variant resource-reply { text(string), children(list<string>), written, moved, poll(poll-reply) }
-    record resource-error { kind: string, message: string }
+    record edited-reply { revision: string }
+    variant resource-reply {
+        text(string),
+        children(list<string>),
+        written,
+        edited(edited-reply),
+        moved,
+        started(string),
+        signaled,
+        poll(poll-reply),
+    }
+    record route-error { uri: string, operation: resource-operation }
+    record conflict-error { uri: string, current-revision: string }
+    variant resource-error {
+        not-found(route-error),
+        unsupported(route-error),
+        conflict(conflict-error),
+        invalid(string),
+        provider(string),
+    }
 }
 
 interface lifecycle {
@@ -113,34 +211,76 @@ interface resource-provider {
     handle: func(request: resource-request) -> result<resource-reply, resource-error>;
 }
 
+// Harness-facing commands. Names are global (and omit the leading slash),
+// arguments are the unparsed remainder of the user's command line, and the
+// typed actions are applied by the kernel after successful invocation.
+interface slash-command-provider {
+    use types.{slash-command-definition, slash-command-result};
+    definitions: func() -> result<list<slash-command-definition>, string>;
+    invoke: func(name: string, arguments: string) -> result<slash-command-result, string>;
+}
+
 interface host-tools {
     use types.{tool-definition};
     list-tools: func() -> result<list<tool-definition>, string>;
     call-tool: func(name: string, arguments: string) -> result<string, string>;
 }
 
+// Terminal session-control capabilities. Components define the model-facing
+// verbs, while the host attaches typed control to the invocation result.
+interface host-control {
+    yield: func(payload: string) -> result<_, string>;
+    handoff: func(profile: string, brief: string) -> result<_, string>;
+}
+
 // Generic access to the host-owned logical resource fabric. Model-facing tool
 // policy and presentation belong in WASM tool-provider components; these
 // imports expose only the underlying resource and indexed-search mechanics.
 interface host-resources {
-    use types.{find-request, grep-request, resource-error, resource-reply, resource-request};
+    use types.{anchored-edit-reply, anchored-edit-request, anchored-read-reply, find-request, grep-request, read-request, resource-error, resource-metadata, resource-reply, resource-request};
     handle: func(request: resource-request) -> result<resource-reply, resource-error>;
+    read-anchored: func(request: read-request) -> result<anchored-read-reply, resource-error>;
+    edit-anchored: func(request: anchored-edit-request) -> result<anchored-edit-reply, resource-error>;
+    metadata: func(uri: string) -> result<resource-metadata, resource-error>;
     find: func(request: find-request) -> result<string, string>;
     grep: func(request: grep-request) -> result<string, string>;
 }
 
 interface native-filesystem {
+    use types.{edit-request, resource-error};
     read: func(uri: string, start-line: option<u64>, line-count: option<u64>) -> result<string, string>;
     children: func(uri: string) -> result<list<string>, string>;
     write: func(uri: string, text: string) -> result<_, string>;
     move: func(source: string, to: option<string>) -> result<_, string>;
+    edit: func(request: edit-request) -> result<string, resource-error>;
+}
+
+interface native-profiles {
+    read: func(uri: string, start-line: option<u64>, line-count: option<u64>) -> result<string, string>;
+    children: func(uri: string) -> result<list<string>, string>;
+}
+
+// Host-owned package mechanics. The narrow plugins resource components expose
+// these operations without owning package storage or activation state.
+interface native-plugins {
+    use types.{edit-request, resource-error};
+    read: func(uri: string, start-line: option<u64>, line-count: option<u64>) -> result<string, string>;
+    children: func(uri: string) -> result<list<string>, string>;
+    write: func(uri: string, text: string) -> result<_, string>;
+    move: func(source: string, to: option<string>) -> result<_, string>;
+    edit: func(request: edit-request) -> result<string, resource-error>;
+    signal: func(uri: string, name: string, payload: option<string>) -> result<_, resource-error>;
 }
 
 world artist-plugin {
     import host-tools;
+    import host-control;
     import host-resources;
     import native-filesystem;
+    import native-profiles;
+    import native-plugins;
     export lifecycle;
     export tool-provider;
     export resource-provider;
+    export slash-command-provider;
 }

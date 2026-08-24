@@ -4,8 +4,8 @@ use globset::{Glob, GlobMatcher};
 use tokio::sync::watch;
 
 use crate::{
-    ResourceError, ResourceOperation, ResourceProvider, ResourceReply, ResourceRequest,
-    ResourceRoute, ResourceUri,
+    ResourceError, ResourceMetadata, ResourceOperation, ResourceProvider, ResourceReply,
+    ResourceRequest, ResourceRoute, ResourceUri,
 };
 
 #[derive(Clone)]
@@ -66,6 +66,7 @@ impl ResourceRouter {
         route: ResourceRoute,
         provider: Arc<dyn ResourceProvider>,
     ) -> Result<(), ResourceError> {
+        validate_declaration(&route)?;
         let base = Glob::new(&route.base_glob)
             .map_err(|e| ResourceError::Invalid(format!("invalid base glob: {e}")))?
             .compile_matcher();
@@ -98,12 +99,85 @@ impl ResourceRouter {
         Ok(())
     }
 
+    /// Replace every route owned by one plugin after compiling the complete
+    /// candidate set. A malformed candidate cannot remove active routes.
+    pub fn replace_owner(
+        &self,
+        owner: &str,
+        replacements: Vec<(ResourceRoute, Arc<dyn ResourceProvider>)>,
+    ) -> Result<(), ResourceError> {
+        let mut compiled = Vec::with_capacity(replacements.len());
+        for (declaration, provider) in replacements {
+            validate_declaration(&declaration)?;
+            let base = Glob::new(&declaration.base_glob)
+                .map_err(|error| ResourceError::Invalid(format!("invalid base glob: {error}")))?
+                .compile_matcher();
+            let projection = declaration
+                .projection_glob
+                .as_deref()
+                .map(Glob::new)
+                .transpose()
+                .map_err(|error| {
+                    ResourceError::Invalid(format!("invalid projection glob: {error}"))
+                })?
+                .map(|glob| glob.compile_matcher());
+            let (literals, wildcards) = specificity(
+                &declaration.base_glob,
+                declaration.projection_glob.as_deref(),
+            );
+            compiled.push((declaration, base, projection, literals, wildcards, provider));
+        }
+        let mut routes = self
+            .inner
+            .routes
+            .write()
+            .expect("resource route lock poisoned");
+        routes.retain(|route| route.plugin != owner);
+        let first_order = routes
+            .iter()
+            .map(|route| route.order)
+            .max()
+            .map_or(0, |n| n + 1);
+        for (offset, (declaration, base, projection, literals, wildcards, provider)) in
+            compiled.into_iter().enumerate()
+        {
+            routes.push(RegisteredRoute {
+                plugin: owner.to_owned(),
+                order: first_order + offset,
+                declaration,
+                base,
+                projection,
+                literals,
+                wildcards,
+                provider,
+            });
+        }
+        drop(routes);
+        self.changed();
+        Ok(())
+    }
+
     pub fn route_owner(&self, uri: &ResourceUri, operation: ResourceOperation) -> Option<String> {
         self.select(uri, operation)
             .map(|route| route.plugin.clone())
     }
 
     pub async fn handle(&self, request: ResourceRequest) -> Result<ResourceReply, ResourceError> {
+        validate_request(&request)?;
+        if let ResourceRequest::Read {
+            uri,
+            start_line,
+            line_count,
+        } = &request
+            && let Some(target) = metadata_target(uri)?
+        {
+            let metadata = self.metadata(&target)?;
+            let text = serde_json::to_string_pretty(&metadata)
+                .map_err(|error| ResourceError::Provider(error.to_string()))?;
+            return Ok(ResourceReply::Text {
+                text: slice_lines(&text, *start_line, *line_count),
+            });
+        }
         let operation = request.operation();
         let uri = request.uri().clone();
         let route = match self.select(&uri, operation) {
@@ -132,6 +206,30 @@ impl ResourceRouter {
         result
     }
 
+    /// Synthesize the public capabilities of the selected routes for `uri`.
+    pub fn metadata(&self, uri: &ResourceUri) -> Result<ResourceMetadata, ResourceError> {
+        let operations = ResourceOperation::ALL
+            .into_iter()
+            .filter(|operation| self.select(uri, *operation).is_some())
+            .collect::<Vec<_>>();
+        if operations.is_empty() && !self.has_route(uri) {
+            return Err(ResourceError::NotFound {
+                uri: uri.clone(),
+                operation: ResourceOperation::Read,
+            });
+        }
+        let mut signals = self
+            .select(uri, ResourceOperation::Signal)
+            .map(|selection| selection.signals)
+            .unwrap_or_default();
+        signals.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(ResourceMetadata {
+            uri: uri.clone(),
+            operations,
+            signals,
+        })
+    }
+
     fn select(&self, uri: &ResourceUri, operation: ResourceOperation) -> Option<RouteSelection> {
         let routes = self
             .inner
@@ -153,6 +251,7 @@ impl ResourceRouter {
             .map(|route| RouteSelection {
                 plugin: route.plugin.clone(),
                 provider: route.provider.clone(),
+                signals: route.declaration.signals.clone(),
             })
     }
 
@@ -225,9 +324,94 @@ impl ResourceRouter {
     }
 }
 
+fn validate_declaration(route: &ResourceRoute) -> Result<(), ResourceError> {
+    if route
+        .projection_glob
+        .as_deref()
+        .and_then(|projection| projection.split('/').next())
+        == Some("meta")
+    {
+        return Err(ResourceError::Invalid(
+            "the `meta` projection root is reserved by the kernel".into(),
+        ));
+    }
+    if !route.signals.is_empty() && !route.operations.contains(&ResourceOperation::Signal) {
+        return Err(ResourceError::Invalid(
+            "signal definitions require the signal operation".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_request(request: &ResourceRequest) -> Result<(), ResourceError> {
+    match request {
+        ResourceRequest::Edit {
+            expected_sha256,
+            replacements,
+            ..
+        } => {
+            if replacements.is_empty() {
+                return Err(ResourceError::Invalid(
+                    "an edit must contain at least one replacement".into(),
+                ));
+            }
+            if expected_sha256.len() != 64
+                || !expected_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(ResourceError::Invalid(
+                    "expected_sha256 must be 64 lowercase hexadecimal characters".into(),
+                ));
+            }
+        }
+        ResourceRequest::Run {
+            timeout: Some(timeout),
+            ..
+        } if timeout.is_zero() => {
+            return Err(ResourceError::Invalid(
+                "run timeout must be positive".into(),
+            ));
+        }
+        ResourceRequest::Signal { name, .. } if name.is_empty() => {
+            return Err(ResourceError::Invalid(
+                "signal name must not be empty".into(),
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 struct RouteSelection {
     plugin: String,
     provider: Arc<dyn ResourceProvider>,
+    signals: Vec<crate::SignalDefinition>,
+}
+
+fn metadata_target(uri: &ResourceUri) -> Result<Option<ResourceUri>, ResourceError> {
+    let segments = uri.projection_segments();
+    if segments.first().map(String::as_str) != Some("meta") {
+        return Ok(None);
+    }
+    let mut target = uri.base();
+    for segment in &segments[1..] {
+        target = target
+            .descend_projection(segment)
+            .map_err(|error| ResourceError::Invalid(error.to_string()))?;
+    }
+    Ok(Some(target))
+}
+
+fn slice_lines(text: &str, start: Option<u64>, count: Option<u64>) -> String {
+    if start.is_none() && count.is_none() {
+        return text.to_owned();
+    }
+    let start = start.unwrap_or(1).saturating_sub(1) as usize;
+    text.split_inclusive('\n')
+        .skip(start)
+        .take(count.unwrap_or(u64::MAX) as usize)
+        .collect()
 }
 impl RegisteredRoute {
     fn matches_node(&self, uri: &ResourceUri) -> bool {
@@ -279,8 +463,9 @@ fn specificity(base: &str, projection: Option<&str>) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ResourceOperation::Read, ResourceReply};
+    use crate::{EnvironmentEntry, ResourceOperation::Read, ResourceReply, SignalDefinition};
     use async_trait::async_trait;
+    use serde_json::json;
 
     struct Text(&'static str);
     #[async_trait]
@@ -548,6 +733,223 @@ mod tests {
                 operation: ResourceOperation::Read,
                 ..
             })
+        ));
+    }
+
+    #[tokio::test]
+    async fn kernel_synthesizes_stable_metadata() {
+        let router = ResourceRouter::new();
+        let provider = Arc::new(Text("unused"));
+        router
+            .register(
+                "read",
+                ResourceRoute::new("file:///**", None::<String>, [Read]),
+                provider.clone(),
+            )
+            .await
+            .unwrap();
+        router
+            .register(
+                "signals",
+                ResourceRoute::new("file:///**", None::<String>, [ResourceOperation::Signal])
+                    .with_signals(vec![
+                        SignalDefinition {
+                            name: "zeta".into(),
+                            description: "z".into(),
+                            payload_schema: json!({}),
+                        },
+                        SignalDefinition {
+                            name: "alpha".into(),
+                            description: "a".into(),
+                            payload_schema: json!({"type": "string"}),
+                        },
+                    ]),
+                provider,
+            )
+            .await
+            .unwrap();
+
+        let metadata = router.metadata(&uri("source.rs")).unwrap();
+        assert_eq!(metadata.operations, [Read, ResourceOperation::Signal]);
+        assert_eq!(metadata.signals[0].name, "alpha");
+        assert_eq!(metadata.signals[1].name, "zeta");
+
+        let reply = router
+            .handle(ResourceRequest::Read {
+                uri: uri("source.rs?meta"),
+                start_line: None,
+                line_count: None,
+            })
+            .await
+            .unwrap();
+        let ResourceReply::Text { text } = reply else {
+            panic!("metadata must be text")
+        };
+        assert_eq!(
+            serde_json::from_str::<ResourceMetadata>(&text).unwrap(),
+            metadata
+        );
+        assert!(!text.contains("\"plugin\""));
+    }
+
+    #[tokio::test]
+    async fn metadata_can_describe_a_projection() {
+        let router = ResourceRouter::new();
+        router
+            .register(
+                "symbols",
+                ResourceRoute::new("file:///**", Some("symbols/**"), [Read]),
+                Arc::new(Text("symbol")),
+            )
+            .await
+            .unwrap();
+        let reply = router
+            .handle(ResourceRequest::Read {
+                uri: uri("source.rs?meta/symbols/foo"),
+                start_line: None,
+                line_count: None,
+            })
+            .await
+            .unwrap();
+        let ResourceReply::Text { text } = reply else {
+            panic!("metadata must be text")
+        };
+        let metadata: ResourceMetadata = serde_json::from_str(&text).unwrap();
+        assert_eq!(metadata.uri, uri("source.rs?symbols/foo"));
+        assert_eq!(metadata.operations, [Read]);
+    }
+
+    #[tokio::test]
+    async fn providers_cannot_claim_the_meta_projection() {
+        let router = ResourceRouter::new();
+        let result = router
+            .register(
+                "bad",
+                ResourceRoute::new("file:///**", Some("meta/**"), [Read]),
+                Arc::new(Text("bad")),
+            )
+            .await;
+        assert!(matches!(result, Err(ResourceError::Invalid(_))));
+    }
+
+    #[tokio::test]
+    async fn run_and_signal_are_forwarded_without_interpretation() {
+        struct Control;
+        #[async_trait]
+        impl ResourceProvider for Control {
+            async fn handle(
+                &self,
+                request: ResourceRequest,
+            ) -> Result<ResourceReply, ResourceError> {
+                match request {
+                    ResourceRequest::Run {
+                        target,
+                        input,
+                        cwd,
+                        env,
+                        timeout,
+                    } => {
+                        assert_eq!(target, uri("control"));
+                        assert_eq!(input, "payload");
+                        assert_eq!(cwd, Some(uri("cwd")));
+                        assert_eq!(
+                            env,
+                            vec![EnvironmentEntry {
+                                name: "KEY".into(),
+                                value: "value".into()
+                            }]
+                        );
+                        assert_eq!(timeout, Some(std::time::Duration::from_millis(25)));
+                        Ok(ResourceReply::Started {
+                            uri: uri("work/created"),
+                        })
+                    }
+                    ResourceRequest::Signal {
+                        uri: target,
+                        name,
+                        payload,
+                    } => {
+                        assert_eq!(target, uri("control"));
+                        assert_eq!(name, "pause");
+                        assert_eq!(payload.as_deref(), Some("because"));
+                        Ok(ResourceReply::Signaled)
+                    }
+                    other => Err(ResourceError::Unsupported {
+                        uri: other.uri().clone(),
+                        operation: other.operation(),
+                    }),
+                }
+            }
+        }
+
+        let router = ResourceRouter::new();
+        router
+            .register(
+                "control",
+                ResourceRoute::new(
+                    "file:///**",
+                    None::<String>,
+                    [ResourceOperation::Run, ResourceOperation::Signal],
+                ),
+                Arc::new(Control),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            router
+                .handle(ResourceRequest::Run {
+                    target: uri("control"),
+                    input: "payload".into(),
+                    cwd: Some(uri("cwd")),
+                    env: vec![EnvironmentEntry {
+                        name: "KEY".into(),
+                        value: "value".into(),
+                    }],
+                    timeout: Some(std::time::Duration::from_millis(25)),
+                })
+                .await
+                .unwrap(),
+            ResourceReply::Started {
+                uri: uri("work/created")
+            }
+        );
+        assert_eq!(
+            router
+                .handle(ResourceRequest::Signal {
+                    uri: uri("control"),
+                    name: "pause".into(),
+                    payload: Some("because".into()),
+                })
+                .await
+                .unwrap(),
+            ResourceReply::Signaled
+        );
+    }
+
+    #[tokio::test]
+    async fn validates_execution_neutral_control_requests() {
+        let router = ResourceRouter::new();
+        assert!(matches!(
+            router
+                .handle(ResourceRequest::Run {
+                    target: uri("control"),
+                    input: String::new(),
+                    cwd: None,
+                    env: Vec::new(),
+                    timeout: Some(std::time::Duration::ZERO),
+                })
+                .await,
+            Err(ResourceError::Invalid(_))
+        ));
+        assert!(matches!(
+            router
+                .handle(ResourceRequest::Signal {
+                    uri: uri("control"),
+                    name: String::new(),
+                    payload: None,
+                })
+                .await,
+            Err(ResourceError::Invalid(_))
         ));
     }
 }

@@ -5,10 +5,12 @@ use std::{
 };
 
 use artist_core::{
-    Command, EventId, InitialContext, InterruptionCause, MessageId, RunId, RunOutcome, SessionId,
-    SessionRecord, Source, StreamEvent, StreamEventKind, TranscriptEntryKind,
+    CallId, Command, EventId, InitialContext, InterruptionCause, MessageId, ProfileSnapshot, RunId,
+    RunOutcome, SessionId, SessionRecord, SlashCommandAction, SlashCommandId, SlashCommandResult,
+    Source, StreamEvent, StreamEventKind, ToolControl, TranscriptEntryKind,
 };
 use artist_store::{SessionStore, StoreError};
+use async_trait::async_trait;
 use futures::StreamExt;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -20,12 +22,26 @@ use crate::{
 
 const CHANNEL_CAPACITY: usize = 64;
 
+#[async_trait]
+pub trait ProfileSource: Send + Sync + 'static {
+    async fn load(&self, name: &str) -> Result<ProfileSnapshot, String>;
+}
+
+#[async_trait]
+pub trait SlashCommandSource: Send + Sync + 'static {
+    async fn invoke(&self, name: &str, arguments: &str) -> Result<SlashCommandResult, String>;
+}
+
 #[derive(Debug, Error)]
 pub enum SessionError {
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error("session task has stopped")]
     Closed,
+    #[error("profile failed: {0}")]
+    Profile(String),
+    #[error("slash command failed: {0}")]
+    SlashCommand(String),
 }
 
 #[derive(Clone)]
@@ -35,7 +51,8 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    pub async fn create(
+    #[cfg(test)]
+    async fn create_unprofiled(
         session_id: SessionId,
         context: InitialContext,
         store: Arc<dyn SessionStore>,
@@ -43,13 +60,107 @@ impl SessionHandle {
     ) -> Result<Self, SessionError> {
         let record = SessionRecord::new(session_id, context);
         store.create(record.clone()).await?;
-        Ok(Self::spawn(record, store, model))
+        Ok(Self::spawn(record, store, model, None, None))
+    }
+
+    pub async fn create(
+        session_id: SessionId,
+        context: InitialContext,
+        initial_profile: &str,
+        profiles: Arc<dyn ProfileSource>,
+        store: Arc<dyn SessionStore>,
+        model: Arc<dyn StreamingModel>,
+    ) -> Result<Self, SessionError> {
+        let profile = profiles
+            .load(initial_profile)
+            .await
+            .map_err(SessionError::Profile)?;
+        let mut record = SessionRecord::new(session_id, context);
+        let activation = record.entry(TranscriptEntryKind::ProfileActivated {
+            profile,
+            brief: None,
+            steering_message_ids: Vec::new(),
+        });
+        record
+            .append(activation)
+            .expect("initial profile activation is valid");
+        store.create(record.clone()).await?;
+        Ok(Self::spawn(record, store, model, Some(profiles), None))
+    }
+
+    pub async fn create_with_commands(
+        session_id: SessionId,
+        context: InitialContext,
+        initial_profile: &str,
+        profiles: Arc<dyn ProfileSource>,
+        slash_commands: Arc<dyn SlashCommandSource>,
+        store: Arc<dyn SessionStore>,
+        model: Arc<dyn StreamingModel>,
+    ) -> Result<Self, SessionError> {
+        let profile = profiles
+            .load(initial_profile)
+            .await
+            .map_err(SessionError::Profile)?;
+        let mut record = SessionRecord::new(session_id, context);
+        let activation = record.entry(TranscriptEntryKind::ProfileActivated {
+            profile,
+            brief: None,
+            steering_message_ids: Vec::new(),
+        });
+        record
+            .append(activation)
+            .expect("initial profile activation is valid");
+        store.create(record.clone()).await?;
+        Ok(Self::spawn(
+            record,
+            store,
+            model,
+            Some(profiles),
+            Some(slash_commands),
+        ))
+    }
+
+    #[cfg(test)]
+    async fn resume_unprofiled(
+        session_id: &SessionId,
+        store: Arc<dyn SessionStore>,
+        model: Arc<dyn StreamingModel>,
+    ) -> Result<Self, SessionError> {
+        Self::resume_inner(session_id, store, model, None, None).await
     }
 
     pub async fn resume(
         session_id: &SessionId,
         store: Arc<dyn SessionStore>,
         model: Arc<dyn StreamingModel>,
+        profiles: Arc<dyn ProfileSource>,
+    ) -> Result<Self, SessionError> {
+        Self::resume_inner(session_id, store, model, Some(profiles), None).await
+    }
+
+    pub async fn resume_with_commands(
+        session_id: &SessionId,
+        store: Arc<dyn SessionStore>,
+        model: Arc<dyn StreamingModel>,
+        profiles: Arc<dyn ProfileSource>,
+        slash_commands: Arc<dyn SlashCommandSource>,
+    ) -> Result<Self, SessionError> {
+        Self::resume_inner(
+            session_id,
+            store,
+            model,
+            Some(profiles),
+            Some(slash_commands),
+        )
+        .await
+    }
+
+    async fn resume_inner(
+        session_id: &SessionId,
+        store: Arc<dyn SessionStore>,
+        model: Arc<dyn StreamingModel>,
+        profiles: Option<Arc<dyn ProfileSource>>,
+        slash_commands: Option<Arc<dyn SlashCommandSource>>,
     ) -> Result<Self, SessionError> {
         let mut record = store.load(session_id).await?;
         if let Some(run_id) = record.active_run().cloned() {
@@ -86,13 +197,20 @@ impl SessionHandle {
                 .append_batch(&entries)
                 .expect("resume reconciliation is valid");
         }
-        Ok(Self::spawn(record, store, model))
+        if profiles.is_some() && record.current_profile().is_none() {
+            return Err(SessionError::Profile(
+                "cannot profiled-resume a session without a profile activation".into(),
+            ));
+        }
+        Ok(Self::spawn(record, store, model, profiles, slash_commands))
     }
 
     fn spawn(
         record: SessionRecord,
         store: Arc<dyn SessionStore>,
         model: Arc<dyn StreamingModel>,
+        profiles: Option<Arc<dyn ProfileSource>>,
+        slash_commands: Option<Arc<dyn SlashCommandSource>>,
     ) -> Self {
         let (command_tx, command_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (event_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
@@ -101,9 +219,17 @@ impl SessionHandle {
             events: event_tx.clone(),
         };
         tokio::spawn(async move {
-            Session::new(record, store, model, command_rx, event_tx)
-                .run()
-                .await;
+            Session::new(
+                record,
+                store,
+                model,
+                profiles,
+                slash_commands,
+                command_rx,
+                event_tx,
+            )
+            .run()
+            .await;
         });
         handle
     }
@@ -140,7 +266,27 @@ impl SessionHandle {
         self.send(Command::Abort { cause }).await
     }
 
+    pub async fn slash(
+        &self,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Result<SlashCommandResult, SessionError> {
+        let response = self
+            .request(Command::Slash {
+                name: name.into(),
+                arguments: arguments.into(),
+            })
+            .await?;
+        response.ok_or_else(|| {
+            SessionError::SlashCommand("slash invocation returned no command result".into())
+        })
+    }
+
     async fn send(&self, command: Command) -> Result<(), SessionError> {
+        self.request(command).await.map(|_| ())
+    }
+
+    async fn request(&self, command: Command) -> Result<Option<SlashCommandResult>, SessionError> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(Envelope { command, reply })
@@ -152,7 +298,7 @@ impl SessionHandle {
 
 struct Envelope {
     command: Command,
-    reply: oneshot::Sender<Result<(), SessionError>>,
+    reply: oneshot::Sender<Result<Option<SlashCommandResult>, SessionError>>,
 }
 
 struct PendingInput {
@@ -173,6 +319,8 @@ struct Session {
     record: SessionRecord,
     store: Arc<dyn SessionStore>,
     model: Arc<dyn StreamingModel>,
+    profiles: Option<Arc<dyn ProfileSource>>,
+    slash_commands: Option<Arc<dyn SlashCommandSource>>,
     commands: mpsc::Receiver<Envelope>,
     events: broadcast::Sender<StreamEvent>,
     event_sequence: u64,
@@ -187,6 +335,8 @@ impl Session {
         record: SessionRecord,
         store: Arc<dyn SessionStore>,
         model: Arc<dyn StreamingModel>,
+        profiles: Option<Arc<dyn ProfileSource>>,
+        slash_commands: Option<Arc<dyn SlashCommandSource>>,
         commands: mpsc::Receiver<Envelope>,
         events: broadcast::Sender<StreamEvent>,
     ) -> Self {
@@ -202,7 +352,21 @@ impl Session {
             .entries()
             .iter()
             .filter_map(|entry| match &entry.kind {
-                TranscriptEntryKind::SteeringDelivered { message_ids, .. } => Some(message_ids),
+                TranscriptEntryKind::SteeringDelivered { message_ids, .. }
+                | TranscriptEntryKind::ProfileActivated {
+                    steering_message_ids: message_ids,
+                    ..
+                } => Some(message_ids),
+                _ => None,
+            })
+            .flatten()
+            .cloned()
+            .collect();
+        let superseded_inputs: HashSet<_> = record
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                TranscriptEntryKind::InputsSuperseded { message_ids } => Some(message_ids),
                 _ => None,
             })
             .flatten()
@@ -216,10 +380,14 @@ impl Session {
                     message_id,
                     content,
                     ..
-                } if !started_inputs.contains(message_id) => Some(PendingInput {
-                    message_id: message_id.clone(),
-                    content: content.clone(),
-                }),
+                } if !started_inputs.contains(message_id)
+                    && !superseded_inputs.contains(message_id) =>
+                {
+                    Some(PendingInput {
+                        message_id: message_id.clone(),
+                        content: content.clone(),
+                    })
+                }
                 _ => None,
             })
             .collect();
@@ -244,6 +412,8 @@ impl Session {
             record,
             store,
             model,
+            profiles,
+            slash_commands,
             commands,
             events,
             event_sequence: 0,
@@ -320,7 +490,10 @@ impl Session {
         let _ = envelope.reply.send(result);
     }
 
-    async fn apply_command(&mut self, command: Command) -> Result<(), SessionError> {
+    async fn apply_command(
+        &mut self,
+        command: Command,
+    ) -> Result<Option<SlashCommandResult>, SessionError> {
         match command {
             Command::Input { source, content } => {
                 let message_id = self.message_id();
@@ -361,6 +534,156 @@ impl Session {
                     self.interrupt(cause).await?;
                 }
             }
+            Command::Slash { name, arguments } => {
+                validate_slash_command_name(&name).map_err(SessionError::SlashCommand)?;
+                let source = self.slash_commands.as_ref().ok_or_else(|| {
+                    SessionError::SlashCommand("no slash-command source is configured".into())
+                })?;
+                let result = source
+                    .invoke(&name, &arguments)
+                    .await
+                    .map_err(SessionError::SlashCommand)?;
+                let command_id = SlashCommandId::new(format!(
+                    "{}:slash:{}",
+                    self.record.session_id(),
+                    self.record.next_sequence()
+                ));
+                self.append(vec![TranscriptEntryKind::SlashCommand {
+                    command_id: command_id.clone(),
+                    name: name.clone(),
+                    arguments,
+                    output: result.output.clone(),
+                    actions: result.actions.clone(),
+                }])
+                .await?;
+                self.emit(
+                    self.active.as_ref().map(|run| run.id.clone()),
+                    StreamEventKind::SlashCommandCompleted {
+                        command_id,
+                        name,
+                        output: result.output.clone(),
+                    },
+                );
+                for action in result.actions.clone() {
+                    self.apply_slash_action(action).await?;
+                }
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn apply_slash_action(&mut self, action: SlashCommandAction) -> Result<(), SessionError> {
+        match action {
+            SlashCommandAction::Input { content } => {
+                let message_id = self.message_id();
+                self.append(vec![TranscriptEntryKind::Input {
+                    message_id: message_id.clone(),
+                    source: Source::Harness,
+                    content: content.clone(),
+                }])
+                .await?;
+                self.inputs.push_back(PendingInput {
+                    message_id: message_id.clone(),
+                    content,
+                });
+                self.emit(None, StreamEventKind::InputQueued { message_id });
+            }
+            SlashCommandAction::Steer { content } => {
+                let message_id = self.message_id();
+                self.append(vec![TranscriptEntryKind::SteeringQueued {
+                    message_id: message_id.clone(),
+                    source: Source::Harness,
+                    content: content.clone(),
+                }])
+                .await?;
+                self.steering
+                    .push(SteeringNotice {
+                        message_id: message_id.clone(),
+                        source: Source::Harness,
+                        content,
+                    })
+                    .await;
+                self.emit(
+                    self.active.as_ref().map(|run| run.id.clone()),
+                    StreamEventKind::SteeringQueued { message_id },
+                );
+            }
+            SlashCommandAction::Abort { reason } => {
+                if self.active.is_some() {
+                    self.interrupt(InterruptionCause::Harness { reason })
+                        .await?;
+                }
+            }
+            SlashCommandAction::ActivateProfile { profile, brief } => {
+                self.activate_profile_from_command(profile, brief).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn activate_profile_from_command(
+        &mut self,
+        profile_name: String,
+        brief: Option<String>,
+    ) -> Result<(), SessionError> {
+        let profiles = self.profiles.as_ref().ok_or_else(|| {
+            SessionError::Profile("profile activation requires a configured profile source".into())
+        })?;
+        let profile = profiles
+            .load(&profile_name)
+            .await
+            .map_err(SessionError::Profile)?;
+        if self.active.is_some() {
+            self.interrupt(InterruptionCause::Harness {
+                reason: format!("slash command activated profile `{profile_name}`"),
+            })
+            .await?;
+        }
+        let steering = self.steering.drain_for_handoff().await;
+        let steering_ids = steering
+            .iter()
+            .map(|notice| notice.message_id.clone())
+            .collect::<Vec<_>>();
+        let combined_brief = brief
+            .as_deref()
+            .into_iter()
+            .chain(steering.iter().map(|notice| notice.content.as_str()))
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let superseded = self
+            .inputs
+            .drain(..)
+            .map(|input| input.message_id)
+            .collect::<Vec<_>>();
+        let mut entries = Vec::new();
+        if !superseded.is_empty() {
+            entries.push(TranscriptEntryKind::InputsSuperseded {
+                message_ids: superseded,
+            });
+        }
+        entries.push(TranscriptEntryKind::ProfileActivated {
+            profile: profile.clone(),
+            brief: (!combined_brief.is_empty()).then(|| combined_brief.clone()),
+            steering_message_ids: steering_ids,
+        });
+        let input_id = (!combined_brief.is_empty()).then(|| self.message_id_at(entries.len()));
+        if let Some(input_id) = &input_id {
+            entries.push(TranscriptEntryKind::Input {
+                message_id: input_id.clone(),
+                source: Source::Harness,
+                content: combined_brief.clone(),
+            });
+        }
+        self.append(entries).await?;
+        self.emit(None, StreamEventKind::ProfileActivated { profile });
+        if let Some(message_id) = input_id {
+            self.inputs.push_back(PendingInput {
+                message_id: message_id.clone(),
+                content: combined_brief,
+            });
+            self.emit(None, StreamEventKind::InputQueued { message_id });
         }
         Ok(())
     }
@@ -388,6 +711,9 @@ impl Session {
             context,
             prompt: input.content,
             history,
+            profile: self.record.current_profile().cloned().map(Arc::new),
+            profile_epoch: self.record.current_profile_epoch(),
+            selected_model: None,
         };
         let stream = self.model.stream(request, self.steering.clone());
         self.active = Some(ActiveRun {
@@ -531,7 +857,134 @@ impl Session {
                 }
                 self.complete().await?;
             }
+            ModelEvent::Control { call_id, control } => match control {
+                ToolControl::Yield { payload } => self.finish_yield(call_id, payload).await?,
+                ToolControl::Handoff { profile, brief } => {
+                    if let Err(error) = self.finish_handoff(call_id, profile, brief).await {
+                        match error {
+                            SessionError::Profile(message) => {
+                                self.fail(ModelError::new(format!(
+                                    "handoff profile activation failed: {message}"
+                                )))
+                                .await?;
+                            }
+                            other => return Err(other),
+                        }
+                    }
+                }
+            },
         }
+        Ok(())
+    }
+
+    async fn finish_yield(
+        &mut self,
+        call_id: CallId,
+        payload: serde_json::Value,
+    ) -> Result<(), SessionError> {
+        let active = self.active.take().expect("control without active run");
+        let mut entries = Vec::new();
+        if !active.content.is_empty() {
+            entries.push(TranscriptEntryKind::AssistantMessage {
+                message_id: self.message_id_at(entries.len()),
+                run_id: active.id.clone(),
+                content: active.content,
+            });
+        }
+        entries.push(TranscriptEntryKind::RunFinished {
+            run_id: active.id.clone(),
+            outcome: RunOutcome::Yielded {
+                call_id: call_id.clone(),
+                payload: payload.clone(),
+            },
+        });
+        self.append(entries).await?;
+        self.emit(
+            Some(active.id),
+            StreamEventKind::Yielded { call_id, payload },
+        );
+        Ok(())
+    }
+
+    async fn finish_handoff(
+        &mut self,
+        call_id: CallId,
+        profile_name: String,
+        brief: String,
+    ) -> Result<(), SessionError> {
+        let profiles = self.profiles.as_ref().ok_or_else(|| {
+            SessionError::Profile("handoff requires a configured profile source".into())
+        })?;
+        let profile = profiles
+            .load(&profile_name)
+            .await
+            .map_err(SessionError::Profile)?;
+        let steering = self.steering.drain_for_handoff().await;
+        let steering_ids = steering
+            .iter()
+            .map(|notice| notice.message_id.clone())
+            .collect::<Vec<_>>();
+        let combined_brief = std::iter::once(brief.as_str())
+            .chain(steering.iter().map(|notice| notice.content.as_str()))
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let superseded = self
+            .inputs
+            .drain(..)
+            .map(|input| input.message_id)
+            .collect::<Vec<_>>();
+        let active = self.active.take().expect("control without active run");
+        let mut entries = Vec::new();
+        if !active.content.is_empty() {
+            entries.push(TranscriptEntryKind::AssistantMessage {
+                message_id: self.message_id_at(entries.len()),
+                run_id: active.id.clone(),
+                content: active.content,
+            });
+        }
+        if !superseded.is_empty() {
+            entries.push(TranscriptEntryKind::InputsSuperseded {
+                message_ids: superseded,
+            });
+        }
+        entries.push(TranscriptEntryKind::RunFinished {
+            run_id: active.id.clone(),
+            outcome: RunOutcome::HandedOff {
+                call_id: call_id.clone(),
+                profile: profile_name.clone(),
+            },
+        });
+        entries.push(TranscriptEntryKind::ProfileActivated {
+            profile: profile.clone(),
+            brief: Some(combined_brief.clone()),
+            steering_message_ids: steering_ids,
+        });
+        let input_id = self.message_id_at(entries.len());
+        entries.push(TranscriptEntryKind::Input {
+            message_id: input_id.clone(),
+            source: Source::Harness,
+            content: combined_brief.clone(),
+        });
+        self.append(entries).await?;
+        self.inputs.push_back(PendingInput {
+            message_id: input_id.clone(),
+            content: combined_brief,
+        });
+        self.emit(
+            Some(active.id),
+            StreamEventKind::HandedOff {
+                call_id,
+                profile: profile_name,
+            },
+        );
+        self.emit(None, StreamEventKind::ProfileActivated { profile });
+        self.emit(
+            None,
+            StreamEventKind::InputQueued {
+                message_id: input_id,
+            },
+        );
         Ok(())
     }
 
@@ -663,6 +1116,14 @@ impl Session {
         ))
     }
 
+    fn message_id_at(&self, offset: usize) -> MessageId {
+        MessageId::new(format!(
+            "{}:message:{}",
+            self.record.session_id(),
+            self.record.next_sequence() + offset as u64
+        ))
+    }
+
     fn emit(&mut self, run_id: Option<RunId>, kind: StreamEventKind) {
         let sequence = self.event_sequence;
         self.event_sequence += 1;
@@ -680,9 +1141,25 @@ fn millis(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn validate_slash_command_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.starts_with('/')
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(format!(
+            "invalid slash-command name `{name}`; use ASCII letters, digits, `-`, or `_`, without a leading slash"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use artist_core::{InitialContext, TranscriptEntryKind};
+    use std::collections::HashMap;
+
+    use artist_core::{InitialContext, ProfilePolicy, TranscriptEntryKind, default_yield_schema};
     use artist_store::MemoryStore;
     use futures::stream;
 
@@ -693,6 +1170,41 @@ mod tests {
     struct RecordingModel {
         requests: mpsc::UnboundedSender<ModelRequest>,
         steering: mpsc::UnboundedSender<Vec<SteeringNotice>>,
+    }
+
+    struct StaticProfiles(HashMap<String, ProfileSnapshot>);
+
+    struct StaticSlashCommands(HashMap<String, SlashCommandResult>);
+
+    #[async_trait]
+    impl ProfileSource for StaticProfiles {
+        async fn load(&self, name: &str) -> Result<ProfileSnapshot, String> {
+            self.0
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("unknown profile `{name}`"))
+        }
+    }
+
+    #[async_trait]
+    impl SlashCommandSource for StaticSlashCommands {
+        async fn invoke(&self, name: &str, _arguments: &str) -> Result<SlashCommandResult, String> {
+            self.0
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("unknown slash command `{name}`"))
+        }
+    }
+
+    fn test_profile(name: &str, catalog: &[&str]) -> ProfileSnapshot {
+        ProfileSnapshot {
+            name: name.into(),
+            instructions: format!("{name} instructions"),
+            yield_schema: default_yield_schema(),
+            policy: ProfilePolicy::default(),
+            models: Vec::new(),
+            catalog: catalog.iter().map(|name| (*name).into()).collect(),
+        }
     }
 
     enum Control {
@@ -749,7 +1261,7 @@ mod tests {
     ) {
         let store = Arc::new(MemoryStore::default());
         let (model, control) = ControlledModel::new();
-        let handle = SessionHandle::create(
+        let handle = SessionHandle::create_unprofiled(
             SessionId::from("session"),
             InitialContext { fragments: vec![] },
             store.clone(),
@@ -1116,9 +1628,10 @@ mod tests {
         }
         store.create(record).await.unwrap();
         let (model, _) = ControlledModel::new();
-        let _session = SessionHandle::resume(&SessionId::from("resume"), store.clone(), model)
-            .await
-            .unwrap();
+        let _session =
+            SessionHandle::resume_unprofiled(&SessionId::from("resume"), store.clone(), model)
+                .await
+                .unwrap();
 
         let record = store.load(&SessionId::from("resume")).await.unwrap();
         let tail = &record.entries()[record.entries().len() - 2..];
@@ -1164,10 +1677,13 @@ mod tests {
         record.append_batch(&entries).unwrap();
         store.create(record).await.unwrap();
         let (model, _) = ControlledModel::new();
-        let _session =
-            SessionHandle::resume(&SessionId::from("resume-partial"), store.clone(), model)
-                .await
-                .unwrap();
+        let _session = SessionHandle::resume_unprofiled(
+            &SessionId::from("resume-partial"),
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
 
         let record = store
             .load(&SessionId::from("resume-partial"))
@@ -1224,10 +1740,13 @@ mod tests {
             requests: requests_tx,
             steering: steering_tx,
         });
-        let _session =
-            SessionHandle::resume(&SessionId::from("resume-queues"), store.clone(), model)
-                .await
-                .unwrap();
+        let _session = SessionHandle::resume_unprofiled(
+            &SessionId::from("resume-queues"),
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(requests_rx.recv().await.unwrap().prompt, "first pending");
         let notices = steering_rx.recv().await.unwrap();
@@ -1263,5 +1782,285 @@ mod tests {
             .map(|id| id.as_str())
             .collect();
         assert_eq!(delivered, ["notice-1", "notice-2"]);
+    }
+
+    #[tokio::test]
+    async fn yield_is_a_typed_terminal_run_outcome() {
+        let store = Arc::new(MemoryStore::default());
+        let (model, control) = ControlledModel::new();
+        let profiles = Arc::new(StaticProfiles(HashMap::from([(
+            "worker".into(),
+            test_profile("worker", &["worker"]),
+        )])));
+        let session = SessionHandle::create(
+            SessionId::from("yield-session"),
+            InitialContext { fragments: vec![] },
+            "worker",
+            profiles,
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
+        let mut events = session.subscribe();
+        session.input(Source::User, "work").await.unwrap();
+        wait_for(&mut events, |event| {
+            matches!(event, StreamEventKind::RunStarted { .. })
+        })
+        .await;
+        let call_id = CallId::from("yield-call");
+        control
+            .send(Control::Event(ModelEvent::ToolCall {
+                call_id: call_id.clone(),
+                name: "yield".into(),
+                arguments: r#"{"completed":true}"#.into(),
+            }))
+            .unwrap();
+        control
+            .send(Control::Event(ModelEvent::ToolResult {
+                call_id: call_id.clone(),
+                content: vec![artist_core::ContentPart::Json {
+                    value: serde_json::json!({"completed": true}),
+                }],
+            }))
+            .unwrap();
+        control
+            .send(Control::Event(ModelEvent::Control {
+                call_id: call_id.clone(),
+                control: ToolControl::Yield {
+                    payload: serde_json::json!({"completed": true}),
+                },
+            }))
+            .unwrap();
+        wait_for(&mut events, |event| {
+            matches!(event, StreamEventKind::Yielded { .. })
+        })
+        .await;
+
+        let record = store.load(&SessionId::from("yield-session")).await.unwrap();
+        assert!(record.active_run().is_none());
+        assert!(matches!(
+            &record.entries().last().unwrap().kind,
+            TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Yielded { call_id: stored, payload },
+                ..
+            } if stored == &call_id && payload == &serde_json::json!({"completed": true})
+        ));
+    }
+
+    #[tokio::test]
+    async fn handoff_snapshots_profile_and_replaces_projected_history_with_combined_brief() {
+        let store = Arc::new(MemoryStore::default());
+        let (model, control) = ControlledModel::new();
+        let profiles = Arc::new(StaticProfiles(HashMap::from([
+            (
+                "planner".into(),
+                test_profile("planner", &["planner", "worker"]),
+            ),
+            (
+                "worker".into(),
+                test_profile("worker", &["planner", "worker"]),
+            ),
+        ])));
+        let session = SessionHandle::create(
+            SessionId::from("handoff-session"),
+            InitialContext { fragments: vec![] },
+            "planner",
+            profiles,
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
+        let mut events = session.subscribe();
+        session.input(Source::User, "old task").await.unwrap();
+        wait_for(&mut events, |event| {
+            matches!(event, StreamEventKind::RunStarted { .. })
+        })
+        .await;
+        session
+            .input(Source::User, "obsolete queued task")
+            .await
+            .unwrap();
+        session
+            .steer(Source::User, "queued correction")
+            .await
+            .unwrap();
+
+        let call_id = CallId::from("handoff-call");
+        control
+            .send(Control::Event(ModelEvent::ToolCall {
+                call_id: call_id.clone(),
+                name: "handoff".into(),
+                arguments: r#"{"profile":"worker","brief":"implement it"}"#.into(),
+            }))
+            .unwrap();
+        control
+            .send(Control::Event(ModelEvent::ToolResult {
+                call_id: call_id.clone(),
+                content: vec![artist_core::ContentPart::text("accepted")],
+            }))
+            .unwrap();
+        control
+            .send(Control::Event(ModelEvent::Control {
+                call_id,
+                control: ToolControl::Handoff {
+                    profile: "worker".into(),
+                    brief: "implement it".into(),
+                },
+            }))
+            .unwrap();
+        wait_for(&mut events, |event| {
+            matches!(event, StreamEventKind::ProfileActivated { profile } if profile.name == "worker")
+        })
+        .await;
+        wait_for(&mut events, |event| {
+            matches!(event, StreamEventKind::RunStarted { .. })
+        })
+        .await;
+
+        let record = store
+            .load(&SessionId::from("handoff-session"))
+            .await
+            .unwrap();
+        assert_eq!(record.current_profile().unwrap().name, "worker");
+        assert!(record.entries().iter().any(|entry| matches!(
+            &entry.kind,
+            TranscriptEntryKind::InputsSuperseded { message_ids } if message_ids.len() == 1
+        )));
+        assert!(record.entries().iter().any(|entry| matches!(
+            &entry.kind,
+            TranscriptEntryKind::ProfileActivated { brief: Some(brief), steering_message_ids, .. }
+                if brief == "implement it\n\nqueued correction" && steering_message_ids.len() == 1
+        )));
+        assert_eq!(
+            project(&record).1.last().unwrap().message,
+            crate::ModelMessage::User("implement it\n\nqueued correction".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_output_is_durable_harness_state_and_bypasses_profile_policy() {
+        let store = Arc::new(MemoryStore::default());
+        let (model, _) = ControlledModel::new();
+        let mut denied = test_profile("locked", &["locked"]);
+        denied.policy.default = artist_core::PolicyDecision::Deny;
+        let profiles = Arc::new(StaticProfiles(HashMap::from([("locked".into(), denied)])));
+        let commands = Arc::new(StaticSlashCommands(HashMap::from([(
+            "status".into(),
+            SlashCommandResult {
+                output: Some("ready".into()),
+                actions: Vec::new(),
+            },
+        )])));
+        let session = SessionHandle::create_with_commands(
+            SessionId::from("slash-output"),
+            InitialContext { fragments: vec![] },
+            "locked",
+            profiles,
+            commands,
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
+
+        let result = session.slash("status", "verbose please").await.unwrap();
+        assert_eq!(result.output.as_deref(), Some("ready"));
+        let record = store.load(&SessionId::from("slash-output")).await.unwrap();
+        assert!(record.entries().iter().any(|entry| matches!(
+            &entry.kind,
+            TranscriptEntryKind::SlashCommand { name, arguments, output: Some(output), .. }
+                if name == "status" && arguments == "verbose please" && output == "ready"
+        )));
+        assert!(project(&record).1.is_empty());
+    }
+
+    #[tokio::test]
+    async fn slash_actions_enter_the_normal_kernel_command_flow() {
+        let store = Arc::new(MemoryStore::default());
+        let (model, _control) = ControlledModel::new();
+        let profiles = Arc::new(StaticProfiles(HashMap::from([(
+            "default".into(),
+            test_profile("default", &["default"]),
+        )])));
+        let commands = Arc::new(StaticSlashCommands(HashMap::from([(
+            "ask".into(),
+            SlashCommandResult {
+                output: None,
+                actions: vec![SlashCommandAction::Input {
+                    content: "generated prompt".into(),
+                }],
+            },
+        )])));
+        let session = SessionHandle::create_with_commands(
+            SessionId::from("slash-action"),
+            InitialContext { fragments: vec![] },
+            "default",
+            profiles,
+            commands,
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
+        let mut events = session.subscribe();
+
+        session.slash("ask", "").await.unwrap();
+        wait_for(&mut events, |event| {
+            matches!(event, StreamEventKind::RunStarted { .. })
+        })
+        .await;
+        let record = store.load(&SessionId::from("slash-action")).await.unwrap();
+        assert!(record.entries().iter().any(|entry| matches!(
+            &entry.kind,
+            TranscriptEntryKind::Input { source: Source::Harness, content, .. }
+                if content == "generated prompt"
+        )));
+    }
+
+    #[tokio::test]
+    async fn slash_profile_activation_resets_context_and_queues_its_brief() {
+        let store = Arc::new(MemoryStore::default());
+        let (model, _control) = ControlledModel::new();
+        let profiles = Arc::new(StaticProfiles(HashMap::from([
+            (
+                "planner".into(),
+                test_profile("planner", &["planner", "worker"]),
+            ),
+            (
+                "worker".into(),
+                test_profile("worker", &["planner", "worker"]),
+            ),
+        ])));
+        let commands = Arc::new(StaticSlashCommands(HashMap::from([(
+            "work".into(),
+            SlashCommandResult {
+                output: Some("switched".into()),
+                actions: vec![SlashCommandAction::ActivateProfile {
+                    profile: "worker".into(),
+                    brief: Some("build it".into()),
+                }],
+            },
+        )])));
+        let session = SessionHandle::create_with_commands(
+            SessionId::from("slash-profile"),
+            InitialContext { fragments: vec![] },
+            "planner",
+            profiles,
+            commands,
+            store.clone(),
+            model,
+        )
+        .await
+        .unwrap();
+
+        session.slash("work", "").await.unwrap();
+        let record = store.load(&SessionId::from("slash-profile")).await.unwrap();
+        assert_eq!(record.current_profile().unwrap().name, "worker");
+        assert_eq!(
+            project(&record).1.last().unwrap().message,
+            crate::ModelMessage::User("build it".into())
+        );
     }
 }

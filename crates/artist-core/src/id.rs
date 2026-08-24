@@ -44,3 +44,4 @@ id!(MessageId);
 id!(EventId);
 id!(CallId);
 id!(PluginId);
+id!(SlashCommandId);

@@ -46,8 +46,8 @@ projection path. A node may have both text and logical children. Providers
 register operation-scoped base/projection globs; routing is deterministic by
 literal specificity, wildcard count, and load order.
 
-The only model-facing verbs are `read`, `find`, `grep`, `write`, `move`, and
-`poll`. The same `ToolRegistry` is used by Rig dynamic tools and WASM host
+The model-facing verbs are `read`, `find`, `grep`, `write`, `edit`, `move`,
+`run`, `signal`, `poll`, `yield`, and `handoff`. The same `ToolRegistry` is used by Rig dynamic tools and WASM host
 callbacks. Calls carry one correlation ID and a stack, so direct and indirect
 plugin recursion fails before component re-entry.
 
@@ -56,10 +56,17 @@ index over the complete mount. URI queries appear as separate Unix names such as
 `rust.rs?symbols/`; shells start in the projected `file` subtree and receive the
 mount root as `ARTIST_ROOT`. FUSE attributes exist only to satisfy the kernel.
 
-The component ABI is `artist:plugin@0.4.0`. Tool providers and resource
-providers are separate exports; prompt, context, hooks, model configuration,
-and event lifecycle exports remain intact. The default component supplies the
-terminal filesystem route. A separate bundled WASM component owns the six
-universal model-facing verbs and calls generic host resource/search imports.
+The component ABI is `artist:plugin@0.6.0`. Tool providers, resource providers,
+and harness-facing slash-command providers are separate exports; prompt,
+context, hooks, model configuration, and event lifecycle exports remain intact.
+Slash command registration is globally unique and deliberately bypasses model
+profile policy. Separate filesystem components own
+the terminal read, children, write, edit, and move routes. Two profile resource
+components own `profiles:///` read and children routes. Eleven additional narrow
+WASM components each own one model-facing verb and call typed host imports.
+Six package resource components expose the host-owned `plugins:///` catalog one
+operation at a time. Packages include source and build inputs; lifecycle signals
+test and compile inactive candidates, validate them, and replace live
+registrations by owner without invalidating in-flight calls.
 The host owns only native filesystem mechanics, routing, FUSE, and FFF; it
 registers no model-facing tools itself.

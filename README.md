@@ -15,10 +15,12 @@ access. Deployments that need a boundary must provide it outside Artist.
 - `artist-resource`: canonical URI tree, deterministic routing, FUSE projection, and FFF search
 - `artist-plugin`: versioned WIT component host and ordered capability chains
 - `artist-observe`: backend-neutral observations projected from public stream events
-- `plugins/default`: lifecycle defaults and the terminal `file:///**` resource provider
-- `plugins/builtin-tools`: the six bundled model-facing tools, implemented as a WASM extension
-- `plugins/ast-fixture`: Rust `?symbols/...` projections backed by the shared resource bridge
-- `plugins/tool-fixture`: cross-component tool-call and recursion smoke fixture
+- `plugins/{prompt,context,hooks,model,events}`: one lifecycle capability per WASM component
+- `plugins/file-{read,children,write,edit,move}`: one `file:///**` operation per WASM component
+- `plugins/profiles-{read,children}`: one `profiles:///**` operation per WASM component
+- `plugins/plugins-{read,children,write,edit,move,signal}`: one `plugins:///**` package operation per WASM component
+- `plugins/tool-{read,find,grep,write,edit,move,run,signal,poll,yield,handoff}`: one model-facing tool per WASM component
+- `plugins/sdk`: shared WIT boilerplate; this library is not a plugin component
 
 The canonical transcript is the memory boundary. The kernel projects it into Rig messages for every request instead of letting Rig keep a second conversation log. This is intentional: Rig's automatic memory append only sees successful turns, while Artist must also preserve partial output and typed interruptions. `rig-memory` policies shape the projection without rewriting the transcript. The permanent record and physical-log contracts are specified in [`TRANSCRIPT_V1.md`](TRANSCRIPT_V1.md).
 
@@ -33,6 +35,8 @@ untouched.
 - `input` queues a normal turn.
 - `steer` queues a gentle notification. A Rig hook takes it immediately before the next model request; it never cancels the current request.
 - `abort` cancels the active stream and appends its partial assistant content followed by a typed interruption.
+- `yield` validates the active profile's result schema and ends the run with a typed payload.
+- `handoff` snapshots another profile, starts a fresh projection epoch with the same identity, and queues its brief plus pending steering as the first input.
 
 Replacement is explicitly `abort`, then `input`.
 
@@ -42,9 +46,9 @@ Replacement is explicitly `abort`, then `input`.
 make test
 ```
 
-This formats and lints the Rust workspace, builds all fixture `wasm32-wasip2`
-components, invokes every advertised WIT socket through Wasmtime, verifies
-that unadvertised sockets are skipped, and runs deterministic tests.
+This formats and lints the Rust workspace, builds every `wasm32-wasip2`
+component, verifies that each advertises exactly one capability, invokes the
+production sockets through Wasmtime, and runs deterministic tests.
 
 On Linux with a usable `/dev/fuse`, the full Unix projection and shared FFF
 index smoke test is:
@@ -61,18 +65,29 @@ OPENAI_API_KEY=... cargo run -p artist-rig --example openai -- <streaming-model-
 
 ## Stable contracts
 
-- Canonical snapshots use `artist-core::RECORD_VERSION = 3` and deserialize only
-  through the validating record reducer. Legacy v1/v2 snapshots and framed v2
-  logs migrate explicitly; rich tool-result parts remain lossless.
+- Canonical snapshots use `artist-core::RECORD_VERSION = 5` and deserialize only
+  through the validating record reducer. Every other record version is rejected.
 - File-backed sessions use `artist-store::FILE_FORMAT_VERSION = 2`: a frozen
-  header followed by SHA-256-chained, atomic JSON batch frames. Legacy v1 JSONL
-  is migrated on read and rewritten on the next append.
+  header followed by SHA-256-chained, atomic JSON batch frames. Every other
+  physical format or embedded record version is rejected. Artist is
+  pre-production: never add migration support; discard stale development data.
 - The public command and stream protocol consists only of `artist-core` values.
 - With locked Rig 0.42, `AgentRunner` stream errors are terminal; Artist
   preserves partial output and closes the run instead of expecting a later
   recovery item from that stream.
-- The plugin ABI is `artist:plugin@0.4.0` in `wit/plugin.wit`; tool and resource providers are separate interoperable contracts. The host has no native model-facing tools: even bundled tools register from WASM components into the shared registry below Rig.
+- The plugin ABI is `artist:plugin@0.6.0` in `wit/plugin.wit`; tool, resource,
+  and slash-command providers are separate interoperable contracts. Slash
+  commands have globally unique names, receive raw trailing arguments, return
+  harness-facing output plus typed kernel actions, and are never profile-gated.
+  The host has no native model-facing tools: every tool registers from its own
+  WASM component into the shared registry below Rig.
 - Telemetry is derived from stream events and is never required to load or resume a session.
 
-The complete resource-fabric contract and verification checklist live in
-[`URI_RESOURCE_FABRIC_PLAN.md`](URI_RESOURCE_FABRIC_PLAN.md).
+The base resource-fabric contract lives in
+[`URI_RESOURCE_FABRIC_PLAN.md`](URI_RESOURCE_FABRIC_PLAN.md). Kernel metadata,
+execution-neutral control, and TECA line-anchor editing are specified in
+[`RESOURCE_CAPABILITIES_IMPLEMENTATION_PLAN.md`](RESOURCE_CAPABILITIES_IMPLEMENTATION_PLAN.md).
+Profile layout, policy, yield, handoff, and model routing are specified in
+[`PROFILES.md`](PROFILES.md).
+Inspectable source packages, candidate builds, validation, and live activation
+are specified in [`PLUGINS.md`](PLUGINS.md).

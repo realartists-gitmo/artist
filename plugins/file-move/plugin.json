@@ -1,0 +1,6 @@
+{
+  "format": 1,
+  "id": "artist.file.move",
+  "cargo_package": "artist-file-move",
+  "component": "artist_file_move.wasm"
+}

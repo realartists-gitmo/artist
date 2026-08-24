@@ -1,0 +1,13 @@
+[package]
+name = "artist-tool-signal"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+artist-plugin-sdk.workspace = true
+schemars.workspace = true
+serde.workspace = true

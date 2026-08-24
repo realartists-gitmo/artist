@@ -10,6 +10,7 @@ artist-core = { path = "../artist-core" }
 artist-kernel = { path = "../artist-kernel" }
 artist-resource = { path = "../artist-resource" }
 async-stream.workspace = true
+async-trait.workspace = true
 futures.workspace = true
 rig-agent.workspace = true
 rig-core = { workspace = true, features = ["reqwest", "rustls"] }
@@ -19,5 +20,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 artist-store = { path = "../artist-store" }
-async-trait.workspace = true
 rig-agent = { workspace = true, features = ["test-utils"] }

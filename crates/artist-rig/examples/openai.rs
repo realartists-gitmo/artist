@@ -2,14 +2,33 @@
 
 use std::sync::Arc;
 
-use artist_core::{InitialContext, SessionId, Source, StreamEventKind};
-use artist_kernel::SessionHandle;
+use artist_core::{
+    InitialContext, ProfilePolicy, ProfileSnapshot, SessionId, Source, StreamEventKind,
+    default_yield_schema,
+};
+use artist_kernel::{ProfileSource, SessionHandle};
 use artist_rig::RigModel;
 use artist_store::MemoryStore;
 use rig_core::{
     client::{CompletionClient, ProviderClient},
     providers::openai,
 };
+
+struct SmokeProfile;
+
+#[async_trait::async_trait]
+impl ProfileSource for SmokeProfile {
+    async fn load(&self, name: &str) -> Result<ProfileSnapshot, String> {
+        Ok(ProfileSnapshot {
+            name: name.into(),
+            instructions: "Run the live streaming smoke test.".into(),
+            yield_schema: default_yield_schema(),
+            policy: ProfilePolicy::default(),
+            models: Vec::new(),
+            catalog: vec![name.into()],
+        })
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,6 +40,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = SessionHandle::create(
         SessionId::from("live-smoke"),
         InitialContext { fragments: vec![] },
+        "smoke",
+        Arc::new(SmokeProfile),
         Arc::new(MemoryStore::default()),
         model,
     )

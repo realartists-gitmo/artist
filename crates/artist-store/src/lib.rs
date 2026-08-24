@@ -11,9 +11,7 @@ use std::{
     },
 };
 
-use artist_core::{
-    InitialContext, RECORD_VERSION, SessionId, SessionRecord, TranscriptEntry, V2TranscriptEntry,
-};
+use artist_core::{InitialContext, RECORD_VERSION, SessionId, SessionRecord, TranscriptEntry};
 use async_trait::async_trait;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -21,6 +19,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const FILE_FORMAT_VERSION: u32 = 2;
+// PRE-PRODUCTION POLICY: only this exact physical format and the current
+// RECORD_VERSION are readable. Do not add migrations or legacy decoders.
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -113,7 +113,6 @@ struct Cached {
     valid_len: u64,
     record: SessionRecord,
     last_hash: String,
-    legacy: bool,
 }
 
 impl FileStore {
@@ -177,7 +176,6 @@ impl SessionStore for FileStore {
                     valid_len: file_len,
                     record,
                     last_hash,
-                    legacy: false,
                 },
             );
             Ok(())
@@ -234,38 +232,29 @@ impl SessionStore for FileStore {
                 return Ok(next);
             }
 
-            if loaded.legacy {
-                let (bytes, last_hash) = encode_full(&loaded.record)?;
-                replace_atomically(&directory, &path, &bytes)?;
-                loaded.file_len = bytes.len() as u64;
-                loaded.valid_len = loaded.file_len;
-                loaded.last_hash = last_hash;
-                loaded.legacy = false;
-            } else {
-                let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
-                if loaded.valid_len != loaded.file_len {
-                    file.set_len(loaded.valid_len)?;
-                }
-                file.seek(SeekFrom::Start(loaded.valid_len))?;
-                let payload = BatchPayload {
-                    expected_sequence,
-                    entries: entries.clone(),
-                    previous_hash: loaded.last_hash.clone(),
-                };
-                let hash = hash(&payload)?;
-                let frame = Frame::Batch {
-                    expected_sequence: payload.expected_sequence,
-                    entries: payload.entries,
-                    previous_hash: payload.previous_hash,
-                    hash: hash.clone(),
-                };
-                let bytes = line(&frame)?;
-                file.write_all(&bytes)?;
-                file.sync_data()?;
-                loaded.file_len = loaded.valid_len + bytes.len() as u64;
-                loaded.valid_len = loaded.file_len;
-                loaded.last_hash = hash;
+            let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
+            if loaded.valid_len != loaded.file_len {
+                file.set_len(loaded.valid_len)?;
             }
+            file.seek(SeekFrom::Start(loaded.valid_len))?;
+            let payload = BatchPayload {
+                expected_sequence,
+                entries: entries.clone(),
+                previous_hash: loaded.last_hash.clone(),
+            };
+            let hash = hash(&payload)?;
+            let frame = Frame::Batch {
+                expected_sequence: payload.expected_sequence,
+                entries: payload.entries,
+                previous_hash: payload.previous_hash,
+                hash: hash.clone(),
+            };
+            let bytes = line(&frame)?;
+            file.write_all(&bytes)?;
+            file.sync_data()?;
+            loaded.file_len = loaded.valid_len + bytes.len() as u64;
+            loaded.valid_len = loaded.file_len;
+            loaded.last_hash = hash;
             let next = loaded.record.next_sequence();
             cache.lock().unwrap().insert(id, loaded);
             Ok(next)
@@ -348,31 +337,6 @@ struct BatchPayload {
     previous_hash: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "frame", rename_all = "snake_case")]
-enum V2Frame {
-    Header {
-        format_version: u32,
-        record_version: u32,
-        session_id: SessionId,
-        initial_context: InitialContext,
-        hash: String,
-    },
-    Batch {
-        expected_sequence: u64,
-        entries: Vec<V2TranscriptEntry>,
-        previous_hash: String,
-        hash: String,
-    },
-}
-
-#[derive(Serialize)]
-struct V2BatchPayload {
-    expected_sequence: u64,
-    entries: Vec<V2TranscriptEntry>,
-    previous_hash: String,
-}
-
 fn encode_full(record: &SessionRecord) -> Result<(Vec<u8>, String), StoreError> {
     let header = HeaderPayload {
         format_version: FILE_FORMAT_VERSION,
@@ -419,38 +383,15 @@ fn decode_path(path: &Path, expected_id: &SessionId) -> Result<Cached, StoreErro
         return Err(StoreError::Corrupt("missing complete header frame".into()));
     }
     let complete = &bytes[..valid_len];
-    let first = complete
-        .split(|byte| *byte == b'\n')
-        .find(|line| !line.is_empty())
-        .ok_or_else(|| StoreError::Corrupt("missing header frame".into()))?;
-    let marker: serde_json::Value = serde_json::from_slice(first)?;
-    if marker.get("frame").is_some() {
-        decode_v2(complete, file_len, valid_len as u64, expected_id)
-    } else if marker.get("record").is_some() {
-        decode_v1(complete, file_len, valid_len as u64, expected_id)
-    } else {
-        Err(StoreError::Corrupt("unknown file framing".into()))
-    }
+    decode_current(complete, file_len, valid_len as u64, expected_id)
 }
 
-fn decode_v2(
+fn decode_current(
     bytes: &[u8],
     file_len: u64,
     valid_len: u64,
     expected_id: &SessionId,
 ) -> Result<Cached, StoreError> {
-    let first = bytes
-        .split(|byte| *byte == b'\n')
-        .find(|line| !line.is_empty())
-        .ok_or_else(|| StoreError::Corrupt("missing header frame".into()))?;
-    let marker: serde_json::Value = serde_json::from_slice(first)?;
-    if marker
-        .get("record_version")
-        .and_then(|value| value.as_u64())
-        == Some(2)
-    {
-        return decode_record_v2(bytes, file_len, valid_len, expected_id);
-    }
     let mut lines = bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty());
@@ -464,6 +405,8 @@ fn decode_v2(
     else {
         return Err(StoreError::Corrupt("first frame is not a header".into()));
     };
+    // PRE-PRODUCTION POLICY: reject stale formats. Never add compatibility
+    // branches here; bump versions and discard development data instead.
     if format_version != FILE_FORMAT_VERSION || record_version != RECORD_VERSION {
         return Err(StoreError::Corrupt(format!(
             "unsupported file/record version {format_version}/{record_version}"
@@ -518,165 +461,7 @@ fn decode_v2(
         valid_len,
         record,
         last_hash,
-        legacy: false,
     })
-}
-
-fn decode_record_v2(
-    bytes: &[u8],
-    file_len: u64,
-    valid_len: u64,
-    expected_id: &SessionId,
-) -> Result<Cached, StoreError> {
-    let mut lines = bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty());
-    let Some(V2Frame::Header {
-        format_version,
-        record_version,
-        session_id,
-        initial_context,
-        hash: stored_hash,
-    }) = lines.next().map(serde_json::from_slice).transpose()?
-    else {
-        return Err(StoreError::Corrupt("first frame is not a header".into()));
-    };
-    if format_version != FILE_FORMAT_VERSION || record_version != 2 {
-        return Err(StoreError::Corrupt(format!(
-            "unsupported file/record version {format_version}/{record_version}"
-        )));
-    }
-    if &session_id != expected_id {
-        return Err(StoreError::Corrupt("session ID mismatch".into()));
-    }
-    let expected_hash = hash(&HeaderPayload {
-        format_version,
-        record_version,
-        session_id: session_id.clone(),
-        initial_context: initial_context.clone(),
-    })?;
-    if stored_hash != expected_hash {
-        return Err(StoreError::Corrupt("header hash mismatch".into()));
-    }
-    let mut entries = Vec::new();
-    let mut last_hash = stored_hash;
-    for bytes in lines {
-        let V2Frame::Batch {
-            expected_sequence,
-            entries: batch,
-            previous_hash,
-            hash: stored_hash,
-        } = serde_json::from_slice(bytes)?
-        else {
-            return Err(StoreError::Corrupt("header appears after log start".into()));
-        };
-        if previous_hash != last_hash {
-            return Err(StoreError::Corrupt("broken frame hash chain".into()));
-        }
-        let expected_hash = hash(&V2BatchPayload {
-            expected_sequence,
-            entries: batch.clone(),
-            previous_hash: previous_hash.clone(),
-        })?;
-        if stored_hash != expected_hash {
-            return Err(StoreError::Corrupt("batch hash mismatch".into()));
-        }
-        if entries.len() as u64 != expected_sequence {
-            return Err(StoreError::Corrupt(format!(
-                "batch expected {expected_sequence}, preceding tail is {}",
-                entries.len()
-            )));
-        }
-        entries.extend(batch);
-        last_hash = stored_hash;
-    }
-    let record = SessionRecord::from_v2_parts(session_id, initial_context, entries)?;
-    Ok(Cached {
-        file_len,
-        valid_len,
-        record,
-        last_hash,
-        legacy: true,
-    })
-}
-
-fn decode_v1(
-    bytes: &[u8],
-    file_len: u64,
-    valid_len: u64,
-    expected_id: &SessionId,
-) -> Result<Cached, StoreError> {
-    let mut lines = bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty());
-    let mut header: serde_json::Value = serde_json::from_slice(
-        lines
-            .next()
-            .ok_or_else(|| StoreError::Corrupt("missing legacy header".into()))?,
-    )?;
-    let object = header
-        .as_object_mut()
-        .ok_or_else(|| StoreError::Corrupt("legacy header is not an object".into()))?;
-    if object
-        .remove("record")
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .as_deref()
-        != Some("header")
-    {
-        return Err(StoreError::Corrupt("invalid legacy header".into()));
-    }
-    let version = object
-        .remove("version")
-        .ok_or_else(|| StoreError::Corrupt("legacy header has no version".into()))?;
-    let session_id = object
-        .remove("session_id")
-        .ok_or_else(|| StoreError::Corrupt("legacy header has no session ID".into()))?;
-    if serde_json::from_value::<SessionId>(session_id.clone())? != *expected_id {
-        return Err(StoreError::Corrupt("session ID mismatch".into()));
-    }
-    let initial_context = object
-        .remove("initial_context")
-        .ok_or_else(|| StoreError::Corrupt("legacy header has no context".into()))?;
-    let mut entries = Vec::new();
-    for bytes in lines {
-        let mut entry: serde_json::Value = serde_json::from_slice(bytes)?;
-        let object = entry
-            .as_object_mut()
-            .ok_or_else(|| StoreError::Corrupt("legacy entry is not an object".into()))?;
-        if object
-            .remove("record")
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .as_deref()
-            != Some("entry")
-        {
-            return Err(StoreError::Corrupt("invalid legacy entry frame".into()));
-        }
-        entries.push(entry);
-    }
-    let record: SessionRecord = serde_json::from_value(serde_json::json!({
-        "version": version,
-        "session_id": session_id,
-        "initial_context": initial_context,
-        "entries": entries,
-    }))?;
-    Ok(Cached {
-        file_len,
-        valid_len,
-        record,
-        last_hash: String::new(),
-        legacy: true,
-    })
-}
-
-fn replace_atomically(directory: &Path, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-    temporary.write_all(bytes)?;
-    temporary.as_file().sync_data()?;
-    temporary
-        .persist(path)
-        .map_err(|error| StoreError::Io(error.error))?;
-    sync_directory(directory)?;
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -707,10 +492,7 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artist_core::{
-        CallId, ContentPart, EventId, MessageId, RunId, Source, TranscriptEntryKind,
-        V2TranscriptEntryKind,
-    };
+    use artist_core::{MessageId, RunId, Source, TranscriptEntryKind};
 
     fn empty(id: &str) -> SessionRecord {
         SessionRecord::new(SessionId::from(id), InitialContext { fragments: vec![] })
@@ -757,88 +539,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hash_chained_v2_frames_are_validated_and_migrated() {
+    async fn rejects_every_stale_file_or_record_version() {
         let temporary = tempfile::tempdir().unwrap();
-        let session_id = SessionId::from("framed-v2");
-        let initial_context = InitialContext { fragments: vec![] };
-        let header_payload = HeaderPayload {
-            format_version: FILE_FORMAT_VERSION,
-            record_version: 2,
-            session_id: session_id.clone(),
-            initial_context: initial_context.clone(),
-        };
-        let header_hash = hash(&header_payload).unwrap();
-        let entries = vec![
-            V2TranscriptEntry {
-                event_id: EventId::from("framed-v2:event:0"),
-                sequence: 0,
-                kind: V2TranscriptEntryKind::Input {
-                    message_id: MessageId::from("input"),
-                    source: Source::User,
-                    content: "hello".into(),
-                },
-            },
-            V2TranscriptEntry {
-                event_id: EventId::from("framed-v2:event:1"),
-                sequence: 1,
-                kind: V2TranscriptEntryKind::RunStarted {
-                    run_id: RunId::from("run"),
-                    input_id: MessageId::from("input"),
-                },
-            },
-            V2TranscriptEntry {
-                event_id: EventId::from("framed-v2:event:2"),
-                sequence: 2,
-                kind: V2TranscriptEntryKind::ToolCall {
-                    run_id: RunId::from("run"),
-                    call_id: CallId::from("call"),
-                    name: "read".into(),
-                    arguments: "{}".into(),
-                },
-            },
-            V2TranscriptEntry {
-                event_id: EventId::from("framed-v2:event:3"),
-                sequence: 3,
-                kind: V2TranscriptEntryKind::ToolResult {
-                    run_id: RunId::from("run"),
-                    call_id: CallId::from("call"),
-                    result: "body".into(),
-                },
-            },
-        ];
-        let batch_payload = V2BatchPayload {
-            expected_sequence: 0,
-            entries: entries.clone(),
-            previous_hash: header_hash.clone(),
-        };
-        let batch_hash = hash(&batch_payload).unwrap();
-        let mut bytes = line(&V2Frame::Header {
-            format_version: FILE_FORMAT_VERSION,
-            record_version: 2,
-            session_id: session_id.clone(),
-            initial_context,
-            hash: header_hash.clone(),
-        })
-        .unwrap();
-        bytes.extend(
-            line(&V2Frame::Batch {
-                expected_sequence: 0,
-                entries,
-                previous_hash: header_hash,
-                hash: batch_hash,
-            })
-            .unwrap(),
-        );
-        std::fs::write(FileStore::path(temporary.path(), &session_id), bytes).unwrap();
-
         let store = FileStore::new(temporary.path()).await.unwrap();
-        let record = store.load(&session_id).await.unwrap();
-        assert_eq!(record.version(), RECORD_VERSION);
-        assert!(matches!(
-            &record.entries()[3].kind,
-            TranscriptEntryKind::ToolResult { content, .. }
-                if content == &vec![ContentPart::text("body")]
-        ));
+        for (format_version, record_version) in
+            [(2, 1), (2, 2), (2, 3), (2, 4), (2, 6), (1, 5), (3, 5)]
+        {
+            let session_id = SessionId::new(format!("framed-f{format_version}-r{record_version}"));
+            let initial_context = InitialContext { fragments: vec![] };
+            let payload = HeaderPayload {
+                format_version,
+                record_version,
+                session_id: session_id.clone(),
+                initial_context: initial_context.clone(),
+            };
+            let bytes = line(&Frame::Header {
+                format_version,
+                record_version,
+                session_id: session_id.clone(),
+                initial_context,
+                hash: hash(&payload).unwrap(),
+            })
+            .unwrap();
+            std::fs::write(FileStore::path(temporary.path(), &session_id), bytes).unwrap();
+            assert!(matches!(
+                store.load(&session_id).await,
+                Err(StoreError::Corrupt(message)) if message.contains("unsupported file/record version")
+            ));
+        }
     }
 
     #[tokio::test]
@@ -1032,37 +760,5 @@ mod tests {
             record.append(entry).unwrap();
         }
         assert_eq!(store.disk_replays.load(Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn migrates_legacy_jsonl_on_append() {
-        let temporary = tempfile::tempdir().unwrap();
-        let id = SessionId::from("legacy-file");
-        let path = FileStore::path(temporary.path(), &id);
-        let lines = [
-            serde_json::json!({"record":"header","version":1,"session_id":"legacy-file","initial_context":{"fragments":[]}}),
-            serde_json::json!({"record":"entry","event_id":"legacy-file:event:0","sequence":0,"kind":{"entry":"input","message_id":"input","source":"user","content":"hello"}}),
-        ];
-        let bytes: Vec<u8> = lines
-            .into_iter()
-            .flat_map(|value| line(&value).unwrap())
-            .collect();
-        std::fs::write(&path, bytes).unwrap();
-        let store = FileStore::new(temporary.path()).await.unwrap();
-        let migrated = store.load(&id).await.unwrap();
-        assert_eq!(migrated.version(), RECORD_VERSION);
-        store
-            .append(&id, 1, &[input(&migrated, "second")])
-            .await
-            .unwrap();
-        let first: serde_json::Value = serde_json::from_slice(
-            std::fs::read(path)
-                .unwrap()
-                .split(|byte| *byte == b'\n')
-                .next()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(first["frame"], "header");
     }
 }

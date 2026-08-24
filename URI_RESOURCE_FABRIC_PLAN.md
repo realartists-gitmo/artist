@@ -42,25 +42,32 @@ programs, and one host-owned FFF engine crawls that complete mount to drive
   - `read(uri, start_line?, line_count?)`
   - `children(uri)` as an internal topology operation
   - `write(uri, text)`
+  - provider-facing `edit(uri, expected_sha256, replacements)` after the kernel resolves model-facing line anchors
   - `move(from, to?)`; a null destination means remove
+  - `run(target, input, cwd?, env?, timeout_ms?)`
+  - `signal(uri, name, payload?)`
   - `poll(uri, match?, timeout_ms?)`
-  - `edit(uri, instructions)` is reserved in the protocol, skeletal, and unadvertised.
 - Cross-provider move is supported only when one selected provider explicitly handles both URIs.
-- Model-facing universal tools are `read`, `find`, `grep`, `write`, `move`, and `poll`.
-  They are supplied by the bundled `artist.builtin.tools` WASM extension, not
-  registered by native host code. The host exposes only generic routed-resource
-  and indexed-search imports used by that extension.
+- Model-facing universal tools are `read`, `find`, `grep`, `write`, `edit`,
+  `move`, `run`, `signal`, and `poll`.
+  Each is supplied by its own `artist.tool.*` WASM extension, not registered by
+  native host code or bundled into a multi-tool component. The host exposes
+  only generic routed-resource and indexed-search imports used by those extensions.
   - `find(uri, glob?, max_depth?, cursor?, limit?)` subsumes directory listing; null glob with depth one lists immediate descendants.
   - `grep(uri, regex, include_glob?, context?, cursor?, limit?)` searches text bodies.
   - Default pagination is 50 find results and 100 grep matches.
   - Results preserve canonical resource URIs and continuation cursors.
+  - Model-facing text locations are TECA anchors, never line numbers. Grep
+    matches expose an anchor plus a byte column within that line; before/after
+    context entries each expose their own anchor and text. Find returns URIs and
+    therefore has no text-location field.
 - Poll begins at the current bottom and accumulates only subsequently appended
   text. With a regex it returns on match, close, or timeout; without one it
   returns only on close or timeout. The structured reply contains `text` and a
   `matched`, `closed`, or `timed-out` outcome. Snapshot-only resources return a
   typed unsupported-operation error.
 
-The component ABI is `artist:plugin@0.4.0`; the earlier 0.2/0.3 proposals are
+The component ABI is `artist:plugin@0.6.0`; the earlier 0.2/0.3 proposals are
 superseded by the async resource-fabric and rich lifecycle contract.
 
 ## Implementation sequence
@@ -75,12 +82,11 @@ superseded by the async resource-fabric and rich lifecycle contract.
    - Convert definitions into Rig dynamic streaming tools.
    - Keep cross-plugin callbacks in-process; there is no native plugin ABI.
 3. **WASM resource routing**
-   - Use `artist:plugin@0.4.0` for the WIT package and components.
+   - Use `artist:plugin@0.6.0` for the WIT package and components.
    - Register operation-scoped URI globs and handle plain-WIT resource requests.
    - Synthesize query-root children from projection routes.
-   - Provide a fixture that reads Rust through the generic host-resource bridge
-     and exposes `?symbols/...` descendants without recursively invoking a
-     model-facing tool.
+   - Exercise projected resources in the owning resource-router and search
+     tests; do not create test-only plugin components.
 4. **FUSE projection**
    - Use `fuser` 0.17 as host infrastructure.
    - Mount one ephemeral scheme-rooted tree; launch shells/REPLs in the `file` subtree and expose `ARTIST_ROOT`.
@@ -98,8 +104,8 @@ superseded by the async resource-fabric and rich lifecycle contract.
    - Replace `read_file`, `write_file`, and `list_directory` with universal tools.
    - Register terminal `file://**` routes and delegate native mechanics through focused host imports.
    - Keep the router, URI model, tool bridge, FUSE projection, and search engine domain-neutral.
-7. **Bundled tool component**
-   - Export the six universal definitions and invocation behavior from a
+7. **Narrow tool components**
+   - Export each universal definition and its invocation behavior from one
      tools-only WASM component.
    - Resolve routed operations and FFF searches through generic host imports.
    - Leave the native registry empty until components register their tools.
@@ -108,13 +114,15 @@ superseded by the async resource-fabric and rich lifecycle contract.
 
 - URI tests: relative shorthand, percent encoding, canonical round trips, query descent, fragment rejection.
 - Router tests: base/projection globs, specificity, load-order ties, unsupported operations, provider-defined moves.
-- Tool registry tests: model invocation, WASM-to-host callbacks, cross-plugin calls, correlation IDs, and direct/indirect recursion rejection.
+- Tool registry tests: model invocation, correlation IDs, and direct/indirect recursion rejection.
 - Resource tests: ordinary and projected reads coexist on one base node.
 - Poll tests: append, regex match, close, timeout, and typed unsupported snapshot behavior.
 - FUSE tests: ordinary access, query traversal, routed write/move/remove, and URI/path round trips.
 - FFF tests: one index finds and greps ordinary files and WASM-provided projections.
 - Kernel replay tests: resource activity appears only as existing tool-call/tool-result transcript entries.
-- Component smoke: build default and fixture components against WIT 0.3 and exercise every socket.
+- Component smoke: build every narrow production component against the current
+  WIT package, assert one advertised capability per component, and exercise
+  every production socket.
 - Linux FUSE runtime tests are gated on `/dev/fuse`; URI, routing, plugin, and registry tests are mount-independent.
 
 ## Assumptions and deferred decisions

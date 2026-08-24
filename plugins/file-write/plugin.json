@@ -1,0 +1,6 @@
+{
+  "format": 1,
+  "id": "artist.file.write",
+  "cargo_package": "artist-file-write",
+  "component": "artist_file_write.wasm"
+}

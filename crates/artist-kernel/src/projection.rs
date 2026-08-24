@@ -1,20 +1,32 @@
 use std::collections::{HashMap, HashSet};
 
-use artist_core::{MessageId, RunOutcome, SessionRecord, TranscriptEntryKind};
+use artist_core::{ContextRole, MessageId, RunOutcome, SessionRecord, TranscriptEntryKind};
 
 use crate::{ModelHistoryItem, ModelMessage};
 
 pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
-    let context = record
-        .initial_context()
-        .fragments
+    let activation = record
+        .entries()
         .iter()
-        .map(|fragment| fragment.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            TranscriptEntryKind::ProfileActivated { profile, .. } => {
+                Some((entry.sequence, profile))
+            }
+            _ => None,
+        });
+    let boundary = activation.map(|(sequence, _)| sequence);
+    let context = compose_context(
+        record,
+        activation.map(|(_, profile)| profile.instructions.as_str()),
+    );
     let mut inputs = HashMap::<MessageId, String>::new();
     let mut steering = HashMap::<MessageId, String>::new();
-    for entry in record.entries() {
+    for entry in record
+        .entries()
+        .iter()
+        .filter(|entry| boundary.is_none_or(|boundary| entry.sequence > boundary))
+    {
         match &entry.kind {
             TranscriptEntryKind::Input {
                 message_id,
@@ -36,6 +48,7 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
     let latest_compaction = record
         .entries()
         .iter()
+        .filter(|entry| boundary.is_none_or(|boundary| entry.sequence > boundary))
         .rev()
         .find_map(|entry| match &entry.kind {
             TranscriptEntryKind::Compaction {
@@ -61,6 +74,9 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
     }
 
     for entry in record.entries() {
+        if boundary.is_some_and(|boundary| entry.sequence <= boundary) {
+            continue;
+        }
         if latest_compaction
             .as_ref()
             .is_some_and(|(through, _)| entry.sequence <= *through)
@@ -135,6 +151,9 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
                 });
             }
             TranscriptEntryKind::Compaction { .. } => {}
+            TranscriptEntryKind::ProfileActivated { .. }
+            | TranscriptEntryKind::InputsSuperseded { .. }
+            | TranscriptEntryKind::SlashCommand { .. } => {}
             TranscriptEntryKind::RunStarted { input_id, .. } => {
                 if let Some(content) = inputs.get(input_id) {
                     history.push(ModelHistoryItem {
@@ -147,10 +166,37 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
             | TranscriptEntryKind::RunFinished {
                 outcome: RunOutcome::Completed { .. },
                 ..
+            }
+            | TranscriptEntryKind::RunFinished {
+                outcome: RunOutcome::Yielded { .. } | RunOutcome::HandedOff { .. },
+                ..
             } => {}
         }
     }
     (context, history)
+}
+
+fn compose_context(record: &SessionRecord, profile: Option<&str>) -> String {
+    let mut fragments = Vec::new();
+    let initial = &record.initial_context().fragments;
+    let identity = initial
+        .iter()
+        .position(|fragment| fragment.role == ContextRole::Identity)
+        .unwrap_or(initial.len());
+    fragments.extend(
+        initial[..identity]
+            .iter()
+            .map(|fragment| fragment.content.as_str()),
+    );
+    if let Some(profile) = profile.filter(|profile| !profile.trim().is_empty()) {
+        fragments.push(profile);
+    }
+    fragments.extend(
+        initial[identity..]
+            .iter()
+            .map(|fragment| fragment.content.as_str()),
+    );
+    fragments.join("\n\n")
 }
 
 #[cfg(test)]
@@ -170,15 +216,61 @@ mod tests {
                     ContextFragment {
                         source: "SYSTEM.md".into(),
                         content: "system".into(),
+                        role: ContextRole::System,
                     },
                     ContextFragment {
                         source: "AGENTS.md".into(),
                         content: "agents".into(),
+                        role: ContextRole::Agents,
                     },
                 ],
             },
         );
         assert_eq!(project(&record).0, "system\n\nagents");
+    }
+
+    #[test]
+    fn profile_instructions_are_between_agents_and_identity() {
+        let mut record = SessionRecord::new(
+            SessionId::from("s"),
+            InitialContext {
+                fragments: vec![
+                    ContextFragment {
+                        source: "system".into(),
+                        content: "system".into(),
+                        role: ContextRole::System,
+                    },
+                    ContextFragment {
+                        source: "agents".into(),
+                        content: "agents".into(),
+                        role: ContextRole::Agents,
+                    },
+                    ContextFragment {
+                        source: "identity".into(),
+                        content: "identity".into(),
+                        role: ContextRole::Identity,
+                    },
+                ],
+            },
+        );
+        let profile = artist_core::ProfileSnapshot {
+            name: "planner".into(),
+            instructions: "profile".into(),
+            yield_schema: artist_core::default_yield_schema(),
+            policy: artist_core::ProfilePolicy::default(),
+            models: Vec::new(),
+            catalog: vec!["planner".into()],
+        };
+        let activation = record.entry(TranscriptEntryKind::ProfileActivated {
+            profile,
+            brief: None,
+            steering_message_ids: Vec::new(),
+        });
+        record.append(activation).unwrap();
+        assert_eq!(
+            project(&record).0,
+            "system\n\nagents\n\nprofile\n\nidentity"
+        );
     }
 
     #[test]

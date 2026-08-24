@@ -22,6 +22,22 @@ pub struct SearchEngine {
     generation: AtomicU64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexedGrepMatch {
+    pub uri: ResourceUri,
+    pub line_number: u64,
+    pub column: usize,
+    pub text: String,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrepPage {
+    pub matches: Vec<IndexedGrepMatch>,
+    pub cursor: Option<String>,
+}
+
 impl SearchEngine {
     pub fn new(mount_root: impl Into<PathBuf>) -> Result<Self, String> {
         let mount_root = mount_root.into();
@@ -152,7 +168,7 @@ impl SearchEngine {
         context: usize,
         cursor: Option<&str>,
         limit: usize,
-    ) -> Result<Value, String> {
+    ) -> Result<GrepPage, String> {
         regex::Regex::new(regex).map_err(|error| format!("invalid regex: {error}"))?;
         // FFF's public grep entry point accepts an FFFQuery and its query type
         // strips a leading backslash before `*`, `/`, or `!`. Wrapping the
@@ -212,14 +228,14 @@ impl SearchEngine {
                     continue;
                 }
                 let path = self.mount_root.join(relative);
-                matches.push(json!({
-                    "uri": mount_path_to_uri(&self.mount_root, &path)?.to_string(),
-                    "line": found.line_number,
-                    "column": found.col,
-                    "text": found.line_content,
-                    "before": found.context_before,
-                    "after": found.context_after,
-                }));
+                matches.push(IndexedGrepMatch {
+                    uri: mount_path_to_uri(&self.mount_root, &path)?,
+                    line_number: found.line_number,
+                    column: found.col,
+                    text: found.line_content,
+                    before: found.context_before,
+                    after: found.context_after,
+                });
             }
             if matches.len() >= limit || result.next_file_offset == 0 {
                 break (result.next_file_offset != 0)
@@ -227,7 +243,10 @@ impl SearchEngine {
             }
             page_offset = result.next_file_offset;
         };
-        Ok(json!({"matches": matches, "cursor": next}))
+        Ok(GrepPage {
+            matches,
+            cursor: next,
+        })
     }
 }
 
@@ -347,8 +366,8 @@ pub fn mount_path_to_uri(mount: &Path, path: &Path) -> Result<ResourceUri, Strin
             projection.push(component);
         }
     }
-    let text = if scheme == "file" {
-        format!("file:///{}", base.join("/"))
+    let text = if matches!(scheme.as_str(), "file" | "profiles" | "plugins") {
+        format!("{scheme}:///{}", base.join("/"))
     } else if base.is_empty() {
         format!("{scheme}:/")
     } else {
@@ -393,6 +412,15 @@ mod tests {
     }
 
     #[test]
+    fn hostless_plugin_scheme_path_round_trip() {
+        let mount = Path::new("/mnt/artist");
+        let uri = ResourceUri::resolve("plugins:///tool-read/src/lib.rs", Path::new("/")).unwrap();
+        let path = uri_to_mount_path(mount, &uri).unwrap();
+        assert_eq!(path, Path::new("/mnt/artist/plugins/tool-read/src/lib.rs"));
+        assert_eq!(mount_path_to_uri(mount, &path).unwrap(), uri);
+    }
+
+    #[test]
     fn one_fff_index_finds_and_greps_canonical_resources() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("file/workspace/src/lib.rs");
@@ -413,30 +441,33 @@ mod tests {
         let matches = index
             .grep(&root, "indexed_symbol", Some("**/*.rs"), 0, None, 100)
             .unwrap();
-        assert_eq!(matches["matches"][0]["uri"], "file:///workspace/src/lib.rs");
-        assert_eq!(matches["matches"][0]["line"], 1);
+        assert_eq!(
+            matches.matches[0].uri.to_string(),
+            "file:///workspace/src/lib.rs"
+        );
+        assert_eq!(matches.matches[0].line_number, 1);
 
         let first = index
             .grep(&root, "indexed_symbol", Some("**/*.rs"), 0, None, 1)
             .unwrap();
-        assert_eq!(first["cursor"], "grep:1");
+        assert_eq!(first.cursor.as_deref(), Some("grep:1"));
         let second = index
             .grep(
                 &root,
                 "indexed_symbol",
                 Some("**/*.rs"),
                 0,
-                first["cursor"].as_str(),
+                first.cursor.as_deref(),
                 1,
             )
             .unwrap();
-        assert_ne!(first["matches"][0]["uri"], second["matches"][0]["uri"]);
-        if let Some(cursor) = second["cursor"].as_str() {
+        assert_ne!(first.matches[0].uri, second.matches[0].uri);
+        if let Some(cursor) = second.cursor.as_deref() {
             let terminal = index
                 .grep(&root, "indexed_symbol", Some("**/*.rs"), 0, Some(cursor), 1)
                 .unwrap();
-            assert!(terminal["matches"].as_array().unwrap().is_empty());
-            assert!(terminal["cursor"].is_null());
+            assert!(terminal.matches.is_empty());
+            assert!(terminal.cursor.is_none());
         }
 
         let syntax = index
@@ -449,7 +480,7 @@ mod tests {
                 10,
             )
             .unwrap();
-        assert_eq!(syntax["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(syntax.matches.len(), 1);
         assert!(index.grep(&root, "[", None, 0, None, 10).is_err());
 
         let projected_root =
@@ -457,9 +488,9 @@ mod tests {
         let projected = index
             .grep(&projected_root, "projected_body", None, 0, None, 10)
             .unwrap();
-        assert_eq!(projected["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(projected.matches.len(), 1);
         assert_eq!(
-            projected["matches"][0]["uri"],
+            projected.matches[0].uri.to_string(),
             "file:///workspace/src/lib.rs?symbols/foo"
         );
     }
@@ -489,7 +520,7 @@ mod tests {
                 let matches = index
                     .grep(&root, "appeared_after_indexing", None, 0, None, 10)
                     .unwrap();
-                assert_eq!(matches["matches"].as_array().unwrap().len(), 1);
+                assert_eq!(matches.matches.len(), 1);
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));

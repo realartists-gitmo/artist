@@ -239,8 +239,8 @@ impl ResourceFs {
     fn child_uri(&self, parent: &Node, name: &str) -> Option<ResourceUri> {
         match parent {
             Node::Root => None,
-            Node::Scheme(scheme) if scheme == "file" => {
-                ResourceUri::resolve(&format!("file:///{name}"), Path::new("/")).ok()
+            Node::Scheme(scheme) if matches!(scheme.as_str(), "file" | "profiles" | "plugins") => {
+                ResourceUri::resolve(&format!("{scheme}:///{name}"), Path::new("/")).ok()
             }
             Node::Scheme(scheme) => {
                 ResourceUri::resolve(&format!("{scheme}://{name}/"), Path::new("/")).ok()
@@ -947,10 +947,23 @@ mod tests {
         let source = temp.path().join("rust.rs");
         std::fs::write(&source, "fn foo() {}\n").unwrap();
         let router = ResourceRouter::new();
-        Arc::new(FilesystemProvider::new("/"))
-            .register(&router, "file")
-            .await
-            .unwrap();
+        let filesystem: Arc<dyn ResourceProvider> = Arc::new(FilesystemProvider::new("/"));
+        for operation in [
+            ResourceOperation::Read,
+            ResourceOperation::Children,
+            ResourceOperation::Write,
+            ResourceOperation::Edit,
+            ResourceOperation::Move,
+        ] {
+            router
+                .register(
+                    format!("file.{operation}"),
+                    ResourceRoute::new("file:///**", None::<String>, [operation]),
+                    filesystem.clone(),
+                )
+                .await
+                .unwrap();
+        }
         router
             .register(
                 "symbols",

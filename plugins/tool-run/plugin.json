@@ -1,0 +1,6 @@
+{
+  "format": 1,
+  "id": "artist.tool.run",
+  "cargo_package": "artist-tool-run",
+  "component": "artist_tool_run.wasm"
+}

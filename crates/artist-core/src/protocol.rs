@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CallId, EventId, MessageId, RunId, SessionId};
+use crate::{CallId, EventId, MessageId, ProfileSnapshot, RunId, SessionId, SlashCommandId};
 
 /// Backend-neutral content preserved across live events and durable history.
 /// Unknown provider-native content is retained as an opaque tagged JSON value.
@@ -44,6 +44,40 @@ pub enum Command {
     Input { source: Source, content: String },
     Steer { source: Source, content: String },
     Abort { cause: InterruptionCause },
+    Slash { name: String, arguments: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SlashCommandDefinition {
+    /// Globally unique command name, without the leading slash.
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SlashCommandAction {
+    Input {
+        content: String,
+    },
+    Steer {
+        content: String,
+    },
+    Abort {
+        reason: String,
+    },
+    ActivateProfile {
+        profile: String,
+        brief: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SlashCommandResult {
+    /// Harness-facing text. This is never projected into model context.
+    pub output: Option<String>,
+    /// Typed kernel actions applied in order after invocation succeeds.
+    pub actions: Vec<SlashCommandAction>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -69,6 +103,14 @@ pub enum RunOutcome {
     Interrupted {
         message_id: MessageId,
         cause: InterruptionCause,
+    },
+    Yielded {
+        call_id: CallId,
+        payload: serde_json::Value,
+    },
+    HandedOff {
+        call_id: CallId,
+        profile: String,
     },
 }
 
@@ -127,6 +169,9 @@ pub struct StreamEvent {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum StreamEventKind {
+    ProfileActivated {
+        profile: ProfileSnapshot,
+    },
     InputQueued {
         message_id: MessageId,
     },
@@ -135,6 +180,11 @@ pub enum StreamEventKind {
     },
     SteeringDelivered {
         message_ids: Vec<MessageId>,
+    },
+    SlashCommandCompleted {
+        command_id: SlashCommandId,
+        name: String,
+        output: Option<String>,
     },
     RunStarted {
         messages_in: usize,
@@ -184,6 +234,14 @@ pub enum StreamEventKind {
     Failed {
         failure: ModelFailure,
     },
+    Yielded {
+        call_id: CallId,
+        payload: serde_json::Value,
+    },
+    HandedOff {
+        call_id: CallId,
+        profile: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -211,6 +269,7 @@ pub enum PluginCapability {
     Hooks,
     Model,
     Events,
+    Commands,
 }
 
 #[cfg(test)]
@@ -243,9 +302,20 @@ mod tests {
                     reason: "connection closed".into(),
                 },
             },
+            Command::Slash {
+                name: "status".into(),
+                arguments: "verbose".into(),
+            },
         ] {
             round_trip(&command);
         }
+        round_trip(&SlashCommandResult {
+            output: Some("switched".into()),
+            actions: vec![SlashCommandAction::ActivateProfile {
+                profile: "worker".into(),
+                brief: Some("continue".into()),
+            }],
+        });
     }
 
     #[test]
@@ -260,15 +330,22 @@ mod tests {
             },
         };
         round_trip(&event);
+        round_trip(&StreamEvent {
+            event_id: EventId::from("slash-event"),
+            session_id: SessionId::from("session"),
+            run_id: None,
+            sequence: 8,
+            kind: StreamEventKind::SlashCommandCompleted {
+                command_id: SlashCommandId::from("command"),
+                name: "status".into(),
+                output: Some("ready".into()),
+            },
+        });
 
         let descriptor = PluginDescriptor {
-            id: PluginId::from("artist.fixture"),
+            id: PluginId::from("artist.prompt"),
             version: "0.3.0".into(),
-            capabilities: vec![
-                PluginCapability::Prompt,
-                PluginCapability::Tools,
-                PluginCapability::Resources,
-            ],
+            capabilities: vec![PluginCapability::Prompt],
         };
         round_trip(&descriptor);
 

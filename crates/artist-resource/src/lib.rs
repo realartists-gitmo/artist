@@ -1,6 +1,8 @@
 //! URI-addressed text resources and the shared Artist tool registry.
 
+mod anchor;
 mod filesystem;
+mod profiles;
 mod registry;
 mod resource;
 mod router;
@@ -13,9 +15,11 @@ mod fabric;
 #[cfg(target_os = "linux")]
 pub mod fuse;
 
+pub use anchor::*;
 #[cfg(target_os = "linux")]
 pub use fabric::*;
 pub use filesystem::*;
+pub use profiles::*;
 pub use registry::*;
 pub use resource::*;
 pub use router::*;

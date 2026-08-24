@@ -138,7 +138,7 @@ Build the smallest runtime that can load components and call the WIT sockets.
 
 Do not add permissions, sandbox policy, security machinery, process isolation, or worktree isolation. EVER
 
-**Done when:** each socket can invoke a tiny fixture component independently. The sockets do not yet need to form a complete agent workflow.
+**Done when:** each socket can invoke a narrow production component independently. Test-only plugin components are not part of the architecture.
 
 ## Slice 9: Default coding plugins
 
@@ -171,6 +171,5 @@ Connect kernel, Rig, memory, and plugin activity to Artist-owned observation sin
 - polished end-to-end product flows
 - broad provider support
 - large tool catalogs
-- plugin hot reload
 - permissions, sandboxing, security, and isolation
 - speculative abstractions without a current socket or caller

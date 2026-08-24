@@ -3,24 +3,27 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
 
 use artist_core::{
     CallId, CompletionCallMetadata, ContentPart, FailureClass, FinishReason as ArtistFinishReason,
-    ModelFailure, TokenUsage,
+    ModelFailure, TokenUsage, ToolControl,
 };
 use artist_kernel::{
     ModelError, ModelEvent, ModelHistoryItem, ModelMessage, ModelRequest, ModelStream, Steering,
     StreamingModel,
 };
-use artist_resource::ToolRegistry;
+use artist_resource::{InvocationContext, ToolRegistry};
 use futures::StreamExt;
 use rig_agent::{
-    Agent, AgentBuilder, AgentHook, HookContext,
-    agent::{CompletionCallAction, CompletionCallEvent, RequestPatch, StreamingError},
+    AgentBuilder, AgentHook, HookContext, ModelHandle,
+    agent::{
+        CompletionCallAction, CompletionCallEvent, RequestPatch, StreamingError,
+        ToolCall as HookToolCall, ToolCallAction, ToolResultAction, ToolResultEvent,
+    },
     completion::{Document, PromptError},
     prelude::MultiTurnStreamItem,
     tool::{DynamicTool, ToolExecutionError, ToolOutput},
@@ -38,7 +41,8 @@ use rig_memory::{
 };
 
 pub struct RigModel {
-    agent: Agent,
+    model: ModelHandle,
+    registry: Option<ToolRegistry>,
     policy: Arc<dyn MemoryPolicy>,
     compact: bool,
     tool_concurrency: usize,
@@ -49,7 +53,7 @@ impl RigModel {
     where
         M: CompletionModel + 'static,
     {
-        Self::from_agent(AgentBuilder::new(model).build())
+        Self::from_model(ModelHandle::new(model), None)
     }
 
     /// Build a streaming Rig model with every current registry entry exposed
@@ -58,41 +62,13 @@ impl RigModel {
     where
         M: CompletionModel + 'static,
     {
-        let tools = registry
-            .definitions()
-            .into_iter()
-            .map(|definition| {
-                let registry = registry.clone();
-                let name = definition.name.clone();
-                DynamicTool::new(
-                    definition.name,
-                    definition.description,
-                    definition.input_schema,
-                    move |_context, arguments| {
-                        let registry = registry.clone();
-                        let name = name.clone();
-                        Box::pin(async move {
-                            registry
-                                .call(&name, arguments)
-                                .await
-                                .map(ToolOutput::json)
-                                .map_err(ToolExecutionError::from_error)
-                        })
-                    },
-                )
-            })
-            .collect();
-        Self::from_agent(
-            AgentBuilder::new(model)
-                .dynamic_tools(tools)
-                .default_max_turns(32)
-                .build(),
-        )
+        Self::from_model(ModelHandle::new(model), Some(registry))
     }
 
-    pub fn from_agent(agent: Agent) -> Self {
+    fn from_model(model: ModelHandle, registry: Option<ToolRegistry>) -> Self {
         Self {
-            agent,
+            model,
+            registry,
             policy: Arc::new(NoopMemoryPolicy),
             compact: false,
             tool_concurrency: 1,
@@ -142,10 +118,75 @@ impl RigModel {
 
 impl StreamingModel for RigModel {
     fn stream(&self, request: ModelRequest, steering: Steering) -> ModelStream {
-        let agent = self.agent.clone();
+        let controls = Arc::new(Mutex::new(HashMap::<String, ToolControl>::new()));
+        let (tools, has_terminal_control) = self.registry.as_ref().map_or_else(
+            || (Vec::new(), false),
+            |registry| {
+                let definitions = request.profile.as_deref().map_or_else(
+                    || registry.definitions(),
+                    |profile| registry.definitions_for(profile),
+                );
+                let has_terminal_control = definitions.iter().any(|definition| {
+                    definition
+                        .effects
+                        .contains(&artist_core::ToolEffect::SessionControl)
+                });
+                let tools = definitions
+                    .into_iter()
+                    .map(|definition| {
+                        let registry = registry.clone();
+                        let name = definition.name.clone();
+                        let profile = request.profile.clone();
+                        DynamicTool::new(
+                            definition.name,
+                            definition.description,
+                            definition.input_schema,
+                            move |tool_context, arguments| {
+                                let registry = registry.clone();
+                                let name = name.clone();
+                                let profile = profile.clone();
+                                Box::pin(async move {
+                                    let invocation = profile.map_or_else(
+                                        InvocationContext::root,
+                                        InvocationContext::for_profile,
+                                    );
+                                    let output = registry
+                                        .call_output_with_context(&name, arguments, invocation)
+                                        .await
+                                        .map_err(ToolExecutionError::from_error)?;
+                                    if let Some(control) = output.control {
+                                        tool_context.insert_result(control);
+                                    }
+                                    Ok(ToolOutput::json(output.value))
+                                })
+                            },
+                        )
+                    })
+                    .collect();
+                (tools, has_terminal_control)
+            },
+        );
+        let agent = if tools.is_empty() {
+            AgentBuilder::new(self.model.clone())
+                .default_max_turns(32)
+                .build()
+        } else {
+            AgentBuilder::new(self.model.clone())
+                .dynamic_tools(tools)
+                .default_max_turns(32)
+                .build()
+        };
         let policy = self.policy.clone();
         let compact = self.compact;
-        let tool_concurrency = self.tool_concurrency;
+        let tool_concurrency = if has_terminal_control {
+            1
+        } else {
+            self.tool_concurrency
+        };
+        let model_parameters = request
+            .selected_model
+            .as_ref()
+            .map(|route| route.parameters.clone());
         Box::pin(async_stream::stream! {
             let sequences: Vec<_> = request.history.iter().map(|item| item.sequence).collect();
             let history = match to_rig_history(request.history) {
@@ -169,6 +210,8 @@ impl StreamingModel for RigModel {
                     emitted_compaction: Arc::new(AtomicBool::new(false)),
                     events: memory_events,
                 })
+                .add_hook(TerminalControlHook(controls.clone()))
+                .add_hook(ModelParametersHook(model_parameters))
                 .add_hook(SteeringHook(steering))
                 .stream()
                 .await;
@@ -180,7 +223,19 @@ impl StreamingModel for RigModel {
                     item = stream.next() => match item {
                         Some(Ok(item)) => {
                             for event in translate(item) {
+                                let terminal = match &event {
+                                    ModelEvent::ToolResult { call_id, .. } => controls
+                                        .lock()
+                                        .expect("terminal control lock poisoned")
+                                        .remove(&call_id.to_string())
+                                        .map(|control| (call_id.clone(), control)),
+                                    _ => None,
+                                };
                                 yield Ok(event);
+                                if let Some((call_id, control)) = terminal {
+                                    yield Ok(ModelEvent::Control { call_id, control });
+                                    return;
+                                }
                             }
                         }
                         Some(Err(error)) => {
@@ -284,6 +339,60 @@ impl AgentHook for SteeringHook {
                     }),
                 ))
             }
+        }
+    }
+}
+
+struct TerminalControlHook(Arc<Mutex<HashMap<String, ToolControl>>>);
+
+impl AgentHook for TerminalControlHook {
+    fn on_tool_call(
+        &self,
+        _ctx: &HookContext,
+        _event: HookToolCall<'_>,
+    ) -> impl Future<Output = ToolCallAction> + Send {
+        let terminal = !self
+            .0
+            .lock()
+            .expect("terminal control lock poisoned")
+            .is_empty();
+        async move {
+            if terminal {
+                ToolCallAction::skip("a terminal control tool already completed")
+            } else {
+                ToolCallAction::Run
+            }
+        }
+    }
+
+    fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> impl Future<Output = ToolResultAction> + Send {
+        if let Some(control) = event.tool_context.result::<ToolControl>() {
+            self.0
+                .lock()
+                .expect("terminal control lock poisoned")
+                .insert(event.internal_call_id.to_owned(), control.clone());
+        }
+        async { ToolResultAction::Keep }
+    }
+}
+
+struct ModelParametersHook(Option<serde_json::Value>);
+
+impl AgentHook for ModelParametersHook {
+    fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        _event: CompletionCallEvent<'_>,
+    ) -> impl Future<Output = CompletionCallAction> + Send {
+        let parameters = self.0.clone();
+        async move {
+            parameters.map_or(CompletionCallAction::Continue, |parameters| {
+                CompletionCallAction::patch(RequestPatch::new().additional_params(parameters))
+            })
         }
     }
 }
@@ -552,10 +661,11 @@ fn completion_error_class(error: &CompletionError) -> FailureClass {
 mod tests {
     use super::*;
     use artist_core::{
-        InitialContext, InterruptionCause, RunId, RunOutcome, SessionId, Source, StreamEvent,
-        StreamEventKind, TranscriptEntryKind,
+        InitialContext, InterruptionCause, ProfilePolicy, ProfileSnapshot, RunId, RunOutcome,
+        SessionId, Source, StreamEvent, StreamEventKind, ToolEffect, TranscriptEntryKind,
+        default_yield_schema,
     };
-    use artist_kernel::SessionHandle;
+    use artist_kernel::{ProfileSource, SessionHandle};
     use artist_resource::{
         InvocationContext, ToolDefinition as RegistryDefinition, ToolError, ToolHandler,
     };
@@ -830,6 +940,22 @@ mod tests {
 
     struct CountingPolicy(Arc<AtomicUsize>);
 
+    struct TestProfiles;
+
+    #[async_trait]
+    impl ProfileSource for TestProfiles {
+        async fn load(&self, name: &str) -> Result<ProfileSnapshot, String> {
+            Ok(ProfileSnapshot {
+                name: name.into(),
+                instructions: String::new(),
+                yield_schema: default_yield_schema(),
+                policy: ProfilePolicy::default(),
+                models: Vec::new(),
+                catalog: vec![name.into()],
+            })
+        }
+    }
+
     impl MemoryPolicy for CountingPolicy {
         fn apply(&self, messages: Vec<Message>) -> Result<Vec<Message>, rig_memory::MemoryError> {
             self.0.fetch_add(1, Ordering::AcqRel);
@@ -839,9 +965,13 @@ mod tests {
 
     #[async_trait]
     impl ToolHandler for Echo {
-        async fn call(&self, arguments: Value, _: InvocationContext) -> Result<Value, ToolError> {
+        async fn call(
+            &self,
+            arguments: Value,
+            _: InvocationContext,
+        ) -> Result<artist_resource::ToolOutput, ToolError> {
             self.0.store(true, Ordering::Release);
-            Ok(arguments)
+            Ok(artist_resource::ToolOutput::value(arguments))
         }
     }
 
@@ -850,16 +980,36 @@ mod tests {
         release: Arc<Semaphore>,
     }
 
+    struct TerminalYield;
+
+    #[async_trait]
+    impl ToolHandler for TerminalYield {
+        async fn call(
+            &self,
+            arguments: Value,
+            _: InvocationContext,
+        ) -> Result<artist_resource::ToolOutput, ToolError> {
+            Ok(artist_resource::ToolOutput {
+                value: arguments.clone(),
+                control: Some(ToolControl::Yield { payload: arguments }),
+            })
+        }
+    }
+
     #[async_trait]
     impl ToolHandler for Gate {
-        async fn call(&self, arguments: Value, _: InvocationContext) -> Result<Value, ToolError> {
+        async fn call(
+            &self,
+            arguments: Value,
+            _: InvocationContext,
+        ) -> Result<artist_resource::ToolOutput, ToolError> {
             self.started.add_permits(1);
             self.release
                 .acquire()
                 .await
                 .map_err(|_| ToolError::Failed("gate closed".into()))?
                 .forget();
-            Ok(arguments)
+            Ok(artist_resource::ToolOutput::value(arguments))
         }
     }
 
@@ -894,6 +1044,7 @@ mod tests {
                     name: "echo".into(),
                     description: "echo JSON".into(),
                     input_schema: json!({"type": "object"}),
+                    effects: vec![ToolEffect::Observe],
                 },
                 Arc::new(Echo(called.clone())),
             )
@@ -917,6 +1068,9 @@ mod tests {
                     context: String::new(),
                     prompt: "echo".into(),
                     history: Vec::new(),
+                    profile: None,
+                    profile_epoch: None,
+                    selected_model: None,
                 },
                 Steering::empty(),
             )
@@ -937,6 +1091,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_control_crosses_rig_and_stops_later_tool_calls() {
+        let registry = ToolRegistry::new();
+        let later_called = Arc::new(AtomicBool::new(false));
+        registry
+            .register(
+                RegistryDefinition {
+                    name: "yield".into(),
+                    description: "return structured state".into(),
+                    input_schema: artist_core::default_yield_schema(),
+                    effects: vec![ToolEffect::SessionControl],
+                },
+                Arc::new(TerminalYield),
+            )
+            .unwrap();
+        registry
+            .register(
+                RegistryDefinition {
+                    name: "later".into(),
+                    description: "must not run".into(),
+                    input_schema: json!({"type": "object"}),
+                    effects: vec![ToolEffect::Mutate],
+                },
+                Arc::new(Echo(later_called.clone())),
+            )
+            .unwrap();
+        let model = RigModel::with_registry(
+            MockCompletionModel::from_stream_turns([vec![
+                MockStreamEvent::tool_call("yield-call", "yield", json!({"completed": true})),
+                MockStreamEvent::tool_call("later-call", "later", json!({})),
+                final_event(),
+            ]]),
+            registry,
+        )
+        .tool_concurrency(8);
+        let mut request = ModelRequest {
+            session_id: SessionId::from("session"),
+            run_id: RunId::from("run"),
+            context: String::new(),
+            prompt: "finish".into(),
+            history: Vec::new(),
+            profile: None,
+            profile_epoch: None,
+            selected_model: None,
+        };
+        request.profile = Some(Arc::new(TestProfiles.load("test").await.unwrap()));
+        let events = model
+            .stream(request, Steering::empty())
+            .collect::<Vec<_>>()
+            .await;
+        let yielded_call = events.iter().find_map(|event| match event {
+            Ok(ModelEvent::ToolResult { call_id, .. }) => Some(call_id),
+            _ => None,
+        });
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Ok(ModelEvent::Control {
+                    call_id,
+                    control: ToolControl::Yield { payload }
+                }) if Some(call_id) == yielded_call && payload == &json!({"completed": true})
+            )),
+            "{events:?}"
+        );
+        assert!(!later_called.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
     async fn kernel_controls_hold_through_the_rig_streaming_adapter() {
         let registry = ToolRegistry::new();
         let started = Arc::new(Semaphore::new(0));
@@ -947,6 +1168,7 @@ mod tests {
                     name: "gate".into(),
                     description: "pause between model request boundaries".into(),
                     input_schema: json!({"type":"object"}),
+                    effects: vec![ToolEffect::Execute],
                 },
                 Arc::new(Gate {
                     started: started.clone(),
@@ -966,6 +1188,8 @@ mod tests {
         let session = SessionHandle::create(
             SessionId::from("rig-controls"),
             InitialContext { fragments: vec![] },
+            "test",
+            Arc::new(TestProfiles),
             store.clone(),
             model,
         )
@@ -1036,6 +1260,7 @@ mod tests {
                     name: "gate".into(),
                     description: "never released during this test".into(),
                     input_schema: json!({"type":"object"}),
+                    effects: vec![ToolEffect::Execute],
                 },
                 Arc::new(Gate {
                     started: started.clone(),
@@ -1052,6 +1277,8 @@ mod tests {
         let session = SessionHandle::create(
             SessionId::from("rig-abort"),
             InitialContext { fragments: vec![] },
+            "test",
+            Arc::new(TestProfiles),
             store.clone(),
             model,
         )
@@ -1095,6 +1322,8 @@ mod tests {
         let session = SessionHandle::create(
             SessionId::from("rig-failure"),
             InitialContext { fragments: vec![] },
+            "test",
+            Arc::new(TestProfiles),
             store.clone(),
             model,
         )
@@ -1137,11 +1366,14 @@ mod tests {
             fragments: vec![artist_core::ContextFragment {
                 source: "component://prompt".into(),
                 content: "stable prefix".into(),
+                role: artist_core::ContextRole::Other,
             }],
         };
         let session = SessionHandle::create(
             SessionId::from("rig-compaction"),
             context.clone(),
+            "test",
+            Arc::new(TestProfiles),
             store.clone(),
             model,
         )

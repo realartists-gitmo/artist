@@ -185,12 +185,16 @@ impl<S: ObservationSink> Observer<S> {
                 summary_bytes: *summary_bytes,
             }),
             StreamEventKind::InputQueued { .. }
+            | StreamEventKind::ProfileActivated { .. }
             | StreamEventKind::SteeringQueued { .. }
             | StreamEventKind::SteeringDelivered { .. }
+            | StreamEventKind::SlashCommandCompleted { .. }
             | StreamEventKind::TextDelta { .. }
             | StreamEventKind::TextReset
             | StreamEventKind::Content { .. }
-            | StreamEventKind::ToolCallDelta { .. } => None,
+            | StreamEventKind::ToolCallDelta { .. }
+            | StreamEventKind::Yielded { .. }
+            | StreamEventKind::HandedOff { .. } => None,
         };
         if let Some(kind) = kind {
             self.sink.emit(Observation {

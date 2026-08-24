@@ -1,0 +1,6 @@
+{
+  "format": 1,
+  "id": "artist.events",
+  "cargo_package": "artist-events",
+  "component": "artist_events.wasm"
+}

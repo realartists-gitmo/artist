@@ -15,6 +15,7 @@ fuser = { version = "0.17", default-features = false }
 fs2 = "0.4.3"
 futures = "0.3.31"
 globset = "0.4.16"
+jsonschema = { version = "0.50.0", default-features = false }
 libc = "0.2.175"
 percent-encoding = "2.3.2"
 regex = "1.11.2"
@@ -24,6 +25,8 @@ rig-memory = "0.42.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
 sha2 = "0.10.9"
+similar = "2.7.0"
+teca = "=1.0.0"
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 url = { version = "2.5.7", features = ["serde"] }
