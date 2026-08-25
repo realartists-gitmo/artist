@@ -37,10 +37,10 @@ The foundation is ready for wide features when all of the following are true:
 - [x] A plugin can persist domain state through a durable resource without using `provider-state`.
 - [x] A plugin can append a generic, durable, session-relevant event without adding a new kernel enum variant.
 - [ ] Binary content can be stored once, referenced by digest, returned through resources/tools, and preserved in session history.
-- [ ] Tool metadata, failures, progress, and next-action semantics survive WIT -> registry -> Rig -> stream-event round trips.
+- [x] Tool metadata, failures, progress, and next-action semantics survive WIT -> registry -> Rig -> stream-event round trips.
 - [ ] A model provider can be installed and selected through the plugin/provider contract rather than by manually calling `ProfileModelRouter::register` in the application.
 - [ ] Accounts, credentials, provider-private conversation state, and provider capabilities have durable, scoped homes outside the kernel transcript.
-- [ ] An extension can create, drive, observe, cancel, and await a related Artist session through a host service.
+- [x] An extension can create, drive, observe, cancel, and await a related Artist session through a host service.
 - [x] Restart, cancellation, concurrent-call, malformed-plugin, and stale-format tests pass under `make test`.
 
 ---
@@ -211,7 +211,7 @@ the same content contract and require no screenshot-specific resource variant.
 - [x] Extend the canonical and WIT tool definition with output schema, category, and explicit annotations for read-only, destructive, idempotent, and open-world behavior.
 - [x] Reconcile annotations with existing `ToolEffect`; define one source of truth for profile policy and reject contradictory definitions at activation.
 - [x] Validate input/output schemas and metadata during candidate activation, before registry replacement.
-- [ ] Preserve all metadata through plugin SDK -> `PluginHost` -> `ToolRegistry` -> Rig dynamic tool conversion.
+- [x] Preserve all metadata through plugin SDK -> `PluginHost` -> `ToolRegistry` -> Rig dynamic tool conversion.
 
 ### 4.2 Results, failures, and progress
 

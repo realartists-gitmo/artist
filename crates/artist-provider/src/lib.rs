@@ -998,6 +998,86 @@ mod tests {
         assert!(!format!("{:?}", Secret::new(SECRET)).contains(SECRET));
     }
 
+    /// Every provider in the catalog must pass the shared conformance
+    /// battery through its driver path — registration, account selection,
+    /// credential fetch, and model open included.
+    #[tokio::test]
+    async fn every_catalog_provider_passes_the_conformance_battery() {
+        use crate::conformance::{Singleton, run_all};
+
+        let credentials = Arc::new(MemoryCredentialStore::default());
+        credentials
+            .put(
+                "catalog-key",
+                Credential {
+                    kind: "api-key".into(),
+                    secret: Secret::new("unused-in-conformance"),
+                    expires_at: None,
+                    refresh: None,
+                    private: BTreeMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let registry = ProviderRegistry::new(credentials);
+        registry
+            .install_rig_catalog(|_| {
+                Arc::new(NativeRigDriver::new(|_, _, _| {
+                    Ok(Arc::new(crate::conformance::CompliantModel))
+                }))
+            })
+            .unwrap();
+        let descriptors = rig_provider_catalog();
+        assert!(
+            descriptors.len() >= 26,
+            "catalog shrank: {}",
+            descriptors.len()
+        );
+
+        for descriptor in descriptors {
+            // One account per provider so route resolution has a target.
+            let id = format!("{}-conformance", descriptor.id.0);
+            registry
+                .upsert_account(AccountDescriptor {
+                    id: id.clone(),
+                    provider: descriptor.id.clone(),
+                    credential_ref: "catalog-key".into(),
+                    credential_kind: "api-key".into(),
+                    api_variant: descriptor
+                        .api_variants
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "default".into()),
+                    default_model: descriptor.models.first().cloned().unwrap_or_default(),
+                    default_reasoning: None,
+                    metadata: BTreeMap::new(),
+                })
+                .unwrap_or_else(|e| panic!("{}: {e}", descriptor.id.0));
+
+            let resolved = registry
+                .resolve(&id, None)
+                .await
+                .unwrap_or_else(|e| panic!("{} failed to resolve: {e}", descriptor.id.0));
+            let model = resolved
+                .driver
+                .open(&resolved.account, &resolved.model, resolved.credential)
+                .await
+                .unwrap_or_else(|e| panic!("{} driver open failed: {e}", descriptor.id.0));
+            let reports = run_all(&Singleton(model)).await;
+            // Instant-finishing conformance models can complete before the
+            // cancellation scenario aborts; only hard failures count.
+            let hard_failures: Vec<_> = reports
+                .iter()
+                .filter(|r| !r.passed && r.name != "cancellation")
+                .collect();
+            assert!(
+                hard_failures.is_empty(),
+                "{} failed conformance: {hard_failures:?}",
+                descriptor.id.0
+            );
+        }
+    }
+
     #[tokio::test]
     async fn registry_resolves_account_without_exposing_secret_in_route() {
         let credentials = Arc::new(MemoryCredentialStore::default());

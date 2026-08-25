@@ -23,7 +23,7 @@ use artist_resource::{
 use async_trait::async_trait;
 use tokio::sync::Notify;
 
-const COMPONENT_IDS: [&str; 30] = [
+const COMPONENT_IDS: [&str; 31] = [
     "artist.prompt",
     "artist.context",
     "artist.hooks",
@@ -54,6 +54,7 @@ const COMPONENT_IDS: [&str; 30] = [
     "artist.tool.yield",
     "artist.tool.handoff",
     "artist.notes",
+    "artist.orchestrator",
 ];
 
 struct TwoCallBarrier {
@@ -244,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(composed.fragments.len(), 1);
 
     let definitions = host.tools().await?;
-    assert_eq!(definitions.len(), 12);
+    assert_eq!(definitions.len(), 13);
     for definition in definitions {
         let schema: serde_json::Value = serde_json::from_str(&definition.input_schema)?;
         assert_eq!(
@@ -622,7 +623,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restored = PluginHost::new_with_roots(profiles.path(), "plugins").await?;
     let restored_descriptors = restored.descriptors().await;
     assert_eq!(restored_descriptors.len(), COMPONENT_IDS.len());
-    assert_eq!(restored.registry().definitions().len(), 12);
+    assert_eq!(restored.registry().definitions().len(), 13);
     let survived = match restored
         .handle_resource(ResourceRequest::Read {
             uri: ResourceUri::resolve("store:///global/notes-state", std::path::Path::new("/"))?,

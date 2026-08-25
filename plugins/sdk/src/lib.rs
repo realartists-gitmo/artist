@@ -234,6 +234,51 @@ pub fn durable_delete(scope: &str, key: &str) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// Specification for spawning a related session through the host service.
+pub struct ChildSpec {
+    pub request_id: String,
+    pub session_id: String,
+    pub profile: String,
+    /// Attached children are cancelled when the parent stops; detached ones
+    /// keep running independently. There is no default.
+    pub attached: bool,
+    /// `remain-interrupted`, `resume-queued-work`, or `plugin-resolved`.
+    pub recovery: String,
+    pub relationship: String,
+    pub input: String,
+}
+
+/// Create a related session, deliver one input, and await its terminal
+/// outcome. Returns the outcome JSON emitted by the host.
+pub fn spawn_child(spec: ChildSpec) -> Result<String, String> {
+    let session_id =
+        artist::plugin::host_sessions::create(&artist::plugin::host_sessions::CreateRequest {
+            request_id: spec.request_id,
+            session_id: spec.session_id,
+            profile: spec.profile,
+            content: vec![artist::plugin::types::ContentPart::Text(spec.input)],
+            attachment: if spec.attached {
+                artist::plugin::host_sessions::Attachment::Attached
+            } else {
+                artist::plugin::host_sessions::Attachment::Detached
+            },
+            recovery: match spec.recovery.as_str() {
+                "resume-queued-work" => {
+                    artist::plugin::host_sessions::RecoveryPolicy::ResumeQueuedWork
+                }
+                "plugin-resolved" => artist::plugin::host_sessions::RecoveryPolicy::PluginResolved,
+                _ => artist::plugin::host_sessions::RecoveryPolicy::RemainInterrupted,
+            },
+            relationship: spec.relationship,
+        })?;
+    artist::plugin::host_sessions::send(
+        &session_id,
+        &[artist::plugin::types::ContentPart::Text("begin".into())],
+    )?;
+    let outcome = artist::plugin::host_sessions::await_terminal(&session_id)?;
+    Ok(serde_json::json!({"child": session_id, "outcome": outcome}).to_string())
+}
+
 fn durable_uri(scope: &str, key: &str) -> String {
     format!("store:///{}/{key}", scope.trim_matches('/'))
 }

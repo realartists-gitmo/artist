@@ -30,6 +30,7 @@ members = [
     "tool-signal",
     "tool-yield",
     "notes",
+    "orchestrator",
     "tool-handoff",
     "concurrent-resource-fixture",
 ]

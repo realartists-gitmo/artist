@@ -10,6 +10,7 @@ artist-core = { path = "../artist-core" }
 artist-kernel = { path = "../artist-kernel" }
 artist-plugin = { path = "../artist-plugin" }
 artist-store = { path = "../artist-store" }
+artist-resource = { path = "../artist-resource" }
 async-trait.workspace = true
 fs2.workspace = true
 serde.workspace = true
@@ -18,5 +19,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 artist-provider = { path = "../artist-provider" }
 futures.workspace = true

@@ -1,0 +1,6 @@
+{
+  "format": 3,
+  "id": "artist.orchestrator",
+  "build": {"adapter": "cargo", "package": "artist-orchestrator"},
+  "component": "artist_orchestrator.wasm"
+}

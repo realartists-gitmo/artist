@@ -1513,6 +1513,128 @@ mod tests {
             }
         }
 
+        /// Gate proof: a WASM orchestration plugin creates, drives, and
+        /// awaits a related session entirely through the host-sessions
+        /// service, with lineage recorded from the invocation scope.
+        mod orchestrator_e2e {
+            use super::*;
+            use artist_plugin::PluginHost;
+            use artist_resource::InvocationContext as PluginInvocationContext;
+
+            fn plugins_root() -> std::path::PathBuf {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../plugins")
+                    .canonicalize()
+                    .unwrap()
+            }
+
+            #[tokio::test(flavor = "multi_thread")]
+            async fn wasm_orchestrator_spawns_and_awaits_child_sessions() {
+                let profiles_dir = tempfile::tempdir().unwrap();
+                {
+                    let dir = profiles_dir.path().join("test");
+                    std::fs::create_dir_all(&dir).unwrap();
+                    std::fs::write(dir.join("instructions.md"), "test instructions").unwrap();
+                    std::fs::write(dir.join("profile.json"), "{}").unwrap();
+                }
+                let host = PluginHost::new_with_roots(profiles_dir.path(), plugins_root())
+                    .await
+                    .unwrap();
+                let packages = host.packages();
+                if packages.active_component("orchestrator").is_err() {
+                    packages.build("orchestrator").await.unwrap();
+                    packages.activate("orchestrator").await.unwrap();
+                }
+
+                // The runtime backs the host service; children it spawns are
+                // real sessions in this runtime's stores.
+                let store = Arc::new(MemoryStore::default());
+                let metadata_store = Arc::new(MemoryMetadataStore::default());
+                let mut profiles = HashMap::new();
+                profiles.insert(
+                    "test".to_string(),
+                    artist_core::ProfileSnapshot {
+                        name: "test".into(),
+                        instructions: String::new(),
+                        yield_schema: artist_core::default_yield_schema(),
+                        policy: artist_core::ProfilePolicy::default(),
+                        models: Vec::new(),
+                        catalog: Vec::new(),
+                    },
+                );
+                let runtime = SessionRuntime::new(
+                    store.clone(),
+                    metadata_store.clone(),
+                    Arc::new(DoneModel),
+                    Arc::new(StaticProfiles(profiles)),
+                );
+                host.set_session_service(Arc::new(runtime.clone()));
+
+                // The parent must exist durably; lineage is validated at the
+                // kernel/store boundary.
+                let parent = SessionId::from("parent");
+                let mut parent_md = metadata_of(&parent);
+                parent_md.initial_profile = Some("test".into());
+                runtime
+                    .create(CreateRequest {
+                        request_id: "parent".into(),
+                        session_id: parent.clone(),
+                        context: InitialContext { fragments: vec![] },
+                        metadata: parent_md,
+                    })
+                    .await
+                    .unwrap();
+
+                // Invoke the orchestrator tool under an execution scope so
+                // the host derives creation lineage from it.
+                let parent_scope = artist_core::InvocationScope {
+                    session_id: SessionId::from("parent"),
+                    run_id: Some(artist_core::RunId::from("parent-run")),
+                    call_id: None,
+                    correlation_id: artist_core::CorrelationId::new("orch"),
+                    parent_correlation_id: None,
+                };
+                let ctx = PluginInvocationContext::for_execution(
+                    None,
+                    parent_scope,
+                    no_extensions(),
+                    None,
+                );
+                let arguments = serde_json::json!({
+                    "profile": "test",
+                    "attached": false,
+                    "recovery": "remain-interrupted",
+                });
+                let output = host
+                    .registry()
+                    .call_output_with_context("spawn-child", arguments, ctx)
+                    .await
+                    .unwrap();
+
+                let child_id = output
+                    .value
+                    .get("child")
+                    .and_then(|v| v.as_str())
+                    .expect("child id in output")
+                    .to_string();
+                let child = store
+                    .load(&SessionId::from(child_id.as_str()))
+                    .await
+                    .unwrap();
+                let lineage = child.metadata().lineage.as_ref().expect("lineage recorded");
+                assert_eq!(lineage.parent_session_id, SessionId::from("parent"));
+                assert_eq!(lineage.relationship, "subtask");
+                assert_eq!(
+                    child.metadata().recovery_policy,
+                    RecoveryPolicy::RemainInterrupted
+                );
+                assert!(matches!(child.metadata().attachment, Attachment::Detached));
+                // The awaited outcome reached the plugin.
+                let serialized = output.value.to_string();
+                assert!(serialized.contains("completed"), "{serialized}");
+            }
+        }
+
         /// Gate proof: a real `ProviderRegistry` (account selection,
         /// credential fetch, driver open) drives live sessions through
         /// `from_provider_source` — no hand-built models in the app.

@@ -5,7 +5,10 @@
 use std::sync::Arc;
 
 use artist_core::{InterruptionCause, SessionId, Source, StreamEventKind};
-use artist_kernel::{CreateSession, SessionDependencies, SessionHandle, StreamingModel};
+use artist_kernel::{
+    CreateSession, ModelEvent, ModelRequest, ModelStream, SessionDependencies, SessionHandle,
+    Steering, StreamingModel,
+};
 use artist_store::MemoryStore;
 use async_trait::async_trait;
 
@@ -221,6 +224,21 @@ pub fn assert_all_pass(reports: &[ScenarioReport]) {
 // Re-exported so driver crates can build sessions identically in their own
 // extra scenarios without depending on kernel internals directly.
 pub use artist_core::ContentPart as ConformanceContentPart;
+
+/// Reference compliant model: streams one delta then finishes. Used by
+/// catalog conformance runs and driver tests.
+pub struct CompliantModel;
+#[async_trait]
+impl StreamingModel for CompliantModel {
+    fn stream(&self, _: ModelRequest, _: Steering) -> ModelStream {
+        Box::pin(futures::stream::iter(vec![
+            Ok(ModelEvent::TextDelta("ok".into())),
+            Ok(ModelEvent::Finished {
+                output: Some("ok".into()),
+            }),
+        ]))
+    }
+}
 
 #[cfg(test)]
 mod tests {

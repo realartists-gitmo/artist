@@ -190,9 +190,11 @@ impl StreamingModel for RigModel {
                         let extensions = request.extensions.clone();
                         let progress = Arc::new(ProgressEvents(progress_events.clone()));
                         let attachments = attachments.clone();
+                        let description =
+                            with_metadata_suffix(&definition.description, &definition);
                         DynamicTool::new(
                             definition.name,
-                            definition.description,
+                            description,
                             definition.input_schema,
                             move |tool_context, arguments| {
                                 let registry = registry.clone();
@@ -798,6 +800,28 @@ async fn to_rig_assistant_content(
             "stored assistant content cannot be represented by Rig 0.42",
         )),
     }
+}
+
+/// Rig's dynamic-tool surface carries only name/description/input schema, so
+/// the rest of the registry contract rides along in a deterministic,
+/// model-visible suffix. This keeps annotations, category, and output-schema
+/// identity intact across the WIT -> registry -> Rig hop.
+fn with_metadata_suffix(description: &str, definition: &artist_resource::ToolDefinition) -> String {
+    let output_digest = artist_resource::sha256(
+        serde_json::to_string(&definition.output_schema)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let a = &definition.annotations;
+    format!(
+        "{description}\n\n[artist category={} read-only={} destructive={} idempotent={} open-world={} output-schema={}]",
+        definition.category,
+        a.read_only,
+        a.destructive,
+        a.idempotent,
+        a.open_world,
+        &output_digest[..12]
+    )
 }
 
 async fn to_rig_tool_result(
@@ -1532,6 +1556,78 @@ mod tests {
     /// Gate proof: binary content is stored once by digest, referenced at its
     /// exact canonical positions (user input AND tool result), and resolved
     /// to provider-native raw image parts only while constructing requests.
+
+    #[tokio::test]
+    async fn tool_metadata_rides_through_the_rig_hop() {
+        let registry = ToolRegistry::new();
+        registry
+            .register(
+                RegistryDefinition {
+                    name: "probe".into(),
+                    description: "probe things".into(),
+                    input_schema: json!({"type": "object"}),
+                    effects: vec![ToolEffect::Observe],
+                    category: "inspection".into(),
+                    output_schema: json!({"type": "object", "required": ["ok"]}),
+                    annotations: artist_resource::ToolAnnotations {
+                        read_only: true,
+                        destructive: false,
+                        idempotent: true,
+                        open_world: false,
+                    },
+                },
+                Arc::new(Echo(Arc::new(AtomicBool::new(false)))),
+            )
+            .unwrap();
+        let mock = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("done"),
+            final_event(),
+        ]]);
+        let model = RigModel::with_registry(mock.clone(), registry)
+            .with_policy(CountingPolicy(Default::default()));
+        let events = model
+            .stream(
+                ModelRequest {
+                    session_id: SessionId::from("session"),
+                    run_id: RunId::from("run"),
+                    context: String::new(),
+                    prompt: vec![ContentPart::text("go")],
+                    history: Vec::new(),
+                    extensions: no_extensions(),
+                    profile: None,
+                    profile_epoch: None,
+                    selected_model: None,
+                },
+                Steering::empty(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        let requests = mock.requests();
+        let tools = &requests[0].tools;
+        assert_eq!(tools.len(), 1);
+        let description = &tools[0].description;
+        assert!(description.starts_with("probe things"), "{description}");
+        assert!(
+            description.contains("[artist category=inspection"),
+            "{description}"
+        );
+        assert!(description.contains("read-only=true"), "{description}");
+        assert!(description.contains("destructive=false"), "{description}");
+        assert!(description.contains("idempotent=true"), "{description}");
+        assert!(description.contains("open-world=false"), "{description}");
+        // The output-schema digest is deterministic for the same schema.
+        let expected_digest = artist_resource::sha256(
+            serde_json::to_string(&json!({"type": "object", "required": ["ok"]}))
+                .unwrap()
+                .as_bytes(),
+        );
+        assert!(
+            description.contains(&format!("output-schema={}", &expected_digest[..12])),
+            "{description}"
+        );
+    }
+
     #[tokio::test]
     async fn binary_content_stored_once_flows_through_tools_and_history() {
         use artist_resource::{BlobStore, MemoryBlobStore};
