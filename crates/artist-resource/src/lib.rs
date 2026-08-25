@@ -7,6 +7,8 @@ mod registry;
 mod resource;
 mod router;
 mod search;
+mod storage;
+pub mod storage_provider;
 mod streaming;
 mod uri;
 
@@ -26,5 +28,6 @@ pub use registry::*;
 pub use resource::*;
 pub use router::*;
 pub use search::*;
+pub use storage::*;
 pub use streaming::*;
 pub use uri::*;

@@ -20,8 +20,8 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
         record,
         activation.map(|(_, profile)| profile.instructions.as_str()),
     );
-    let mut inputs = HashMap::<MessageId, String>::new();
-    let mut steering = HashMap::<MessageId, String>::new();
+    let mut inputs = HashMap::<MessageId, Vec<artist_core::ContentPart>>::new();
+    let mut steering = HashMap::<MessageId, Vec<artist_core::ContentPart>>::new();
     for entry in record
         .entries()
         .iter()
@@ -69,7 +69,7 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
     if let Some((sequence, artifact)) = &latest_compaction {
         history.push(ModelHistoryItem {
             sequence: *sequence,
-            message: ModelMessage::Notification(format!("Earlier context: {artifact}")),
+            message: ModelMessage::Notification(artifact.content.clone()),
         });
     }
 
@@ -108,9 +108,9 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
             } => {
                 history.push(ModelHistoryItem {
                     sequence: entry.sequence,
-                    message: ModelMessage::Notification(format!(
-                        "The preceding assistant response was interrupted: {cause:?}."
-                    )),
+                    message: ModelMessage::Notification(vec![artist_core::ContentPart::text(
+                        format!("The preceding assistant response was interrupted: {cause:?}."),
+                    )]),
                 });
             }
             TranscriptEntryKind::RunFinished {
@@ -119,9 +119,9 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
             } => {
                 history.push(ModelHistoryItem {
                     sequence: entry.sequence,
-                    message: ModelMessage::Notification(format!(
-                        "The preceding assistant response failed: {error}."
-                    )),
+                    message: ModelMessage::Notification(vec![artist_core::ContentPart::text(
+                        format!("The preceding assistant response failed: {error}."),
+                    )]),
                 });
             }
             TranscriptEntryKind::ToolCall {
@@ -153,7 +153,9 @@ pub fn project(record: &SessionRecord) -> (String, Vec<ModelHistoryItem>) {
             TranscriptEntryKind::Compaction { .. } => {}
             TranscriptEntryKind::ProfileActivated { .. }
             | TranscriptEntryKind::InputsSuperseded { .. }
-            | TranscriptEntryKind::SlashCommand { .. } => {}
+            | TranscriptEntryKind::SlashCommand { .. }
+            | TranscriptEntryKind::PluginEventSchemaRegistered { .. }
+            | TranscriptEntryKind::PluginEvent { .. } => {}
             TranscriptEntryKind::RunStarted { input_id, .. } => {
                 if let Some(content) = inputs.get(input_id) {
                     history.push(ModelHistoryItem {
@@ -284,7 +286,7 @@ mod tests {
             TranscriptEntryKind::Input {
                 message_id: first.clone(),
                 source: Source::User,
-                content: "old question".into(),
+                content: vec![artist_core::ContentPart::text("old question")],
             },
             TranscriptEntryKind::RunStarted {
                 run_id: run.clone(),
@@ -303,12 +305,12 @@ mod tests {
             },
             TranscriptEntryKind::Compaction {
                 through_sequence: 3,
-                artifact: "old exchange summarized".into(),
+                artifact: artist_core::ProjectionArtifact::text("old exchange summarized", 3),
             },
             TranscriptEntryKind::Input {
                 message_id: second.clone(),
                 source: Source::User,
-                content: "new question".into(),
+                content: vec![artist_core::ContentPart::text("new question")],
             },
             TranscriptEntryKind::RunStarted {
                 run_id: RunId::from("run-2"),
@@ -325,13 +327,15 @@ mod tests {
             vec![
                 ModelHistoryItem {
                     sequence: 3,
-                    message: ModelMessage::Notification(
-                        "Earlier context: old exchange summarized".into()
-                    ),
+                    message: ModelMessage::Notification(vec![artist_core::ContentPart::text(
+                        "old exchange summarized",
+                    )]),
                 },
                 ModelHistoryItem {
                     sequence: 6,
-                    message: ModelMessage::User("new question".into()),
+                    message: ModelMessage::User(vec![artist_core::ContentPart::text(
+                        "new question",
+                    )]),
                 },
             ]
         );
@@ -348,7 +352,7 @@ mod tests {
             TranscriptEntryKind::Input {
                 message_id: input.clone(),
                 source: Source::User,
-                content: "question".into(),
+                content: vec![artist_core::ContentPart::text("question")],
             },
             TranscriptEntryKind::RunStarted {
                 run_id: run.clone(),
@@ -405,7 +409,7 @@ mod tests {
             TranscriptEntryKind::Input {
                 message_id: MessageId::from("input"),
                 source: Source::User,
-                content: "inspect it".into(),
+                content: vec![artist_core::ContentPart::text("inspect it")],
             },
             TranscriptEntryKind::RunStarted {
                 run_id: run.clone(),
@@ -472,7 +476,7 @@ mod tests {
             TranscriptEntryKind::Input {
                 message_id: MessageId::from("input"),
                 source: Source::User,
-                content: "question".into(),
+                content: vec![artist_core::ContentPart::text("question")],
             },
             TranscriptEntryKind::RunStarted {
                 run_id: run.clone(),
@@ -501,11 +505,11 @@ mod tests {
                 .map(|item| item.message)
                 .collect::<Vec<_>>(),
             [
-                ModelMessage::User("question".into()),
+                ModelMessage::User(vec![artist_core::ContentPart::text("question")]),
                 ModelMessage::Assistant(vec![artist_core::ContentPart::text("partial")]),
-                ModelMessage::Notification(
-                    "The preceding assistant response failed: provider unavailable.".into(),
-                ),
+                ModelMessage::Notification(vec![artist_core::ContentPart::text(
+                    "The preceding assistant response failed: provider unavailable.",
+                )]),
             ]
         );
     }

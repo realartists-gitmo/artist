@@ -9,6 +9,7 @@ rust-version.workspace = true
 artist-core = { path = "../artist-core" }
 artist-kernel = { path = "../artist-kernel" }
 artist-resource = { path = "../artist-resource" }
+async-stream.workspace = true
 async-trait.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
@@ -22,4 +23,8 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 
 [dev-dependencies]
+artist-rig = { path = "../artist-rig" }
+artist-store = { path = "../artist-store" }
+rig-agent = { workspace = true, features = ["test-utils"] }
+rig-core = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true

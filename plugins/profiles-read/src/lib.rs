@@ -29,4 +29,5 @@ artist_plugin_sdk::unadvertised_lifecycle!(
 );
 artist_plugin_sdk::unadvertised_tools!(ProfilesRead);
 artist_plugin_sdk::unadvertised_slash_commands!(ProfilesRead);
+artist_plugin_sdk::unadvertised_model_provider!(ProfilesRead);
 artist_plugin_sdk::export!(ProfilesRead with_types_in artist_plugin_sdk);

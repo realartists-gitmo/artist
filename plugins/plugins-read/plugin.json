@@ -1,5 +1,5 @@
 {
-  "format": 2,
+  "format": 3,
   "id": "artist.plugins.read",
   "build": {"adapter": "cargo", "package": "artist-plugins-read"},
   "component": "artist_plugins_read.wasm"

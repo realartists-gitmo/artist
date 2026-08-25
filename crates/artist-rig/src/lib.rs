@@ -9,14 +9,15 @@ use std::{
 };
 
 use artist_core::{
-    CallId, CompletionCallMetadata, ContentPart, FailureClass, FinishReason as ArtistFinishReason,
-    ModelFailure, TokenUsage, ToolControl,
+    Attachment, BlobRef, CallId, CompletionCallMetadata, ContentPart, CorrelationId, FailureClass,
+    FinishReason as ArtistFinishReason, InvocationScope, ModelFailure, ProjectionArtifact,
+    TokenUsage, ToolControl,
 };
 use artist_kernel::{
     ModelError, ModelEvent, ModelHistoryItem, ModelMessage, ModelRequest, ModelStream, Steering,
     StreamingModel,
 };
-use artist_resource::{InvocationContext, ToolRegistry};
+use artist_resource::{InvocationContext, ToolProgressSink, ToolRegistry};
 use futures::StreamExt;
 use rig_agent::{
     AgentBuilder, AgentHook, HookContext, ModelHandle,
@@ -24,14 +25,15 @@ use rig_agent::{
         CompletionCallAction, CompletionCallEvent, RequestPatch, StreamingError,
         ToolCall as HookToolCall, ToolCallAction, ToolResultAction, ToolResultEvent,
     },
-    completion::{Document, PromptError},
+    completion::PromptError,
     prelude::MultiTurnStreamItem,
     tool::{DynamicTool, ToolExecutionError, ToolOutput},
 };
 use rig_core::{
     completion::{AssistantContent, CompletionError, CompletionModel, FinishReason, Message},
     message::{
-        Image, Reasoning, ToolCall, ToolCallId, ToolFunction, ToolResultContent, UserContent,
+        Audio, Document as RigDocument, DocumentSourceKind, Image, MediaType, MimeType, Reasoning,
+        Text, ToolCall, ToolCallId, ToolFunction, ToolResultContent, UserContent, Video,
     },
     streaming::{StreamedAssistantContent, StreamedUserContent},
 };
@@ -40,9 +42,47 @@ use rig_memory::{
     TemplateCompactor, TokenWindowMemory,
 };
 
+#[async_trait::async_trait]
+pub trait AttachmentResolver: Send + Sync + 'static {
+    async fn read(&self, blob: &BlobRef) -> Result<Vec<u8>, String>;
+    async fn write(
+        &self,
+        bytes: Vec<u8>,
+        media_type: String,
+        logical_name: Option<String>,
+    ) -> Result<BlobRef, String>;
+}
+
+#[async_trait::async_trait]
+impl<T> AttachmentResolver for T
+where
+    T: artist_resource::BlobStore + Send + Sync + 'static,
+{
+    async fn read(&self, blob: &BlobRef) -> Result<Vec<u8>, String> {
+        blob.validate()?;
+        let id = artist_resource::BlobId::parse(&blob.digest).map_err(|error| error.to_string())?;
+        self.get(&id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("blob {} was not found", blob.digest))
+    }
+
+    async fn write(
+        &self,
+        bytes: Vec<u8>,
+        media_type: String,
+        logical_name: Option<String>,
+    ) -> Result<BlobRef, String> {
+        self.put_ref(bytes, media_type, logical_name)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 pub struct RigModel {
     model: ModelHandle,
     registry: Option<ToolRegistry>,
+    attachments: Option<Arc<dyn AttachmentResolver>>,
     policy: Arc<dyn MemoryPolicy>,
     compact: bool,
     tool_concurrency: usize,
@@ -69,10 +109,16 @@ impl RigModel {
         Self {
             model,
             registry,
+            attachments: None,
             policy: Arc::new(NoopMemoryPolicy),
             compact: false,
             tool_concurrency: 1,
         }
+    }
+
+    pub fn with_attachment_resolver(mut self, resolver: Arc<dyn AttachmentResolver>) -> Self {
+        self.attachments = Some(resolver);
+        self
     }
 
     pub fn last_messages(mut self, count: usize) -> Self {
@@ -119,6 +165,8 @@ impl RigModel {
 impl StreamingModel for RigModel {
     fn stream(&self, request: ModelRequest, steering: Steering) -> ModelStream {
         let controls = Arc::new(Mutex::new(HashMap::<String, ToolControl>::new()));
+        let attachments = self.attachments.clone();
+        let (progress_events, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let (tools, has_terminal_control) = self.registry.as_ref().map_or_else(
             || (Vec::new(), false),
             |registry| {
@@ -137,6 +185,11 @@ impl StreamingModel for RigModel {
                         let registry = registry.clone();
                         let name = definition.name.clone();
                         let profile = request.profile.clone();
+                        let session_id = request.session_id.clone();
+                        let run_id = request.run_id.clone();
+                        let extensions = request.extensions.clone();
+                        let progress = Arc::new(ProgressEvents(progress_events.clone()));
+                        let attachments = attachments.clone();
                         DynamicTool::new(
                             definition.name,
                             definition.description,
@@ -145,19 +198,96 @@ impl StreamingModel for RigModel {
                                 let registry = registry.clone();
                                 let name = name.clone();
                                 let profile = profile.clone();
+                                let session_id = session_id.clone();
+                                let run_id = run_id.clone();
+                                let extensions = extensions.clone();
+                                let progress = progress.clone();
+                                let attachments = attachments.clone();
                                 Box::pin(async move {
-                                    let invocation = profile.map_or_else(
-                                        InvocationContext::root,
-                                        InvocationContext::for_profile,
+                                    let correlation = uuid::Uuid::new_v4();
+                                    let invocation = InvocationContext::for_execution(
+                                        profile,
+                                        InvocationScope {
+                                            session_id,
+                                            run_id: Some(run_id),
+                                            call_id: None,
+                                            correlation_id: CorrelationId::new(
+                                                correlation.to_string(),
+                                            ),
+                                            parent_correlation_id: None,
+                                        },
+                                        extensions,
+                                        Some(progress),
                                     );
-                                    let output = registry
+                                    let output = match registry
                                         .call_output_with_context(&name, arguments, invocation)
                                         .await
-                                        .map_err(ToolExecutionError::from_error)?;
+                                    {
+                                        Ok(output) => output,
+                                        // Structured failures reach the model as
+                                        // tool-result content with stable code,
+                                        // retryability, and hints instead of
+                                        // flattening into an opaque terminal error.
+                                        Err(error) => {
+                                            let (code, message, retriable, failure) = match &error {
+                                                artist_resource::ToolError::Failed(failure) => (
+                                                    failure.code.clone(),
+                                                    failure.message.clone(),
+                                                    failure.retriable,
+                                                    serde_json::json!({
+                                                        "artist_tool_failure": {
+                                                            "code": failure.code,
+                                                            "message": failure.message,
+                                                            "retriable": failure.retriable,
+                                                            "details": failure.details,
+                                                            "violations": failure.violations,
+                                                            "next_actions": failure.next_actions,
+                                                        }
+                                                    }),
+                                                ),
+                                                other => (
+                                                    "tool-failed".to_owned(),
+                                                    other.to_string(),
+                                                    false,
+                                                    serde_json::json!({
+                                                        "artist_tool_failure": {
+                                                            "code": "tool-failed",
+                                                            "message": other.to_string(),
+                                                            "retriable": false,
+                                                        }
+                                                    }),
+                                                ),
+                                            };
+                                            return Err(ToolExecutionError::other(message)
+                                                .with_model_output(
+                                                    ToolOutput::content(vec![
+                                                        ToolResultContent::Json { value: failure },
+                                                    ])
+                                                    .expect("failure feedback is non-empty"),
+                                                )
+                                                .with_retryable(retriable)
+                                                .with_code(code));
+                                        }
+                                    };
                                     if let Some(control) = output.control {
                                         tool_context.insert_result(control);
                                     }
-                                    Ok(ToolOutput::json(output.value))
+                                    let mut content = Vec::new();
+                                    for part in output.content {
+                                        content.extend(
+                                            to_rig_tool_result(part, attachments.as_deref())
+                                                .await
+                                                .map_err(ToolExecutionError::from_error)?,
+                                        );
+                                    }
+                                    if !output.next_actions.is_empty() {
+                                        content.push(ToolResultContent::Json {
+                                            value: serde_json::json!({
+                                                "artist_next_actions": output.next_actions,
+                                            }),
+                                        });
+                                    }
+                                    ToolOutput::content(content)
                                 })
                             },
                         )
@@ -188,9 +318,17 @@ impl StreamingModel for RigModel {
             .as_ref()
             .map(|route| route.parameters.clone());
         Box::pin(async_stream::stream! {
-            let sequences: Vec<_> = request.history.iter().map(|item| item.sequence).collect();
-            let history = match to_rig_history(request.history) {
+            let original_history = request.history.clone();
+            let sequences: Vec<_> = original_history.iter().map(|item| item.sequence).collect();
+            let history = match to_rig_history(request.history, attachments.as_deref()).await {
                 Ok(history) => history,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
+            let prompt = match to_rig_user_message(request.prompt, attachments.as_deref()).await {
+                Ok(prompt) => prompt,
                 Err(error) => {
                     yield Err(error);
                     return;
@@ -198,7 +336,7 @@ impl StreamingModel for RigModel {
             };
             let (memory_events, mut memory_rx) = tokio::sync::mpsc::unbounded_channel();
             let mut stream = agent
-                .runner(Message::user(request.prompt))
+                .runner(prompt)
                 .tool_concurrency(tool_concurrency)
                 .preamble(request.context)
                 .history(history)
@@ -207,12 +345,25 @@ impl StreamingModel for RigModel {
                     compact,
                     session_id: request.session_id.to_string(),
                     sequences,
+                    original_history,
+                    scope: InvocationScope {
+                        session_id: request.session_id.clone(),
+                        run_id: Some(request.run_id.clone()),
+                        call_id: None,
+                        correlation_id: CorrelationId::new(format!("{}:compaction", request.run_id)),
+                        parent_correlation_id: None,
+                    },
+                    extensions: request.extensions.clone(),
+                    attachments: attachments.clone(),
                     emitted_compaction: Arc::new(AtomicBool::new(false)),
                     events: memory_events,
                 })
                 .add_hook(TerminalControlHook(controls.clone()))
                 .add_hook(ModelParametersHook(model_parameters))
-                .add_hook(SteeringHook(steering))
+                .add_hook(SteeringHook {
+                    steering,
+                    attachments: attachments.clone(),
+                })
                 .stream()
                 .await;
 
@@ -220,9 +371,17 @@ impl StreamingModel for RigModel {
                 tokio::select! {
                     biased;
                     Some(event) = memory_rx.recv() => yield event,
+                    Some(progress) = progress_rx.recv() => yield Ok(ModelEvent::ToolProgress(progress)),
                     item = stream.next() => match item {
                         Some(Ok(item)) => {
-                            for event in translate(item) {
+                            let translated = match translate(item, attachments.as_deref()).await {
+                                Ok(events) => events,
+                                Err(error) => {
+                                    yield Err(error);
+                                    return;
+                                }
+                            };
+                            for event in translated {
                                 let terminal = match &event {
                                     ModelEvent::ToolResult { call_id, .. } => controls
                                         .lock()
@@ -253,7 +412,18 @@ impl StreamingModel for RigModel {
             while let Ok(event) = memory_rx.try_recv() {
                 yield event;
             }
+            while let Ok(progress) = progress_rx.try_recv() {
+                yield Ok(ModelEvent::ToolProgress(progress));
+            }
         })
+    }
+}
+
+struct ProgressEvents(tokio::sync::mpsc::UnboundedSender<artist_core::ToolProgress>);
+
+impl ToolProgressSink for ProgressEvents {
+    fn emit(&self, progress: artist_core::ToolProgress) {
+        let _ = self.0.send(progress);
     }
 }
 
@@ -262,6 +432,10 @@ struct HistoryHook {
     compact: bool,
     session_id: String,
     sequences: Vec<u64>,
+    original_history: Vec<ModelHistoryItem>,
+    scope: InvocationScope,
+    extensions: Arc<dyn artist_kernel::ExecutionExtensions>,
+    attachments: Option<Arc<dyn AttachmentResolver>>,
     emitted_compaction: Arc<AtomicBool>,
     events: tokio::sync::mpsc::UnboundedSender<Result<ModelEvent, ModelError>>,
 }
@@ -276,6 +450,10 @@ impl AgentHook for HistoryHook {
         let compact = self.compact;
         let session_id = self.session_id.clone();
         let sequences = self.sequences.clone();
+        let original_history = self.original_history.clone();
+        let scope = self.scope.clone();
+        let extensions = self.extensions.clone();
+        let attachments = self.attachments.clone();
         let emitted = self.emitted_compaction.clone();
         let events = self.events.clone();
         let history = event.history.to_vec();
@@ -287,25 +465,55 @@ impl AgentHook for HistoryHook {
             if compact && !demoted.is_empty() {
                 let evicted_count = demoted.len();
                 let evicted_bytes = serde_json::to_vec(&demoted).map_or(0, |bytes| bytes.len());
-                let artifact = match TemplateCompactor::new()
-                    .compact(&session_id, &demoted, None)
-                    .await
-                {
-                    Ok(artifact) => artifact,
+                let through_sequence = sequences
+                    .get(evicted_count.saturating_sub(1))
+                    .copied()
+                    .or_else(|| sequences.last().copied())
+                    .unwrap_or(0);
+                let source = original_history
+                    .iter()
+                    .filter(|item| item.sequence <= through_sequence)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let custom = match extensions.compact_context(&scope, &source).await {
+                    Ok(custom) => custom,
                     Err(error) => return CompletionCallAction::stop(error.to_string()),
                 };
-                retained.insert(0, artifact.clone().into());
+                let artifact = if let Some(artifact) = custom {
+                    if artifact.earliest_changed_sequence > through_sequence
+                        || artifact.projection_digest.len() != 64
+                        || artifact.content.is_empty()
+                    {
+                        return CompletionCallAction::stop(
+                            "context plugin returned an invalid projection artifact",
+                        );
+                    }
+                    let message =
+                        match to_rig_user_message(artifact.content.clone(), attachments.as_deref())
+                            .await
+                        {
+                            Ok(message) => message,
+                            Err(error) => return CompletionCallAction::stop(error.to_string()),
+                        };
+                    retained.insert(0, message);
+                    artifact
+                } else {
+                    let summary = match TemplateCompactor::new()
+                        .compact(&session_id, &demoted, None)
+                        .await
+                    {
+                        Ok(artifact) => artifact,
+                        Err(error) => return CompletionCallAction::stop(error.to_string()),
+                    };
+                    retained.insert(0, summary.clone().into());
+                    ProjectionArtifact::text(summary.into_string(), through_sequence)
+                };
                 if !emitted.swap(true, Ordering::AcqRel) {
-                    let through_sequence = sequences
-                        .get(evicted_count.saturating_sub(1))
-                        .copied()
-                        .or_else(|| sequences.last().copied())
-                        .unwrap_or(0);
                     let _ = events.send(Ok(ModelEvent::ContextCompacted {
                         through_sequence,
                         evicted_count,
                         evicted_bytes,
-                        artifact: artifact.into_string(),
+                        artifact,
                     }));
                 }
             }
@@ -314,7 +522,10 @@ impl AgentHook for HistoryHook {
     }
 }
 
-struct SteeringHook(Steering);
+struct SteeringHook {
+    steering: Steering,
+    attachments: Option<Arc<dyn AttachmentResolver>>,
+}
 
 impl AgentHook for SteeringHook {
     fn on_completion_call(
@@ -322,23 +533,26 @@ impl AgentHook for SteeringHook {
         _ctx: &HookContext,
         _event: CompletionCallEvent<'_>,
     ) -> impl Future<Output = CompletionCallAction> + Send {
-        let steering = self.0.clone();
+        let steering = self.steering.clone();
+        let attachments = self.attachments.clone();
+        let mut history = _event.history.to_vec();
         async move {
             let notices = steering.take().await;
             if notices.is_empty() {
-                CompletionCallAction::Continue
-            } else {
-                CompletionCallAction::Patch(RequestPatch::new().extra_context(
-                    notices.into_iter().map(|notice| Document {
-                        id: notice.message_id.to_string(),
-                        text: format!("Notification: {}", notice.content),
-                        additional_props: HashMap::from([(
-                            "source".into(),
-                            format!("{:?}", notice.source).to_lowercase(),
-                        )]),
-                    }),
-                ))
+                return CompletionCallAction::Continue;
             }
+            for notice in notices {
+                let mut content = vec![ContentPart::text(format!(
+                    "[Notification from {:?}]",
+                    notice.source
+                ))];
+                content.extend(notice.content);
+                match to_rig_user_message(content, attachments.as_deref()).await {
+                    Ok(message) => history.push(message),
+                    Err(error) => return CompletionCallAction::stop(error.to_string()),
+                }
+            }
+            CompletionCallAction::patch(RequestPatch::new().history(history))
         }
     }
 }
@@ -397,20 +611,29 @@ impl AgentHook for ModelParametersHook {
     }
 }
 
-fn to_rig_history(history: Vec<ModelHistoryItem>) -> Result<Vec<Message>, ModelError> {
+async fn to_rig_history(
+    history: Vec<ModelHistoryItem>,
+    resolver: Option<&dyn AttachmentResolver>,
+) -> Result<Vec<Message>, ModelError> {
     let mut names = HashMap::<CallId, String>::new();
-    history
-        .into_iter()
-        .map(|item| match item.message {
-            ModelMessage::User(text) => Ok(Message::user(text)),
-            ModelMessage::Assistant(content) => Ok(Message::Assistant {
-                id: None,
-                content: content
-                    .into_iter()
-                    .map(to_rig_assistant_content)
-                    .collect::<Result<Vec<_>, _>>()?,
-            }),
-            ModelMessage::Notification(text) => Ok(Message::user(format!("[Notification] {text}"))),
+    let mut converted = Vec::with_capacity(history.len());
+    for item in history {
+        let message = match item.message {
+            ModelMessage::User(content) => to_rig_user_message(content, resolver).await?,
+            ModelMessage::Assistant(content) => {
+                let mut converted = Vec::with_capacity(content.len());
+                for part in content {
+                    converted.push(to_rig_assistant_content(part, resolver).await?);
+                }
+                Message::Assistant {
+                    id: None,
+                    content: converted,
+                }
+            }
+            ModelMessage::Notification(mut content) => {
+                content.insert(0, ContentPart::text("[Notification]"));
+                to_rig_user_message(content, resolver).await?
+            }
             ModelMessage::ToolCall {
                 call_id,
                 name,
@@ -420,13 +643,13 @@ fn to_rig_history(history: Vec<ModelHistoryItem>) -> Result<Vec<Message>, ModelE
                     ModelError::new(format!("invalid stored tool arguments: {error}"))
                 })?;
                 names.insert(call_id.clone(), name.clone());
-                Ok(Message::Assistant {
+                Message::Assistant {
                     id: None,
                     content: vec![AssistantContent::ToolCall(ToolCall::new(
                         ToolCallId::new_or_mint(call_id.to_string()),
                         ToolFunction { name, arguments },
                     ))],
-                })
+                }
             }
             ModelMessage::ToolResult { call_id, content } => {
                 let name = names.get(&call_id).cloned().ok_or_else(|| {
@@ -434,24 +657,140 @@ fn to_rig_history(history: Vec<ModelHistoryItem>) -> Result<Vec<Message>, ModelE
                         "stored tool result has no matching call: {call_id}"
                     ))
                 })?;
-                let content = content
-                    .into_iter()
-                    .map(to_rig_tool_result)
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Message::User {
-                    content: vec![UserContent::tool_result(call_id.to_string(), name, content)],
-                })
+                let mut converted = Vec::new();
+                for part in content {
+                    converted.extend(to_rig_tool_result(part, resolver).await?);
+                }
+                Message::User {
+                    content: vec![UserContent::tool_result(
+                        call_id.to_string(),
+                        name,
+                        converted,
+                    )],
+                }
             }
-        })
-        .collect()
+        };
+        converted.push(message);
+    }
+    Ok(converted)
 }
 
-fn to_rig_assistant_content(part: ContentPart) -> Result<AssistantContent, ModelError> {
+async fn to_rig_user_message(
+    content: Vec<ContentPart>,
+    resolver: Option<&dyn AttachmentResolver>,
+) -> Result<Message, ModelError> {
+    let mut converted = Vec::new();
+    for part in content {
+        match part {
+            ContentPart::Text { text } => converted.push(UserContent::Text(Text::new(text))),
+            ContentPart::Json { value } => converted.push(UserContent::Text(Text::new(
+                serde_json::to_string(&value)
+                    .map_err(|error| ModelError::new(error.to_string()))?,
+            ))),
+            ContentPart::Reasoning { value } => converted.push(UserContent::Text(Text::new(
+                serde_json::json!({"artist_content_type": "reasoning", "value": value}).to_string(),
+            ))),
+            ContentPart::Opaque { kind, value } => converted.push(UserContent::Text(Text::new(
+                serde_json::json!({"artist_content_type": "opaque", "kind": kind, "value": value})
+                    .to_string(),
+            ))),
+            ContentPart::Attachment { attachment } => {
+                if let Some(alternate) = attachment.alternate_text.as_ref() {
+                    converted.push(UserContent::Text(Text::new(alternate.clone())));
+                }
+                converted.push(to_rig_user_attachment(&attachment, resolver).await?);
+            }
+        }
+    }
+    if converted.is_empty() {
+        return Err(ModelError::new("model user content must not be empty"));
+    }
+    Ok(Message::User { content: converted })
+}
+
+async fn attachment_bytes(
+    attachment: &Attachment,
+    resolver: Option<&dyn AttachmentResolver>,
+) -> Result<Vec<u8>, ModelError> {
+    let resolver = resolver.ok_or_else(|| {
+        ModelError::new(format!(
+            "attachment {} requires a configured blob resolver",
+            attachment.blob.digest
+        ))
+    })?;
+    let bytes = resolver
+        .read(&attachment.blob)
+        .await
+        .map_err(ModelError::new)?;
+    if bytes.len() as u64 != attachment.blob.byte_length {
+        return Err(ModelError::new(format!(
+            "attachment {} length does not match its canonical reference",
+            attachment.blob.digest
+        )));
+    }
+    Ok(bytes)
+}
+
+async fn to_rig_user_attachment(
+    attachment: &Attachment,
+    resolver: Option<&dyn AttachmentResolver>,
+) -> Result<UserContent, ModelError> {
+    let bytes = attachment_bytes(attachment, resolver).await?;
+    let media = MediaType::from_mime_type(&attachment.blob.media_type).ok_or_else(|| {
+        ModelError::new(format!(
+            "Rig 0.42 cannot represent attachment media type {}",
+            attachment.blob.media_type
+        ))
+    })?;
+    Ok(match media {
+        MediaType::Image(media_type) => UserContent::Image(Image {
+            data: DocumentSourceKind::Raw(bytes),
+            media_type: Some(media_type),
+            detail: None,
+            additional_params: None,
+        }),
+        MediaType::Audio(media_type) => UserContent::Audio(Audio {
+            data: DocumentSourceKind::Raw(bytes),
+            media_type: Some(media_type),
+            additional_params: None,
+        }),
+        MediaType::Video(media_type) => UserContent::Video(Video {
+            data: DocumentSourceKind::Raw(bytes),
+            media_type: Some(media_type),
+            additional_params: None,
+        }),
+        MediaType::Document(media_type) => UserContent::Document(RigDocument {
+            data: DocumentSourceKind::Raw(bytes),
+            media_type: Some(media_type),
+            additional_params: None,
+        }),
+    })
+}
+
+async fn to_rig_assistant_content(
+    part: ContentPart,
+    resolver: Option<&dyn AttachmentResolver>,
+) -> Result<AssistantContent, ModelError> {
     match part {
         ContentPart::Text { text } => Ok(AssistantContent::text(text)),
-        ContentPart::Image { value } => serde_json::from_value::<Image>(value)
-            .map(AssistantContent::Image)
-            .map_err(|error| ModelError::new(format!("invalid stored assistant image: {error}"))),
+        ContentPart::Attachment { attachment } => {
+            let bytes = attachment_bytes(&attachment, resolver).await?;
+            let MediaType::Image(media_type) =
+                MediaType::from_mime_type(&attachment.blob.media_type).ok_or_else(|| {
+                    ModelError::new("assistant attachment has an unsupported media type")
+                })?
+            else {
+                return Err(ModelError::new(
+                    "Rig 0.42 assistant history supports image attachments only",
+                ));
+            };
+            Ok(AssistantContent::Image(Image {
+                data: DocumentSourceKind::Raw(bytes),
+                media_type: Some(media_type),
+                detail: None,
+                additional_params: None,
+            }))
+        }
         ContentPart::Reasoning { value } => serde_json::from_value::<Reasoning>(value)
             .map(AssistantContent::Reasoning)
             .map_err(|error| ModelError::new(format!("invalid stored reasoning: {error}"))),
@@ -461,24 +800,50 @@ fn to_rig_assistant_content(part: ContentPart) -> Result<AssistantContent, Model
     }
 }
 
-fn to_rig_tool_result(part: ContentPart) -> Result<ToolResultContent, ModelError> {
-    match part {
-        ContentPart::Text { text } => Ok(ToolResultContent::text(text)),
-        ContentPart::Json { value } => Ok(ToolResultContent::Json { value }),
-        ContentPart::Image { value } => serde_json::from_value::<Image>(value)
-            .map(ToolResultContent::Image)
-            .map_err(|error| ModelError::new(format!("invalid stored image content: {error}"))),
-        ContentPart::Reasoning { value } => Ok(ToolResultContent::Json {
+async fn to_rig_tool_result(
+    part: ContentPart,
+    resolver: Option<&dyn AttachmentResolver>,
+) -> Result<Vec<ToolResultContent>, ModelError> {
+    Ok(match part {
+        ContentPart::Text { text } => vec![ToolResultContent::text(text)],
+        ContentPart::Json { value } => vec![ToolResultContent::Json { value }],
+        ContentPart::Attachment { attachment } => {
+            let bytes = attachment_bytes(&attachment, resolver).await?;
+            let MediaType::Image(media_type) =
+                MediaType::from_mime_type(&attachment.blob.media_type).ok_or_else(|| {
+                    ModelError::new("tool-result attachment has an unsupported media type")
+                })?
+            else {
+                return Err(ModelError::new(
+                    "Rig 0.42 tool-result history supports image attachments only",
+                ));
+            };
+            let mut content = Vec::new();
+            if let Some(alternate) = attachment.alternate_text {
+                content.push(ToolResultContent::text(alternate));
+            }
+            content.push(ToolResultContent::Image(Image {
+                data: DocumentSourceKind::Raw(bytes),
+                media_type: Some(media_type),
+                detail: None,
+                additional_params: None,
+            }));
+            content
+        }
+        ContentPart::Reasoning { value } => vec![ToolResultContent::Json {
             value: serde_json::json!({ "artist_content_type": "reasoning", "value": value }),
-        }),
-        ContentPart::Opaque { kind, value } => Ok(ToolResultContent::Json {
+        }],
+        ContentPart::Opaque { kind, value } => vec![ToolResultContent::Json {
             value: serde_json::json!({ "artist_content_type": "opaque", "kind": kind, "value": value }),
-        }),
-    }
+        }],
+    })
 }
 
-fn translate(item: MultiTurnStreamItem) -> Vec<ModelEvent> {
-    match item {
+async fn translate(
+    item: MultiTurnStreamItem,
+    attachments: Option<&dyn AttachmentResolver>,
+) -> Result<Vec<ModelEvent>, ModelError> {
+    Ok(match item {
         MultiTurnStreamItem::StreamAssistantItem(content) => match content {
             StreamedAssistantContent::Text(text) => vec![ModelEvent::TextDelta(text.text)],
             StreamedAssistantContent::ToolCall {
@@ -524,20 +889,26 @@ fn translate(item: MultiTurnStreamItem) -> Vec<ModelEvent> {
         MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
             tool_result,
             internal_call_id,
-        }) => vec![ModelEvent::ToolResult {
-            call_id: CallId::new(internal_call_id),
-            content: tool_result
-                .content
-                .into_iter()
-                .map(|content| match content {
-                    ToolResultContent::Text(text) => ContentPart::Text { text: text.text },
-                    ToolResultContent::Json { value } => ContentPart::Json { value },
-                    ToolResultContent::Image(image) => ContentPart::Image {
-                        value: serde_json::to_value(image).unwrap_or(serde_json::Value::Null),
-                    },
-                })
-                .collect(),
-        }],
+        }) => {
+            let mut content = Vec::with_capacity(tool_result.content.len());
+            for item in tool_result.content {
+                match item {
+                    ToolResultContent::Text(text) => {
+                        content.push(ContentPart::Text { text: text.text });
+                    }
+                    ToolResultContent::Json { value } => {
+                        content.push(ContentPart::Json { value });
+                    }
+                    ToolResultContent::Image(image) => {
+                        content.push(canonicalize_rig_image(image, attachments).await?);
+                    }
+                }
+            }
+            vec![ModelEvent::ToolResult {
+                call_id: CallId::new(internal_call_id),
+                content,
+            }]
+        }
         MultiTurnStreamItem::ModelTurnRetried { .. } => vec![ModelEvent::TextReset],
         MultiTurnStreamItem::FinalResponse(response) => vec![
             ModelEvent::Usage(TokenUsage {
@@ -572,7 +943,42 @@ fn translate(item: MultiTurnStreamItem) -> Vec<ModelEvent> {
             arguments: tool_call.function.arguments.to_string(),
         }],
         MultiTurnStreamItem::CompletionCall(_) => vec![],
-    }
+    })
+}
+
+async fn canonicalize_rig_image(
+    image: Image,
+    attachments: Option<&dyn AttachmentResolver>,
+) -> Result<ContentPart, ModelError> {
+    use base64::Engine as _;
+    let media_type = image
+        .media_type
+        .as_ref()
+        .map(MimeType::to_mime_type)
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let bytes = match image.data {
+        DocumentSourceKind::Raw(bytes) => bytes,
+        DocumentSourceKind::Base64(encoded) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| ModelError::new(format!("invalid provider image base64: {error}")))?,
+        DocumentSourceKind::Url(_)
+        | DocumentSourceKind::FileId(_)
+        | DocumentSourceKind::String(_)
+        | DocumentSourceKind::Unknown => {
+            return Err(ModelError::new(
+                "provider image cannot enter canonical history without materialized bytes",
+            ));
+        }
+    };
+    let resolver = attachments.ok_or_else(|| {
+        ModelError::new("provider image requires a configured canonical attachment repository")
+    })?;
+    let blob = resolver
+        .write(bytes, media_type, None)
+        .await
+        .map_err(ModelError::new)?;
+    Ok(ContentPart::attachment(blob, "artist.tool-result"))
 }
 
 fn finish_reason(reason: FinishReason) -> ArtistFinishReason {
@@ -665,9 +1071,12 @@ mod tests {
         SessionId, Source, StreamEvent, StreamEventKind, ToolEffect, TranscriptEntryKind,
         default_yield_schema,
     };
-    use artist_kernel::{ProfileSource, SessionHandle};
+    use artist_kernel::{
+        CreateSession, ProfileSource, SessionDependencies, SessionHandle, no_extensions,
+    };
     use artist_resource::{
-        InvocationContext, ToolDefinition as RegistryDefinition, ToolError, ToolHandler,
+        BlobStore, InvocationContext, MemoryBlobStore, ToolDefinition as RegistryDefinition,
+        ToolError, ToolHandler,
     };
     use artist_store::{MemoryStore, SessionStore};
     use async_trait::async_trait;
@@ -679,12 +1088,12 @@ mod tests {
     };
     use tokio::sync::{Semaphore, broadcast};
 
-    #[test]
-    fn text_history_converts_without_loss() {
+    #[tokio::test]
+    async fn text_history_converts_without_loss() {
         let history = vec![
             ModelHistoryItem {
                 sequence: 0,
-                message: ModelMessage::User("hello".into()),
+                message: ModelMessage::User(vec![ContentPart::text("hello")]),
             },
             ModelHistoryItem {
                 sequence: 1,
@@ -692,13 +1101,13 @@ mod tests {
             },
         ];
         assert_eq!(
-            to_rig_history(history).unwrap(),
+            to_rig_history(history, None).await.unwrap(),
             vec![Message::user("hello"), Message::assistant("hi")]
         );
     }
 
-    #[test]
-    fn tool_history_preserves_call_result_pairing() {
+    #[tokio::test]
+    async fn tool_history_preserves_call_result_pairing() {
         let history = vec![
             ModelHistoryItem {
                 sequence: 0,
@@ -716,7 +1125,7 @@ mod tests {
                 },
             },
         ];
-        let converted = to_rig_history(history).unwrap();
+        let converted = to_rig_history(history, None).await.unwrap();
         assert!(matches!(converted[0], Message::Assistant { .. }));
         assert!(matches!(converted[1], Message::User { .. }));
 
@@ -728,7 +1137,8 @@ mod tests {
             },
         }];
         assert!(
-            to_rig_history(orphan)
+            to_rig_history(orphan, None)
+                .await
                 .unwrap_err()
                 .0
                 .message
@@ -736,61 +1146,67 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rich_content_round_trips_through_rig_history_adaptation() {
-        let image = Image::default();
+    #[tokio::test]
+    async fn rich_content_round_trips_through_rig_history_adaptation() {
+        let store = MemoryBlobStore::default();
+        let bytes = vec![137, 80, 78, 71, 1, 2, 3];
+        let blob = store
+            .put_ref(
+                bytes.clone(),
+                "image/png".into(),
+                Some("fixture.png".into()),
+            )
+            .await
+            .unwrap();
         let parts = vec![
             ContentPart::text("literal"),
             ContentPart::Json {
                 value: json!({"answer": 42}),
             },
-            ContentPart::Image {
-                value: serde_json::to_value(&image).unwrap(),
-            },
+            ContentPart::attachment(blob, "artist.input"),
             ContentPart::Opaque {
                 kind: "provider_native".into(),
                 value: json!({"id": "native"}),
             },
         ];
-        let converted = parts
-            .clone()
-            .into_iter()
-            .map(to_rig_tool_result)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let mut converted = Vec::new();
+        for part in parts {
+            converted.extend(to_rig_tool_result(part, Some(&store)).await.unwrap());
+        }
         assert!(matches!(&converted[0], ToolResultContent::Text(text) if text.text == "literal"));
         assert!(
-            matches!(&converted[1], ToolResultContent::Json { value } if value == &json!({"answer": 42}))
+            matches!(&converted[1], ToolResultContent::Json { value } if *value == json!({"answer": 42}))
         );
-        assert!(matches!(&converted[2], ToolResultContent::Image(value) if value == &image));
-        assert!(matches!(
-            &converted[3],
-            ToolResultContent::Json { value }
-                if value == &json!({
-                    "artist_content_type": "opaque",
-                    "kind": "provider_native",
-                    "value": {"id": "native"}
-                })
-        ));
+        assert!(matches!(&converted[2], ToolResultContent::Image(value)
+            if matches!(&value.data, DocumentSourceKind::Raw(actual) if actual == &bytes)));
+        assert!(matches!(&converted[3], ToolResultContent::Json { value }
+            if *value == json!({"artist_content_type":"opaque","kind":"provider_native","value":{"id":"native"}})));
 
         let reasoning = Reasoning::new_with_signature("thinking", Some("signature".into()));
-        let assistant = to_rig_assistant_content(ContentPart::Reasoning {
-            value: serde_json::to_value(&reasoning).unwrap(),
-        })
+        let assistant = to_rig_assistant_content(
+            ContentPart::Reasoning {
+                value: serde_json::to_value(&reasoning).unwrap(),
+            },
+            None,
+        )
+        .await
         .unwrap();
         assert!(matches!(assistant, AssistantContent::Reasoning(value) if value == reasoning));
     }
 
-    #[test]
-    fn reasoning_and_unknown_stream_parts_are_not_discarded() {
+    #[tokio::test]
+    async fn reasoning_and_unknown_stream_parts_are_not_discarded() {
         let reasoning = Reasoning::new("thinking");
         assert!(matches!(
-            translate(MultiTurnStreamItem::StreamAssistantItem(
-                StreamedAssistantContent::Reasoning {
+            translate(
+                MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning {
                     reasoning,
                     id: "reasoning-part".into(),
-                }
-            ))
+                }),
+                None
+            )
+            .await
+            .unwrap()
             .as_slice(),
             [ModelEvent::Content(ContentPart::Reasoning { .. })]
         ));
@@ -799,7 +1215,7 @@ mod tests {
                 StreamedAssistantContent::Unknown(rig_core::streaming::UnknownPayload::new(
                     json!({"type": "hosted_tool", "id": "native"})
                 ))
-            )).as_slice(),
+            ), None).await.unwrap().as_slice(),
             [ModelEvent::Content(ContentPart::Opaque { kind, value })]
                 if kind == "provider_native" && value["id"] == "native"
         ));
@@ -843,15 +1259,15 @@ mod tests {
         assert_eq!(canonical.len(), 3);
     }
 
-    #[test]
-    fn usage_is_emitted_before_completion() {
+    #[tokio::test]
+    async fn usage_is_emitted_before_completion() {
         let mut usage = rig_core::completion::Usage::new();
         usage.input_tokens = 10;
         usage.output_tokens = 4;
         usage.cached_input_tokens = 3;
         usage.reasoning_tokens = 2;
         let item = MultiTurnStreamItem::final_response(vec![AssistantContent::text("done")], usage);
-        let events = translate(item);
+        let events = translate(item, None).await.unwrap();
         assert!(matches!(events[0], ModelEvent::Usage(_)));
         assert!(matches!(events[1], ModelEvent::CompletionMetadata(_)));
         assert!(matches!(events[2], ModelEvent::Finished { .. }));
@@ -895,8 +1311,8 @@ mod tests {
         assert_eq!(failure.provider_request_id.as_deref(), Some("request-7"));
     }
 
-    #[test]
-    fn execution_commits_and_terminal_metadata_are_not_discarded() {
+    #[tokio::test]
+    async fn execution_commits_and_terminal_metadata_are_not_discarded() {
         let call = ToolCall::new(
             ToolCallId::new_or_mint("provider-call"),
             ToolFunction {
@@ -908,8 +1324,7 @@ mod tests {
             translate(MultiTurnStreamItem::ToolExecutionCommitted {
                 tool_call: call,
                 internal_call_id: "internal-call".into(),
-            })
-            .as_slice(),
+            }, None).await.unwrap().as_slice(),
             [ModelEvent::ToolExecutionCommitted { call_id, name, .. }]
                 if call_id.as_str() == "internal-call" && name == "read"
         ));
@@ -923,7 +1338,9 @@ mod tests {
         metadata.response_id = Some("response".into());
         metadata.provider_request_id = Some("request".into());
         response.completion_calls.push(metadata);
-        let events = translate(MultiTurnStreamItem::FinalResponse(response));
+        let events = translate(MultiTurnStreamItem::FinalResponse(response), None)
+            .await
+            .unwrap();
         assert!(matches!(
             &events[1],
             ModelEvent::CompletionMetadata(calls)
@@ -991,7 +1408,11 @@ mod tests {
         ) -> Result<artist_resource::ToolOutput, ToolError> {
             Ok(artist_resource::ToolOutput {
                 value: arguments.clone(),
+                content: vec![ContentPart::Json {
+                    value: arguments.clone(),
+                }],
                 control: Some(ToolControl::Yield { payload: arguments }),
+                next_actions: Vec::new(),
             })
         }
     }
@@ -1001,13 +1422,22 @@ mod tests {
         async fn call(
             &self,
             arguments: Value,
-            _: InvocationContext,
+            context: InvocationContext,
         ) -> Result<artist_resource::ToolOutput, ToolError> {
+            if let (Some(progress), Some(scope)) = (context.progress, context.scope) {
+                progress.emit(artist_core::ToolProgress {
+                    scope,
+                    sequence: 0,
+                    fraction: Some(0.5),
+                    message: Some("gate waiting".into()),
+                    detail: json!({"phase": "blocked"}),
+                });
+            }
             self.started.add_permits(1);
             self.release
                 .acquire()
                 .await
-                .map_err(|_| ToolError::Failed("gate closed".into()))?
+                .map_err(|_| ToolError::failed("gate_closed", "gate closed"))?
                 .forget();
             Ok(artist_resource::ToolOutput::value(arguments))
         }
@@ -1045,6 +1475,14 @@ mod tests {
                     description: "echo JSON".into(),
                     input_schema: json!({"type": "object"}),
                     effects: vec![ToolEffect::Observe],
+                    category: "test".into(),
+                    output_schema: json!({"type": "object"}),
+                    annotations: artist_resource::ToolAnnotations {
+                        read_only: true,
+                        destructive: false,
+                        idempotent: true,
+                        open_world: false,
+                    },
                 },
                 Arc::new(Echo(called.clone())),
             )
@@ -1066,8 +1504,9 @@ mod tests {
                     session_id: SessionId::from("session"),
                     run_id: RunId::from("run"),
                     context: String::new(),
-                    prompt: "echo".into(),
+                    prompt: vec![ContentPart::text("echo")],
                     history: Vec::new(),
+                    extensions: no_extensions(),
                     profile: None,
                     profile_epoch: None,
                     selected_model: None,
@@ -1090,6 +1529,234 @@ mod tests {
         )));
     }
 
+    /// Gate proof: binary content is stored once by digest, referenced at its
+    /// exact canonical positions (user input AND tool result), and resolved
+    /// to provider-native raw image parts only while constructing requests.
+    #[tokio::test]
+    async fn binary_content_stored_once_flows_through_tools_and_history() {
+        use artist_resource::{BlobStore, MemoryBlobStore};
+
+        let blobs = Arc::new(MemoryBlobStore::default());
+        let png = vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 7, 7, 7];
+        let reference = blobs
+            .put_ref(png.clone(), "image/png".into(), Some("dot.png".into()))
+            .await
+            .unwrap();
+        // Storing the identical bytes again deduplicates to one physical blob.
+        let duplicate = blobs
+            .put_ref(png.clone(), "image/png".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(reference.digest, duplicate.digest);
+        assert_eq!(blobs.list().await.unwrap().len(), 1);
+
+        struct EmitAttachment {
+            blob: artist_core::BlobRef,
+        }
+        #[async_trait]
+        impl artist_resource::ToolHandler for EmitAttachment {
+            async fn call(
+                &self,
+                _: serde_json::Value,
+                _: artist_resource::InvocationContext,
+            ) -> Result<artist_resource::ToolOutput, artist_resource::ToolError> {
+                Ok(artist_resource::ToolOutput {
+                    value: serde_json::json!({"attached": true}),
+                    content: vec![ContentPart::Attachment {
+                        attachment: artist_core::Attachment {
+                            blob: self.blob.clone(),
+                            role: "artist.tool-result".into(),
+                            alternate_text: Some("a tiny png".into()),
+                            metadata: Default::default(),
+                        },
+                    }],
+                    control: None,
+                    next_actions: Vec::new(),
+                })
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry
+            .register(
+                RegistryDefinition {
+                    name: "attach".into(),
+                    description: "return the screenshot".into(),
+                    input_schema: json!({"type": "object"}),
+                    effects: vec![ToolEffect::Observe],
+                    category: "test".into(),
+                    output_schema: json!({"type": "object"}),
+                    annotations: artist_resource::ToolAnnotations {
+                        read_only: true,
+                        destructive: false,
+                        idempotent: true,
+                        open_world: false,
+                    },
+                },
+                Arc::new(EmitAttachment {
+                    blob: reference.clone(),
+                }),
+            )
+            .unwrap();
+
+        let mock = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call("call-1", "attach", json!({})),
+                final_event(),
+            ],
+            vec![MockStreamEvent::text("done"), final_event()],
+        ]);
+        let model = RigModel::with_registry(mock.clone(), registry)
+            .with_attachment_resolver(blobs as Arc<dyn AttachmentResolver>);
+
+        // The user prompt itself references the SAME digest.
+        let events = model
+            .stream(
+                ModelRequest {
+                    session_id: SessionId::from("session"),
+                    run_id: RunId::from("run"),
+                    context: String::new(),
+                    prompt: vec![
+                        ContentPart::text("look"),
+                        ContentPart::Attachment {
+                            attachment: artist_core::Attachment {
+                                blob: reference.clone(),
+                                role: "artist.input".into(),
+                                alternate_text: None,
+                                metadata: Default::default(),
+                            },
+                        },
+                    ],
+                    history: Vec::new(),
+                    extensions: no_extensions(),
+                    profile: None,
+                    profile_epoch: None,
+                    selected_model: None,
+                },
+                Steering::empty(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+
+        // The tool result stream event carries the blob reference, not bytes.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(ModelEvent::ToolResult { content, .. })
+                if content.iter().any(|part| matches!(
+                    part,
+                    ContentPart::Attachment { attachment }
+                        if attachment.blob.digest == reference.digest
+                ))
+        )));
+
+        // Provider request 2 resolves BOTH attachments to raw image parts.
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 2);
+        let serialized = serde_json::to_string(&requests[1]).unwrap();
+        // Both attachments resolve to provider-native raw image parts holding
+        // the exact stored bytes: input image AND tool-result image.
+        let png_array =
+            format!("{:?}", png.clone().into_iter().collect::<Vec<u8>>()).replace(" ", "");
+        assert_eq!(
+            serialized.matches(&png_array).count(),
+            2,
+            "expected input+tool raw images, got {serialized}"
+        );
+        // Alternate text rides along as an adjacent text part (it is not a
+        // field on the provider image part).
+        assert!(!serialized.contains("alternate_text"));
+        assert!(serialized.contains("a tiny png"));
+    }
+
+    #[tokio::test]
+    async fn tool_failures_reach_the_model_with_structured_feedback() {
+        struct Failing;
+        #[async_trait]
+        impl artist_resource::ToolHandler for Failing {
+            async fn call(
+                &self,
+                _arguments: serde_json::Value,
+                _: artist_resource::InvocationContext,
+            ) -> Result<artist_resource::ToolOutput, artist_resource::ToolError> {
+                Err(artist_resource::ToolError::Failed(Box::new(
+                    artist_resource::ToolFailure {
+                        code: "disk-full".into(),
+                        message: "cannot write".into(),
+                        retriable: true,
+                        details: serde_json::json!({"path": "/tmp/x"}),
+                        violations: Vec::new(),
+                        next_actions: vec![artist_resource::NextActionHint {
+                            kind: "retry".into(),
+                            label: "retry".into(),
+                            payload: serde_json::json!({"tool": "write"}),
+                        }],
+                    },
+                )))
+            }
+        }
+        let registry = ToolRegistry::new();
+        registry
+            .register(
+                RegistryDefinition {
+                    name: "boom".into(),
+                    description: "always fails".into(),
+                    input_schema: json!({"type": "object"}),
+                    effects: vec![ToolEffect::Mutate],
+                    category: "test".into(),
+                    output_schema: json!({"type": "object"}),
+                    annotations: artist_resource::ToolAnnotations {
+                        read_only: false,
+                        destructive: false,
+                        idempotent: false,
+                        open_world: false,
+                    },
+                },
+                Arc::new(Failing),
+            )
+            .unwrap();
+        let mock = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call("call-1", "boom", json!({})),
+                final_event(),
+            ],
+            vec![MockStreamEvent::text("recovered"), final_event()],
+        ]);
+        let model = Arc::new(
+            RigModel::with_registry(mock.clone(), registry)
+                .with_policy(CountingPolicy(Default::default())),
+        );
+        let events = model
+            .stream(
+                ModelRequest {
+                    session_id: SessionId::from("session"),
+                    run_id: RunId::from("run"),
+                    context: String::new(),
+                    prompt: vec![ContentPart::text("boom")],
+                    history: Vec::new(),
+                    extensions: no_extensions(),
+                    profile: None,
+                    profile_epoch: None,
+                    selected_model: None,
+                },
+                Steering::empty(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        // The run completes; the failure did not abort it.
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(ModelEvent::Finished { .. })))
+        );
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 2);
+        let serialized = serde_json::to_string(&requests[1]).unwrap();
+        assert!(serialized.contains("artist_tool_failure"), "{serialized}");
+        assert!(serialized.contains("disk-full"));
+        assert!(serialized.contains("\"retriable\":true"));
+    }
+
     #[tokio::test]
     async fn terminal_control_crosses_rig_and_stops_later_tool_calls() {
         let registry = ToolRegistry::new();
@@ -1101,6 +1768,14 @@ mod tests {
                     description: "return structured state".into(),
                     input_schema: artist_core::default_yield_schema(),
                     effects: vec![ToolEffect::SessionControl],
+                    category: "test".into(),
+                    output_schema: json!({"type": "object"}),
+                    annotations: artist_resource::ToolAnnotations {
+                        read_only: false,
+                        destructive: false,
+                        idempotent: false,
+                        open_world: false,
+                    },
                 },
                 Arc::new(TerminalYield),
             )
@@ -1112,6 +1787,14 @@ mod tests {
                     description: "must not run".into(),
                     input_schema: json!({"type": "object"}),
                     effects: vec![ToolEffect::Mutate],
+                    category: "test".into(),
+                    output_schema: json!({"type": "object"}),
+                    annotations: artist_resource::ToolAnnotations {
+                        read_only: false,
+                        destructive: false,
+                        idempotent: false,
+                        open_world: false,
+                    },
                 },
                 Arc::new(Echo(later_called.clone())),
             )
@@ -1129,8 +1812,9 @@ mod tests {
             session_id: SessionId::from("session"),
             run_id: RunId::from("run"),
             context: String::new(),
-            prompt: "finish".into(),
+            prompt: vec![ContentPart::text("finish")],
             history: Vec::new(),
+            extensions: no_extensions(),
             profile: None,
             profile_epoch: None,
             selected_model: None,
@@ -1169,6 +1853,14 @@ mod tests {
                     description: "pause between model request boundaries".into(),
                     input_schema: json!({"type":"object"}),
                     effects: vec![ToolEffect::Execute],
+                    category: "test".into(),
+                    output_schema: json!({"type": "object"}),
+                    annotations: artist_resource::ToolAnnotations {
+                        read_only: false,
+                        destructive: false,
+                        idempotent: false,
+                        open_world: false,
+                    },
                 },
                 Arc::new(Gate {
                     started: started.clone(),
@@ -1186,12 +1878,20 @@ mod tests {
         let model = Arc::new(RigModel::with_registry(mock.clone(), registry));
         let store = Arc::new(MemoryStore::default());
         let session = SessionHandle::create(
-            SessionId::from("rig-controls"),
-            InitialContext { fragments: vec![] },
-            "test",
-            Arc::new(TestProfiles),
-            store.clone(),
-            model,
+            CreateSession {
+                session_id: SessionId::from("rig-controls"),
+                metadata: artist_core::SessionMetadata::root(0, None),
+                context: InitialContext { fragments: vec![] },
+                initial_profile: Some("test".into()),
+            },
+            SessionDependencies {
+                store: store.clone(),
+                model,
+                profiles: Some(Arc::new(TestProfiles)),
+                slash_commands: None,
+                extensions: no_extensions(),
+                resume_queued_work: true,
+            },
         )
         .await
         .unwrap();
@@ -1199,6 +1899,16 @@ mod tests {
 
         session.input(Source::User, "use the gate").await.unwrap();
         started.acquire().await.unwrap().forget();
+        let progress = wait_for(&mut events, |kind| {
+            matches!(kind, StreamEventKind::ToolProgress { .. })
+        })
+        .await;
+        assert!(matches!(
+            progress.kind,
+            StreamEventKind::ToolProgress { ref progress }
+                if progress.message.as_deref() == Some("gate waiting")
+                    && progress.fraction == Some(0.5)
+        ));
         session
             .steer(Source::Harness, "new boundary context")
             .await
@@ -1241,11 +1951,10 @@ mod tests {
         ));
         let requests = mock.requests();
         assert_eq!(requests.len(), 2);
+        let second_history = serde_json::to_string(&requests[1].chat_history).unwrap();
         assert!(
-            requests[1]
-                .documents
-                .iter()
-                .any(|document| document.text.contains("new boundary context"))
+            second_history.contains("new boundary context"),
+            "{second_history}"
         );
     }
 
@@ -1261,6 +1970,14 @@ mod tests {
                     description: "never released during this test".into(),
                     input_schema: json!({"type":"object"}),
                     effects: vec![ToolEffect::Execute],
+                    category: "test".into(),
+                    output_schema: json!({"type": "object"}),
+                    annotations: artist_resource::ToolAnnotations {
+                        read_only: false,
+                        destructive: false,
+                        idempotent: false,
+                        open_world: false,
+                    },
                 },
                 Arc::new(Gate {
                     started: started.clone(),
@@ -1275,12 +1992,20 @@ mod tests {
         let model = Arc::new(RigModel::with_registry(mock, registry));
         let store = Arc::new(MemoryStore::default());
         let session = SessionHandle::create(
-            SessionId::from("rig-abort"),
-            InitialContext { fragments: vec![] },
-            "test",
-            Arc::new(TestProfiles),
-            store.clone(),
-            model,
+            CreateSession {
+                session_id: SessionId::from("rig-abort"),
+                metadata: artist_core::SessionMetadata::root(0, None),
+                context: InitialContext { fragments: vec![] },
+                initial_profile: Some("test".into()),
+            },
+            SessionDependencies {
+                store: store.clone(),
+                model,
+                profiles: Some(Arc::new(TestProfiles)),
+                slash_commands: None,
+                extensions: no_extensions(),
+                resume_queued_work: true,
+            },
         )
         .await
         .unwrap();
@@ -1320,12 +2045,20 @@ mod tests {
         let model = Arc::new(RigModel::new(mock));
         let store = Arc::new(MemoryStore::default());
         let session = SessionHandle::create(
-            SessionId::from("rig-failure"),
-            InitialContext { fragments: vec![] },
-            "test",
-            Arc::new(TestProfiles),
-            store.clone(),
-            model,
+            CreateSession {
+                session_id: SessionId::from("rig-failure"),
+                metadata: artist_core::SessionMetadata::root(0, None),
+                context: InitialContext { fragments: vec![] },
+                initial_profile: Some("test".into()),
+            },
+            SessionDependencies {
+                store: store.clone(),
+                model,
+                profiles: Some(Arc::new(TestProfiles)),
+                slash_commands: None,
+                extensions: no_extensions(),
+                resume_queued_work: true,
+            },
         )
         .await
         .unwrap();
@@ -1370,12 +2103,20 @@ mod tests {
             }],
         };
         let session = SessionHandle::create(
-            SessionId::from("rig-compaction"),
-            context.clone(),
-            "test",
-            Arc::new(TestProfiles),
-            store.clone(),
-            model,
+            CreateSession {
+                session_id: SessionId::from("rig-compaction"),
+                metadata: artist_core::SessionMetadata::root(0, None),
+                context: context.clone(),
+                initial_profile: Some("test".into()),
+            },
+            SessionDependencies {
+                store: store.clone(),
+                model,
+                profiles: Some(Arc::new(TestProfiles)),
+                slash_commands: None,
+                extensions: no_extensions(),
+                resume_queued_work: true,
+            },
         )
         .await
         .unwrap();

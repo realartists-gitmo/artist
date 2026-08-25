@@ -58,7 +58,7 @@ as `rust.rs~symbols/`; shells start in the projected `file` subtree and receive 
 mount root as `ARTIST_ROOT`. Native filesystem attributes exist only to satisfy
 the platform driver.
 
-The component ABI is `artist:plugin@0.7.0`. Tool providers, resource providers,
+The component ABI is `artist:plugin@0.8.0`. Tool providers, resource providers,
 and harness-facing slash-command providers are separate exports; prompt,
 context, hooks, model configuration, and event lifecycle exports remain intact.
 Slash command registration is globally unique and deliberately bypasses model

@@ -45,3 +45,7 @@ id!(EventId);
 id!(CallId);
 id!(PluginId);
 id!(SlashCommandId);
+id!(CorrelationId);
+id!(AccountId);
+id!(CredentialId);
+id!(EventSchemaId);

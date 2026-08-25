@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use artist_core::ContentPart;
+
 use crate::ResourceUri;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -161,6 +163,9 @@ impl ResourceRequest {
 pub enum ResourceReply {
     Text {
         text: String,
+    },
+    Content {
+        content: Vec<ContentPart>,
     },
     Children {
         children: Vec<ResourceUri>,

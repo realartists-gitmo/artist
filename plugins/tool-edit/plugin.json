@@ -1,5 +1,5 @@
 {
-  "format": 2,
+  "format": 3,
   "id": "artist.tool.edit",
   "build": {"adapter": "cargo", "package": "artist-tool-edit"},
   "component": "artist_tool_edit.wasm"

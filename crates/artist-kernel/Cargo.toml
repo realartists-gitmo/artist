@@ -11,6 +11,7 @@ artist-store = { path = "../artist-store" }
 async-trait.workspace = true
 async-stream.workspace = true
 futures.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

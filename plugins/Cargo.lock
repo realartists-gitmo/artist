@@ -79,6 +79,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "artist-notes"
+version = "0.1.0"
+dependencies = [
+ "artist-plugin-sdk",
+ "schemars",
+ "serde",
+]
+
+[[package]]
 name = "artist-plugin-sdk"
 version = "0.1.0"
 dependencies = [

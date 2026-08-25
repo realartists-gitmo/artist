@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use artist_core::{
-    CallId, CompletionCallMetadata, ContentPart, InterruptionCause, ModelFailure, RunId, SessionId,
-    StreamEvent, StreamEventKind, TokenUsage,
+    CallId, CompletionCallMetadata, ContentPart, InterruptionCause, ModelFailure, PluginEvent,
+    PluginEventSchema, RunId, SessionId, StreamEvent, StreamEventKind, TokenUsage, ToolProgress,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
@@ -56,10 +56,19 @@ pub enum ObservationKind {
         name: String,
         content: Vec<ContentPart>,
     },
+    ToolProgress {
+        progress: ToolProgress,
+    },
     ContextCompacted {
         evicted_count: usize,
         evicted_bytes: usize,
         summary_bytes: usize,
+    },
+    PluginEventSchemaRegistered {
+        schema: PluginEventSchema,
+    },
+    PluginEvent {
+        event: PluginEvent,
     },
 }
 
@@ -167,6 +176,9 @@ impl<S: ObservationSink> Observer<S> {
                     arguments: arguments.clone(),
                 })
             }
+            StreamEventKind::ToolProgress { progress } => Some(ObservationKind::ToolProgress {
+                progress: progress.clone(),
+            }),
             StreamEventKind::ToolResult { call_id, content } => self
                 .executed_tools
                 .remove(call_id)
@@ -175,6 +187,14 @@ impl<S: ObservationSink> Observer<S> {
                     name,
                     content: content.clone(),
                 }),
+            StreamEventKind::PluginEventSchemaRegistered { schema } => {
+                Some(ObservationKind::PluginEventSchemaRegistered {
+                    schema: schema.clone(),
+                })
+            }
+            StreamEventKind::PluginEvent { plugin_event } => Some(ObservationKind::PluginEvent {
+                event: plugin_event.clone(),
+            }),
             StreamEventKind::ContextCompacted {
                 evicted_count,
                 evicted_bytes,

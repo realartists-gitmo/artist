@@ -10,6 +10,7 @@ rust-version = "1.89"
 [workspace.dependencies]
 async-stream = "0.3.6"
 async-trait = "0.1.89"
+base64 = "0.22.1"
 fff-search = "=0.10.5"
 fuser = { version = "0.17", default-features = false }
 fs2 = "0.4.3"

@@ -1,14 +1,16 @@
 use std::{
     collections::{HashMap, VecDeque},
     pin::Pin,
-    sync::{Arc, Mutex as SyncMutex, RwLock},
+    sync::{Arc, Mutex as SyncMutex},
 };
 
 use artist_core::{
-    CallId, CompletionCallMetadata, ContentPart, FailureClass, MessageId, ModelFailure, ModelRoute,
-    ProfileSnapshot, RunId, SessionId, Source, TokenUsage, ToolControl,
+    CallId, CompletionCallMetadata, ContentPart, CorrelationId, FailureClass, InvocationScope,
+    MessageId, ModelFailure, ModelRoute, ProfileSnapshot, ProjectionArtifact, RunId, SessionId,
+    Source, TokenUsage, ToolControl, ToolProgress,
 };
 use futures::{Stream, StreamExt};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
 
@@ -18,33 +20,61 @@ pub trait StreamingModel: Send + Sync + 'static {
     fn stream(&self, request: ModelRequest, steering: Steering) -> ModelStream;
 }
 
-/// Resolves a profile's ordered model routes to already-constructed model
-/// adapters and retries a failed, side-effect-free attempt on the next route.
+#[async_trait::async_trait]
+pub trait ModelProviderSource: Send + Sync + 'static {
+    async fn resolve(
+        &self,
+        route: &ModelRoute,
+        session_id: &SessionId,
+        profile_epoch: Option<u64>,
+    ) -> Result<Arc<dyn StreamingModel>, String>;
+}
+
+pub struct CompositeModelProviders {
+    sources: Vec<Arc<dyn ModelProviderSource>>,
+}
+
+impl CompositeModelProviders {
+    pub fn new(sources: Vec<Arc<dyn ModelProviderSource>>) -> Result<Self, String> {
+        if sources.is_empty() {
+            return Err("at least one model provider source is required".into());
+        }
+        Ok(Self { sources })
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProviderSource for CompositeModelProviders {
+    async fn resolve(
+        &self,
+        route: &ModelRoute,
+        session_id: &SessionId,
+        profile_epoch: Option<u64>,
+    ) -> Result<Arc<dyn StreamingModel>, String> {
+        let mut errors = Vec::new();
+        for source in &self.sources {
+            match source.resolve(route, session_id, profile_epoch).await {
+                Ok(model) => return Ok(model),
+                Err(error) => errors.push(error),
+            }
+        }
+        Err(errors.join("; "))
+    }
+}
+
+/// Resolves a profile's ordered routes through the installed provider registry
+/// and retries a failed, side-effect-free attempt on the next route.
 pub struct ProfileModelRouter {
-    default: Arc<dyn StreamingModel>,
-    routes: RwLock<HashMap<(String, String), Arc<dyn StreamingModel>>>,
+    providers: Arc<dyn ModelProviderSource>,
     sticky: Arc<SyncMutex<HashMap<(SessionId, u64), usize>>>,
 }
 
 impl ProfileModelRouter {
-    pub fn new(default: Arc<dyn StreamingModel>) -> Self {
+    pub fn new(providers: Arc<dyn ModelProviderSource>) -> Self {
         Self {
-            default,
-            routes: RwLock::new(HashMap::new()),
+            providers,
             sticky: Arc::new(SyncMutex::new(HashMap::new())),
         }
-    }
-
-    pub fn register(
-        &self,
-        provider: impl Into<String>,
-        model: impl Into<String>,
-        implementation: Arc<dyn StreamingModel>,
-    ) {
-        self.routes
-            .write()
-            .expect("model route lock poisoned")
-            .insert((provider.into(), model.into()), implementation);
     }
 }
 
@@ -55,22 +85,17 @@ impl StreamingModel for ProfileModelRouter {
             .as_ref()
             .map(|profile| profile.models.clone())
             .unwrap_or_default();
-        let routes = self.routes.read().expect("model route lock poisoned");
-        let candidates = if configured.is_empty() {
-            vec![(None, Some(self.default.clone()))]
-        } else {
-            configured
-                .into_iter()
-                .map(|route| {
-                    let implementation = routes
-                        .get(&(route.provider.clone(), route.model.clone()))
-                        .cloned();
-                    (Some(route), implementation)
-                })
-                .collect::<Vec<_>>()
-        };
-        drop(routes);
+        let candidates = configured;
+        let providers = self.providers.clone();
         let sticky = self.sticky.clone();
+        let extensions = request.extensions.clone();
+        let scope = InvocationScope {
+            session_id: request.session_id.clone(),
+            run_id: Some(request.run_id.clone()),
+            call_id: None,
+            correlation_id: CorrelationId::new(format!("{}:model", request.run_id)),
+            parent_correlation_id: None,
+        };
         let key = request
             .profile_epoch
             .map(|epoch| (request.session_id.clone(), epoch));
@@ -87,16 +112,49 @@ impl StreamingModel for ProfileModelRouter {
             .min(candidates.len().saturating_sub(1));
 
         Box::pin(async_stream::stream! {
+            if candidates.is_empty() {
+                yield Err(ModelError::new("the active profile has no model routes"));
+                return;
+            }
             let mut failures = Vec::new();
             for index in start..candidates.len() {
-                let (route, implementation) = &candidates[index];
-                let Some(implementation) = implementation else {
-                    let route = route.as_ref().expect("default route always has an implementation");
-                    failures.push(format!("{}/{} is not registered", route.provider, route.model));
-                    continue;
+                let route = &candidates[index];
+                let configured = match extensions.configure_model(&scope, route.clone()).await {
+                    Ok(configured) => configured,
+                    Err(error) => {
+                        yield Err(ModelError::new(error.to_string()));
+                        return;
+                    }
+                };
+                if configured.provider != route.provider
+                    || configured.account != route.account
+                    || configured.api_variant != route.api_variant
+                    || configured.model != route.model
+                {
+                    yield Err(ModelError::new(
+                        "model configuration extensions may change parameters/reasoning but not provider, account, API variant, or model",
+                    ));
+                    return;
+                }
+                let implementation = match providers
+                    .resolve(
+                        &configured,
+                        &request.session_id,
+                        request.profile_epoch,
+                    )
+                    .await
+                {
+                    Ok(implementation) => implementation,
+                    Err(error) => {
+                        failures.push(format!(
+                            "{}/{} resolution failed: {error}",
+                            configured.provider, configured.model
+                        ));
+                        continue;
+                    }
                 };
                 let mut attempt = request.clone();
-                attempt.selected_model = route.clone();
+                attempt.selected_model = Some(configured);
                 let mut stream = implementation.stream(attempt, steering.clone());
                 let mut visible = false;
                 let mut tool_activity = false;
@@ -153,29 +211,31 @@ impl StreamingModel for ProfileModelRouter {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct ModelRequest {
     pub session_id: SessionId,
     pub run_id: RunId,
     pub context: String,
-    pub prompt: String,
+    pub prompt: Vec<ContentPart>,
     pub history: Vec<ModelHistoryItem>,
     pub profile: Option<Arc<ProfileSnapshot>>,
     pub profile_epoch: Option<u64>,
     pub selected_model: Option<ModelRoute>,
+    pub extensions: Arc<dyn crate::ExecutionExtensions>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModelHistoryItem {
     pub sequence: u64,
     pub message: ModelMessage,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ModelMessage {
-    User(String),
+    User(Vec<ContentPart>),
     Assistant(Vec<ContentPart>),
-    Notification(String),
+    Notification(Vec<ContentPart>),
     ToolCall {
         call_id: CallId,
         name: String,
@@ -187,7 +247,8 @@ pub enum ModelMessage {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
 pub enum ModelEvent {
     TextDelta(String),
     TextReset,
@@ -209,12 +270,13 @@ pub enum ModelEvent {
         call_id: CallId,
         content: Vec<ContentPart>,
     },
+    ToolProgress(ToolProgress),
     Content(ContentPart),
     ContextCompacted {
         through_sequence: u64,
         evicted_count: usize,
         evicted_bytes: usize,
-        artifact: String,
+        artifact: ProjectionArtifact,
     },
     Usage(TokenUsage),
     CompletionMetadata(Vec<CompletionCallMetadata>),
@@ -260,7 +322,7 @@ impl From<&str> for ModelError {
 pub struct SteeringNotice {
     pub message_id: MessageId,
     pub source: Source,
-    pub content: String,
+    pub content: Vec<ContentPart>,
 }
 
 /// A gentle notification inbox shared with the active model loop.
@@ -346,6 +408,33 @@ mod tests {
         }
     }
 
+    struct TestProviders(HashMap<(String, String), Arc<dyn StreamingModel>>);
+
+    #[async_trait::async_trait]
+    impl ModelProviderSource for TestProviders {
+        async fn resolve(
+            &self,
+            route: &ModelRoute,
+            _session_id: &SessionId,
+            _profile_epoch: Option<u64>,
+        ) -> Result<Arc<dyn StreamingModel>, String> {
+            self.0
+                .get(&(route.provider.clone(), route.model.clone()))
+                .cloned()
+                .ok_or_else(|| format!("unregistered {}/{}", route.provider, route.model))
+        }
+    }
+
+    fn router(
+        primary: Arc<dyn StreamingModel>,
+        fallback: Arc<dyn StreamingModel>,
+    ) -> ProfileModelRouter {
+        ProfileModelRouter::new(Arc::new(TestProviders(HashMap::from([
+            (("provider".into(), "primary".into()), primary),
+            (("provider".into(), "fallback".into()), fallback),
+        ]))))
+    }
+
     impl StreamingModel for ScriptModel {
         fn stream(&self, request: ModelRequest, _: Steering) -> ModelStream {
             self.calls.fetch_add(1, Ordering::AcqRel);
@@ -361,7 +450,7 @@ mod tests {
             session_id: SessionId::from("session"),
             run_id: RunId::from("run"),
             context: String::new(),
-            prompt: "work".into(),
+            prompt: vec![ContentPart::text("work")],
             history: Vec::new(),
             profile: Some(Arc::new(ProfileSnapshot {
                 name: "worker".into(),
@@ -371,12 +460,18 @@ mod tests {
                 models: vec![
                     ModelRoute {
                         provider: "provider".into(),
+                        account: None,
+                        api_variant: None,
                         model: "primary".into(),
+                        reasoning: None,
                         parameters: serde_json::json!({"temperature": 0}),
                     },
                     ModelRoute {
                         provider: "provider".into(),
+                        account: None,
+                        api_variant: None,
                         model: "fallback".into(),
+                        reasoning: None,
                         parameters: serde_json::json!({"temperature": 1}),
                     },
                 ],
@@ -384,12 +479,12 @@ mod tests {
             })),
             profile_epoch: Some(4),
             selected_model: None,
+            extensions: crate::no_extensions(),
         }
     }
 
     #[tokio::test]
     async fn fallback_resets_partial_text_and_sticks_to_the_working_route() {
-        let default = Arc::new(ScriptModel::new([]));
         let primary = Arc::new(ScriptModel::new([vec![
             Ok(ModelEvent::TextDelta("discard me".into())),
             Err(ModelError::new("primary failed")),
@@ -403,9 +498,7 @@ mod tests {
                 output: Some("sticky".into()),
             })],
         ]));
-        let router = ProfileModelRouter::new(default);
-        router.register("provider", "primary", primary.clone());
-        router.register("provider", "fallback", fallback.clone());
+        let router = router(primary.clone(), fallback.clone());
 
         let first = router
             .stream(routed_request(), Steering::empty())
@@ -431,7 +524,6 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_never_retries_after_tool_activity() {
-        let default = Arc::new(ScriptModel::new([]));
         let primary = Arc::new(ScriptModel::new([vec![
             Ok(ModelEvent::ToolCall {
                 call_id: CallId::from("call"),
@@ -443,9 +535,7 @@ mod tests {
         let fallback = Arc::new(ScriptModel::new([vec![Ok(ModelEvent::Finished {
             output: None,
         })]]));
-        let router = ProfileModelRouter::new(default);
-        router.register("provider", "primary", primary);
-        router.register("provider", "fallback", fallback.clone());
+        let router = router(primary, fallback.clone());
         let events = router
             .stream(routed_request(), Steering::empty())
             .collect::<Vec<_>>()

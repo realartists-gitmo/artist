@@ -12,14 +12,17 @@ access. Deployments that need a boundary must provide it outside Artist.
 - `artist-store`: in-memory and JSONL session stores behind one narrow trait
 - `artist-kernel`: the single-owner session actor, streaming state machine, and transcript projection
 - `artist-rig`: thin Rig streaming adapter and `rig-memory` policies
-- `artist-resource`: canonical URI tree, deterministic routing, platform mount adapters, and FFF search
-- `artist-plugin`: versioned WIT component host and ordered capability chains
+- `artist-resource`: canonical URI tree, deterministic routing, platform mount adapters, FFF search, durable scoped storage (`store:///`), content-addressed blobs with roots+leases+GC
+- `artist-plugin`: versioned WIT component host and ordered capability chains; per-session plugin-event sinks commit emissions durably before the emitter is released
+- `artist-provider`: provider/account contracts, credential boundaries, provider-private state, and the reusable driver conformance battery (`artist_provider::conformance`)
+- `artist-runtime`: host-managed session registry (create/resume/steer/replay/cancel), explicit attachment + recovery policies, idempotent creates, graceful shutdown; production sessions resolve models through a `ModelProviderSource` via `SessionRuntime::from_provider_source`
 - `artist-observe`: backend-neutral observations projected from public stream events
 - `plugins/{prompt,context,hooks,model,events}`: one lifecycle capability per WASM component
 - `plugins/file-{read,children,write,edit,move}`: one `file:///**` operation per WASM component
 - `plugins/profiles-{read,children}`: one `profiles:///**` operation per WASM component
 - `plugins/plugins-{read,children,write,edit,move,signal}`: one `plugins:///**` package operation per WASM component
 - `plugins/tool-{read,find,grep,write,edit,move,run,signal,poll,yield,handoff}`: one model-facing tool per WASM component
+- `plugins/notes`: reference domain plugin — persists state through `store:///global/...` (no `provider-state`) and emits a generic durable `artist.notes.added` event
 - `plugins/sdk`: shared WIT boilerplate; this library is not a plugin component
 
 The canonical transcript is the memory boundary. The kernel projects it into Rig messages for every request instead of letting Rig keep a second conversation log. This is intentional: Rig's automatic memory append only sees successful turns, while Artist must also preserve partial output and typed interruptions. `rig-memory` policies shape the projection without rewriting the transcript. The permanent record and physical-log contracts are specified in [`TRANSCRIPT_V1.md`](TRANSCRIPT_V1.md).
@@ -78,7 +81,7 @@ OPENAI_API_KEY=... cargo run -p artist-rig --example openai -- <streaming-model-
 - With locked Rig 0.42, `AgentRunner` stream errors are terminal; Artist
   preserves partial output and closes the run instead of expecting a later
   recovery item from that stream.
-- The plugin ABI is `artist:plugin@0.7.0` in `wit/plugin.wit`; tool, resource,
+- The plugin ABI is `artist:plugin@0.8.0` in `wit/plugin.wit`; tool, resource,
   and slash-command providers are separate interoperable contracts. Slash
   commands have globally unique names, receive raw trailing arguments, return
   harness-facing output plus typed kernel actions, and are never profile-gated.

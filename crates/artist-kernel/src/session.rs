@@ -5,9 +5,10 @@ use std::{
 };
 
 use artist_core::{
-    CallId, Command, EventId, InitialContext, InterruptionCause, MessageId, ProfileSnapshot, RunId,
-    RunOutcome, SessionId, SessionRecord, SlashCommandAction, SlashCommandId, SlashCommandResult,
-    Source, StreamEvent, StreamEventKind, ToolControl, TranscriptEntryKind,
+    CallId, Command, ContentPart, CorrelationId, EventId, InitialContext, InterruptionCause,
+    InvocationScope, MessageId, PluginFact, ProfileSnapshot, RunId, RunOutcome, SessionId,
+    SessionMetadata, SessionRecord, SlashCommandAction, SlashCommandId, SlashCommandResult, Source,
+    StreamEvent, StreamEventKind, ToolControl, TranscriptEntryKind,
 };
 use artist_store::{SessionStore, StoreError};
 use async_trait::async_trait;
@@ -16,8 +17,9 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::{
-    ModelError, ModelEvent, ModelRequest, ModelStream, Steering, SteeringNotice, StreamingModel,
-    project,
+    ExecutionExtensionError, ExecutionExtensions, FactDrain, FactEnvelope, HookPhase,
+    LifecycleHookDecision, LifecycleHookEvent, ModelError, ModelEvent, ModelRequest, ModelStream,
+    Steering, SteeringNotice, StreamingModel, fact_channel, no_extensions, project,
 };
 
 const CHANNEL_CAPACITY: usize = 64;
@@ -42,6 +44,42 @@ pub enum SessionError {
     Profile(String),
     #[error("slash command failed: {0}")]
     SlashCommand(String),
+    #[error(transparent)]
+    Extension(#[from] ExecutionExtensionError),
+    #[error("invalid initial context: {0}")]
+    InvalidContext(String),
+    #[error("lineage parent session does not exist: {0}")]
+    MissingParent(SessionId),
+}
+
+#[derive(Clone)]
+pub struct SessionDependencies {
+    pub store: Arc<dyn SessionStore>,
+    pub model: Arc<dyn StreamingModel>,
+    pub profiles: Option<Arc<dyn ProfileSource>>,
+    pub slash_commands: Option<Arc<dyn SlashCommandSource>>,
+    pub extensions: Arc<dyn ExecutionExtensions>,
+    pub resume_queued_work: bool,
+}
+
+impl SessionDependencies {
+    pub fn new(store: Arc<dyn SessionStore>, model: Arc<dyn StreamingModel>) -> Self {
+        Self {
+            store,
+            model,
+            profiles: None,
+            slash_commands: None,
+            extensions: no_extensions(),
+            resume_queued_work: true,
+        }
+    }
+}
+
+pub struct CreateSession {
+    pub session_id: SessionId,
+    pub metadata: SessionMetadata,
+    pub context: InitialContext,
+    pub initial_profile: Option<String>,
 }
 
 #[derive(Clone)]
@@ -58,66 +96,16 @@ impl SessionHandle {
         store: Arc<dyn SessionStore>,
         model: Arc<dyn StreamingModel>,
     ) -> Result<Self, SessionError> {
-        let record = SessionRecord::new(session_id, context);
-        store.create(record.clone()).await?;
-        Ok(Self::spawn(record, store, model, None, None))
-    }
-
-    pub async fn create(
-        session_id: SessionId,
-        context: InitialContext,
-        initial_profile: &str,
-        profiles: Arc<dyn ProfileSource>,
-        store: Arc<dyn SessionStore>,
-        model: Arc<dyn StreamingModel>,
-    ) -> Result<Self, SessionError> {
-        let profile = profiles
-            .load(initial_profile)
-            .await
-            .map_err(SessionError::Profile)?;
-        let mut record = SessionRecord::new(session_id, context);
-        let activation = record.entry(TranscriptEntryKind::ProfileActivated {
-            profile,
-            brief: None,
-            steering_message_ids: Vec::new(),
-        });
-        record
-            .append(activation)
-            .expect("initial profile activation is valid");
-        store.create(record.clone()).await?;
-        Ok(Self::spawn(record, store, model, Some(profiles), None))
-    }
-
-    pub async fn create_with_commands(
-        session_id: SessionId,
-        context: InitialContext,
-        initial_profile: &str,
-        profiles: Arc<dyn ProfileSource>,
-        slash_commands: Arc<dyn SlashCommandSource>,
-        store: Arc<dyn SessionStore>,
-        model: Arc<dyn StreamingModel>,
-    ) -> Result<Self, SessionError> {
-        let profile = profiles
-            .load(initial_profile)
-            .await
-            .map_err(SessionError::Profile)?;
-        let mut record = SessionRecord::new(session_id, context);
-        let activation = record.entry(TranscriptEntryKind::ProfileActivated {
-            profile,
-            brief: None,
-            steering_message_ids: Vec::new(),
-        });
-        record
-            .append(activation)
-            .expect("initial profile activation is valid");
-        store.create(record.clone()).await?;
-        Ok(Self::spawn(
-            record,
-            store,
-            model,
-            Some(profiles),
-            Some(slash_commands),
-        ))
+        Self::create(
+            CreateSession {
+                session_id,
+                metadata: SessionMetadata::root(0, None),
+                context,
+                initial_profile: None,
+            },
+            SessionDependencies::new(store, model),
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -126,43 +114,57 @@ impl SessionHandle {
         store: Arc<dyn SessionStore>,
         model: Arc<dyn StreamingModel>,
     ) -> Result<Self, SessionError> {
-        Self::resume_inner(session_id, store, model, None, None).await
+        Self::resume(session_id, SessionDependencies::new(store, model)).await
+    }
+
+    pub async fn create(
+        request: CreateSession,
+        dependencies: SessionDependencies,
+    ) -> Result<Self, SessionError> {
+        let context = dependencies
+            .extensions
+            .compose_initial_context(request.context)
+            .await?;
+        // Composed prompt fragments are validated once, before the canonical
+        // record exists; malformed or oversized output never becomes durable.
+        context.validate().map_err(SessionError::InvalidContext)?;
+        // Creation lineage is validated at the kernel/store boundary: a child
+        // session can never be created without a resolvable parent record.
+        if let Some(lineage) = &request.metadata.lineage {
+            dependencies
+                .store
+                .load(&lineage.parent_session_id)
+                .await
+                .map_err(|_| SessionError::MissingParent(lineage.parent_session_id.clone()))?;
+        }
+        let mut record =
+            SessionRecord::new_with_metadata(request.session_id, request.metadata, context);
+        if let Some(initial_profile) = request.initial_profile.as_deref() {
+            let profiles = dependencies.profiles.as_ref().ok_or_else(|| {
+                SessionError::Profile("initial profile requires a profile source".into())
+            })?;
+            let profile = profiles
+                .load(initial_profile)
+                .await
+                .map_err(SessionError::Profile)?;
+            let activation = record.entry(TranscriptEntryKind::ProfileActivated {
+                profile,
+                brief: None,
+                steering_message_ids: Vec::new(),
+            });
+            record
+                .append(activation)
+                .expect("initial profile activation is valid");
+        }
+        dependencies.store.create(record.clone()).await?;
+        Ok(Self::spawn(record, dependencies))
     }
 
     pub async fn resume(
         session_id: &SessionId,
-        store: Arc<dyn SessionStore>,
-        model: Arc<dyn StreamingModel>,
-        profiles: Arc<dyn ProfileSource>,
+        dependencies: SessionDependencies,
     ) -> Result<Self, SessionError> {
-        Self::resume_inner(session_id, store, model, Some(profiles), None).await
-    }
-
-    pub async fn resume_with_commands(
-        session_id: &SessionId,
-        store: Arc<dyn SessionStore>,
-        model: Arc<dyn StreamingModel>,
-        profiles: Arc<dyn ProfileSource>,
-        slash_commands: Arc<dyn SlashCommandSource>,
-    ) -> Result<Self, SessionError> {
-        Self::resume_inner(
-            session_id,
-            store,
-            model,
-            Some(profiles),
-            Some(slash_commands),
-        )
-        .await
-    }
-
-    async fn resume_inner(
-        session_id: &SessionId,
-        store: Arc<dyn SessionStore>,
-        model: Arc<dyn StreamingModel>,
-        profiles: Option<Arc<dyn ProfileSource>>,
-        slash_commands: Option<Arc<dyn SlashCommandSource>>,
-    ) -> Result<Self, SessionError> {
-        let mut record = store.load(session_id).await?;
+        let mut record = dependencies.store.load(session_id).await?;
         if let Some(run_id) = record.active_run().cloned() {
             let existing_message = record.active_message_id().cloned();
             let message_id = existing_message.clone().unwrap_or_else(|| {
@@ -190,28 +192,23 @@ impl SessionHandle {
                 },
             });
             let entries = record.entries_for(kinds);
-            store
+            dependencies
+                .store
                 .append(session_id, record.next_sequence(), &entries)
                 .await?;
             record
                 .append_batch(&entries)
                 .expect("resume reconciliation is valid");
         }
-        if profiles.is_some() && record.current_profile().is_none() {
+        if dependencies.profiles.is_some() && record.current_profile().is_none() {
             return Err(SessionError::Profile(
                 "cannot profiled-resume a session without a profile activation".into(),
             ));
         }
-        Ok(Self::spawn(record, store, model, profiles, slash_commands))
+        Ok(Self::spawn(record, dependencies))
     }
 
-    fn spawn(
-        record: SessionRecord,
-        store: Arc<dyn SessionStore>,
-        model: Arc<dyn StreamingModel>,
-        profiles: Option<Arc<dyn ProfileSource>>,
-        slash_commands: Option<Arc<dyn SlashCommandSource>>,
-    ) -> Self {
+    fn spawn(record: SessionRecord, dependencies: SessionDependencies) -> Self {
         let (command_tx, command_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (event_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let handle = Self {
@@ -219,17 +216,9 @@ impl SessionHandle {
             events: event_tx.clone(),
         };
         tokio::spawn(async move {
-            Session::new(
-                record,
-                store,
-                model,
-                profiles,
-                slash_commands,
-                command_rx,
-                event_tx,
-            )
-            .run()
-            .await;
+            Session::new(record, dependencies, command_rx, event_tx)
+                .run()
+                .await;
         });
         handle
     }
@@ -243,11 +232,16 @@ impl SessionHandle {
         source: Source,
         content: impl Into<String>,
     ) -> Result<(), SessionError> {
-        self.send(Command::Input {
-            source,
-            content: content.into(),
-        })
-        .await
+        self.input_content(source, vec![ContentPart::text(content)])
+            .await
+    }
+
+    pub async fn input_content(
+        &self,
+        source: Source,
+        content: Vec<ContentPart>,
+    ) -> Result<(), SessionError> {
+        self.send(Command::Input { source, content }).await
     }
 
     pub async fn steer(
@@ -255,11 +249,16 @@ impl SessionHandle {
         source: Source,
         content: impl Into<String>,
     ) -> Result<(), SessionError> {
-        self.send(Command::Steer {
-            source,
-            content: content.into(),
-        })
-        .await
+        self.steer_content(source, vec![ContentPart::text(content)])
+            .await
+    }
+
+    pub async fn steer_content(
+        &self,
+        source: Source,
+        content: Vec<ContentPart>,
+    ) -> Result<(), SessionError> {
+        self.send(Command::Steer { source, content }).await
     }
 
     pub async fn abort(&self, cause: InterruptionCause) -> Result<(), SessionError> {
@@ -303,7 +302,7 @@ struct Envelope {
 
 struct PendingInput {
     message_id: MessageId,
-    content: String,
+    content: Vec<ContentPart>,
 }
 
 struct ActiveRun {
@@ -321,22 +320,27 @@ struct Session {
     model: Arc<dyn StreamingModel>,
     profiles: Option<Arc<dyn ProfileSource>>,
     slash_commands: Option<Arc<dyn SlashCommandSource>>,
+    extensions: Arc<dyn ExecutionExtensions>,
     commands: mpsc::Receiver<Envelope>,
     events: broadcast::Sender<StreamEvent>,
     event_sequence: u64,
     inputs: VecDeque<PendingInput>,
     steering: Steering,
     delivered: mpsc::UnboundedReceiver<Vec<MessageId>>,
+    facts: Option<FactDrain>,
     active: Option<ActiveRun>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.extensions.unbind_fact_sink(self.record.session_id());
+    }
 }
 
 impl Session {
     fn new(
         record: SessionRecord,
-        store: Arc<dyn SessionStore>,
-        model: Arc<dyn StreamingModel>,
-        profiles: Option<Arc<dyn ProfileSource>>,
-        slash_commands: Option<Arc<dyn SlashCommandSource>>,
+        dependencies: SessionDependencies,
         commands: mpsc::Receiver<Envelope>,
         events: broadcast::Sender<StreamEvent>,
     ) -> Self {
@@ -390,6 +394,7 @@ impl Session {
                 }
                 _ => None,
             })
+            .filter(|_| dependencies.resume_queued_work)
             .collect();
         let queued_steering = record
             .entries()
@@ -406,20 +411,27 @@ impl Session {
                 }),
                 _ => None,
             })
+            .filter(|_| dependencies.resume_queued_work)
             .collect();
         let (steering, delivered) = Steering::channel_with(queued_steering);
+        let (fact_sink, fact_drain) = fact_channel();
+        dependencies
+            .extensions
+            .bind_fact_sink(record.session_id(), fact_sink);
         Self {
             record,
-            store,
-            model,
-            profiles,
-            slash_commands,
+            store: dependencies.store,
+            model: dependencies.model,
+            profiles: dependencies.profiles,
+            slash_commands: dependencies.slash_commands,
+            extensions: dependencies.extensions,
             commands,
             events,
             event_sequence: 0,
             inputs,
             steering,
             delivered,
+            facts: Some(fact_drain),
             active: None,
         }
     }
@@ -443,14 +455,22 @@ impl Session {
             enum Wake {
                 Command(Option<Envelope>),
                 Delivered(Option<Vec<MessageId>>),
+                Fact(Option<FactEnvelope>),
                 Model(Option<Result<ModelEvent, ModelError>>),
             }
 
             let wake = {
                 let active = self.active.as_mut().expect("checked above");
+                let facts = &mut self.facts;
                 tokio::select! {
                     command = self.commands.recv() => Wake::Command(command),
                     delivered = self.delivered.recv() => Wake::Delivered(delivered),
+                    fact = async {
+                        match facts.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => Wake::Fact(fact),
                     event = active.stream.next() => Wake::Model(event),
                 }
             };
@@ -464,6 +484,15 @@ impl Session {
                     }
                 }
                 Wake::Delivered(None) => return,
+                Wake::Fact(Some(envelope)) => {
+                    if self.commit_facts(envelope).await.is_err() {
+                        return;
+                    }
+                }
+                Wake::Fact(None) => {
+                    // Every sender dropped; stop selecting on a closed channel.
+                    self.facts = None;
+                }
                 Wake::Model(Some(Ok(event))) => {
                     if self.flush_delivered().await.is_err()
                         || self.model_event(event).await.is_err()
@@ -645,13 +674,7 @@ impl Session {
             .iter()
             .map(|notice| notice.message_id.clone())
             .collect::<Vec<_>>();
-        let combined_brief = brief
-            .as_deref()
-            .into_iter()
-            .chain(steering.iter().map(|notice| notice.content.as_str()))
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let combined_brief = combine_brief(brief.as_deref(), &steering);
         let superseded = self
             .inputs
             .drain(..)
@@ -694,18 +717,13 @@ impl Session {
             self.record.session_id(),
             self.record.next_sequence()
         ));
-        self.append(vec![TranscriptEntryKind::RunStarted {
-            run_id: run_id.clone(),
-            input_id: input.message_id,
-        }])
-        .await?;
         let (context, mut history) = project(&self.record);
         if matches!(history.last(), Some(crate::ModelHistoryItem { message: crate::ModelMessage::User(content), .. }) if content == &input.content)
         {
             history.pop();
         }
         let messages_in = history.len() + 1;
-        let request = ModelRequest {
+        let mut request = ModelRequest {
             session_id: self.record.session_id().clone(),
             run_id: run_id.clone(),
             context,
@@ -714,7 +732,126 @@ impl Session {
             profile: self.record.current_profile().cloned().map(Arc::new),
             profile_epoch: self.record.current_profile_epoch(),
             selected_model: None,
+            extensions: self.extensions.clone(),
         };
+        let scope = InvocationScope {
+            session_id: self.record.session_id().clone(),
+            run_id: Some(run_id.clone()),
+            call_id: None,
+            correlation_id: CorrelationId::new(format!("{run_id}:request")),
+            parent_correlation_id: None,
+        };
+        let preparation = self.extensions.prepare_model_request(&mut request).await;
+        let hook = if preparation.is_ok() {
+            self.extensions
+                .hook(LifecycleHookEvent {
+                    phase: HookPhase::BeforeModelRequest,
+                    scope,
+                    payload: serde_json::json!({
+                        "context": request.context,
+                        "prompt": request.prompt,
+                        "history_items": request.history.len(),
+                    }),
+                })
+                .await
+        } else {
+            Ok(Vec::new())
+        };
+        let mut rejection = preparation.err().map(|error| error.to_string());
+        if rejection.is_none() {
+            match hook {
+                Err(error) => rejection = Some(error.to_string()),
+                Ok(decisions) => {
+                    for decision in decisions {
+                        match decision {
+                            LifecycleHookDecision::Proceed => {}
+                            LifecycleHookDecision::Stop { reason } => {
+                                rejection = Some(reason);
+                                break;
+                            }
+                            LifecycleHookDecision::Rewrite { value } => {
+                                let Some(object) = value.as_object() else {
+                                    rejection = Some(
+                                        "before-model-request rewrite must be a JSON object".into(),
+                                    );
+                                    break;
+                                };
+                                if object.keys().any(|key| key != "context" && key != "prompt") {
+                                    rejection = Some(
+                                        "before-model-request rewrite may change only context or prompt"
+                                            .into(),
+                                    );
+                                    break;
+                                }
+                                if let Some(context) = object.get("context") {
+                                    let Some(context) = context.as_str() else {
+                                        rejection =
+                                            Some("rewritten context must be a string".into());
+                                        break;
+                                    };
+                                    request.context = context.to_owned();
+                                }
+                                if let Some(prompt) = object.get("prompt") {
+                                    match serde_json::from_value::<Vec<ContentPart>>(prompt.clone())
+                                    {
+                                        Ok(prompt) if !prompt.is_empty() => request.prompt = prompt,
+                                        _ => {
+                                            rejection = Some(
+                                                "rewritten prompt must be non-empty ordered content"
+                                                    .into(),
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(error) = rejection {
+            self.append(vec![
+                TranscriptEntryKind::RunStarted {
+                    run_id: run_id.clone(),
+                    input_id: input.message_id,
+                },
+                TranscriptEntryKind::RunFinished {
+                    run_id: run_id.clone(),
+                    outcome: RunOutcome::Failed {
+                        message_id: None,
+                        error: error.clone(),
+                    },
+                },
+            ])
+            .await?;
+            self.flush_plugin_facts().await?;
+            self.emit(
+                Some(run_id.clone()),
+                StreamEventKind::RunStarted { messages_in },
+            );
+            self.emit(
+                Some(run_id),
+                StreamEventKind::Failed {
+                    failure: artist_core::ModelFailure {
+                        message: error,
+                        class: artist_core::FailureClass::InvalidRequest,
+                        retriable: false,
+                        provider_code: None,
+                        http_status: None,
+                        provider_request_id: None,
+                    },
+                },
+            );
+            return Ok(());
+        }
+
+        self.append(vec![TranscriptEntryKind::RunStarted {
+            run_id: run_id.clone(),
+            input_id: input.message_id,
+        }])
+        .await?;
+        self.flush_plugin_facts().await?;
         let stream = self.model.stream(request, self.steering.clone());
         self.active = Some(ActiveRun {
             id: run_id.clone(),
@@ -729,6 +866,7 @@ impl Session {
     }
 
     async fn model_event(&mut self, event: ModelEvent) -> Result<(), SessionError> {
+        self.flush_plugin_facts().await?;
         let run_id = self
             .active
             .as_ref()
@@ -807,11 +945,14 @@ impl Session {
                     StreamEventKind::ToolResult { call_id, content },
                 );
             }
+            ModelEvent::ToolProgress(progress) => {
+                self.emit(Some(run_id), StreamEventKind::ToolProgress { progress });
+            }
             ModelEvent::Content(part) => {
                 if matches!(
                     part,
                     artist_core::ContentPart::Reasoning { .. }
-                        | artist_core::ContentPart::Image { .. }
+                        | artist_core::ContentPart::Attachment { .. }
                 ) {
                     self.active.as_mut().unwrap().content.push(part.clone());
                 }
@@ -823,7 +964,7 @@ impl Session {
                 evicted_bytes,
                 artifact,
             } => {
-                let summary_bytes = artifact.len();
+                let summary_bytes = serde_json::to_vec(&artifact).map_or(0, |bytes| bytes.len());
                 self.append(vec![TranscriptEntryKind::Compaction {
                     through_sequence,
                     artifact,
@@ -924,11 +1065,7 @@ impl Session {
             .iter()
             .map(|notice| notice.message_id.clone())
             .collect::<Vec<_>>();
-        let combined_brief = std::iter::once(brief.as_str())
-            .chain(steering.iter().map(|notice| notice.content.as_str()))
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let combined_brief = combine_brief(Some(&brief), &steering);
         let superseded = self
             .inputs
             .drain(..)
@@ -1096,6 +1233,88 @@ impl Session {
         Ok(())
     }
 
+    async fn persist_fact(&mut self, fact: PluginFact) -> Result<(), SessionError> {
+        match fact {
+            PluginFact::SchemaRegistered { schema } => {
+                if let Some(existing) = self.record.plugin_event_schema(&schema.schema_id) {
+                    if existing != &schema {
+                        return Err(SessionError::Extension(ExecutionExtensionError::new(
+                            "plugin-event-schema",
+                            "a schema ID changed within one canonical session",
+                        )));
+                    }
+                    return Ok(());
+                }
+                self.append(vec![TranscriptEntryKind::PluginEventSchemaRegistered {
+                    schema: schema.clone(),
+                }])
+                .await?;
+                self.emit(
+                    None,
+                    StreamEventKind::PluginEventSchemaRegistered { schema },
+                );
+            }
+            PluginFact::Event { event } => {
+                let run_id = event.scope.run_id.clone();
+                self.append(vec![TranscriptEntryKind::PluginEvent {
+                    event: event.clone(),
+                }])
+                .await?;
+                self.emit(
+                    run_id,
+                    StreamEventKind::PluginEvent {
+                        plugin_event: event,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Durably append one emission batch from the bound fact sink and resolve
+    /// the emitter's receipt. The emitter's success therefore implies the
+    /// facts are canonical and their stream events are published.
+    async fn commit_facts(&mut self, envelope: FactEnvelope) -> Result<(), SessionError> {
+        let mut outcome = Ok(());
+        for fact in envelope.facts {
+            if let Err(error) = self.persist_fact(fact).await {
+                outcome = Err(error.to_string());
+                break;
+            }
+        }
+        let _ = envelope.receipt.send(outcome.clone());
+        // A failed append is a durable-store failure: the session cannot
+        // continue safely after losing canonical ordering.
+        if outcome.is_err() {
+            return Err(SessionError::Closed);
+        }
+        Ok(())
+    }
+
+    async fn flush_plugin_facts(&mut self) -> Result<(), SessionError> {
+        // Drain any synchronously committed envelopes that arrived between
+        // extension calls first; they precede anything still sitting in the
+        // legacy outbox.
+        while let Some(envelope) = self.pending_fact().await {
+            self.commit_facts(envelope).await?;
+        }
+        let facts = self
+            .extensions
+            .drain_plugin_facts(self.record.session_id())
+            .await;
+        for fact in facts {
+            self.persist_fact(fact).await?;
+        }
+        Ok(())
+    }
+
+    async fn pending_fact(&mut self) -> Option<FactEnvelope> {
+        match self.facts.as_mut() {
+            Some(rx) => rx.try_recv().ok(),
+            None => None,
+        }
+    }
+
     async fn append(&mut self, kinds: Vec<TranscriptEntryKind>) -> Result<(), SessionError> {
         let expected_sequence = self.record.next_sequence();
         let entries = self.record.entries_for(kinds);
@@ -1127,14 +1346,30 @@ impl Session {
     fn emit(&mut self, run_id: Option<RunId>, kind: StreamEventKind) {
         let sequence = self.event_sequence;
         self.event_sequence += 1;
-        let _ = self.events.send(StreamEvent {
+        let event = StreamEvent {
             event_id: EventId::new(format!("{}:stream:{sequence}", self.record.session_id())),
             session_id: self.record.session_id().clone(),
             run_id,
             sequence,
             kind,
-        });
+        };
+        let _ = self.events.send(event.clone());
+        self.extensions.observe_committed(event);
     }
+}
+
+fn combine_brief(brief: Option<&str>, steering: &[SteeringNotice]) -> Vec<ContentPart> {
+    let mut combined = Vec::new();
+    if let Some(brief) = brief.filter(|brief| !brief.is_empty()) {
+        combined.push(ContentPart::text(brief));
+    }
+    for notice in steering {
+        if !combined.is_empty() && !notice.content.is_empty() {
+            combined.push(ContentPart::text("\n\n"));
+        }
+        combined.extend(notice.content.clone());
+    }
+    combined
 }
 
 fn millis(duration: std::time::Duration) -> u64 {
@@ -1196,6 +1431,10 @@ mod tests {
         }
     }
 
+    fn text(value: &str) -> Vec<ContentPart> {
+        vec![ContentPart::text(value)]
+    }
+
     fn test_profile(name: &str, catalog: &[&str]) -> ProfileSnapshot {
         ProfileSnapshot {
             name: name.into(),
@@ -1252,6 +1491,31 @@ mod tests {
                 })
             }))
         }
+    }
+
+    async fn create_profiled(
+        id: &str,
+        profile: &str,
+        profiles: Arc<StaticProfiles>,
+        commands: Option<Arc<StaticSlashCommands>>,
+        store: Arc<MemoryStore>,
+        model: Arc<dyn StreamingModel>,
+    ) -> SessionHandle {
+        let mut dependencies = SessionDependencies::new(store, model);
+        dependencies.profiles = Some(profiles);
+        dependencies.slash_commands =
+            commands.map(|commands| commands as Arc<dyn SlashCommandSource>);
+        SessionHandle::create(
+            CreateSession {
+                session_id: SessionId::from(id),
+                metadata: SessionMetadata::root(0, Some(profile.into())),
+                context: InitialContext { fragments: vec![] },
+                initial_profile: Some(profile.into()),
+            },
+            dependencies,
+        )
+        .await
+        .unwrap()
     }
 
     async fn fixture() -> (
@@ -1313,6 +1577,245 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Deterministic fault injection at the durable append boundary: once the
+    /// failure budget is exhausted every append fails; the kernel must
+    /// surface the error and never persist a partial batch.
+    use artist_store::SessionStore as _Trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct FaultyStore {
+        inner: Arc<MemoryStore>,
+        remaining: AtomicUsize,
+    }
+    #[async_trait]
+    impl artist_store::SessionStore for FaultyStore {
+        async fn create(&self, record: SessionRecord) -> Result<(), artist_store::StoreError> {
+            if self.remaining.fetch_sub(1, Ordering::AcqRel) == 0 {
+                return Err(artist_store::StoreError::Corrupt("injected fault".into()));
+            }
+            self.inner.create(record).await
+        }
+        async fn append(
+            &self,
+            session_id: &SessionId,
+            expected_sequence: u64,
+            entries: &[artist_core::TranscriptEntry],
+        ) -> Result<u64, artist_store::StoreError> {
+            if self.remaining.fetch_sub(1, Ordering::AcqRel) == 0 {
+                return Err(artist_store::StoreError::Corrupt("injected fault".into()));
+            }
+            self.inner
+                .append(session_id, expected_sequence, entries)
+                .await
+        }
+        async fn load(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<SessionRecord, artist_store::StoreError> {
+            // Loads are reads; they keep working after the fault trips.
+            self.inner.load(session_id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_append_fault_aborts_the_run_without_partial_batches() {
+        // Budget covers create + input + run-start only.
+        let faulty = Arc::new(FaultyStore {
+            inner: Arc::new(MemoryStore::default()),
+            remaining: std::sync::atomic::AtomicUsize::new(3),
+        });
+        let healthy_inner = faulty.inner.clone();
+        let (model, control) = ControlledModel::new();
+        let dependencies = SessionDependencies {
+            store: faulty,
+            model,
+            profiles: None,
+            slash_commands: None,
+            extensions: no_extensions(),
+            resume_queued_work: true,
+        };
+        let session = SessionHandle::create(
+            CreateSession {
+                session_id: SessionId::from("session"),
+                metadata: SessionMetadata::root(0, None),
+                context: InitialContext { fragments: vec![] },
+                initial_profile: None,
+            },
+            dependencies,
+        )
+        .await
+        .unwrap();
+        session.input(Source::User, "hello").await.unwrap();
+        control
+            .send(Control::Event(ModelEvent::TextDelta("hel".into())))
+            .unwrap();
+        // Completion appends AssistantMessage+RunFinished -> budget trips.
+        control
+            .send(Control::Event(ModelEvent::Finished {
+                output: Some("hello".into()),
+            }))
+            .unwrap();
+
+        // Wait for the actor to die on the faulted append, then prove the
+        // session is closed by sending another command.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let error = session
+            .input(Source::User, "again")
+            .await
+            .expect_err("session must be closed after an append fault");
+        assert!(
+            matches!(error, SessionError::Closed) || error.to_string().contains("closed"),
+            "{error}"
+        );
+
+        // The durable record holds a prefix of valid batches: input + run
+        // start exist, but neither assistant message nor run finish leaked.
+        let record = healthy_inner
+            .load(&SessionId::from("session"))
+            .await
+            .unwrap();
+        let kinds = record
+            .entries()
+            .iter()
+            .map(|e| e.kind.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, TranscriptEntryKind::RunStarted { .. }))
+        );
+        assert!(
+            !kinds
+                .iter()
+                .any(|k| matches!(k, TranscriptEntryKind::AssistantMessage { .. }))
+        );
+        assert!(
+            !kinds
+                .iter()
+                .any(|k| matches!(k, TranscriptEntryKind::RunFinished { .. }))
+        );
+    }
+
+    struct EmittingModel {
+        sink: Arc<tokio::sync::Mutex<Option<crate::FactSink>>>,
+    }
+
+    impl StreamingModel for EmittingModel {
+        fn stream(&self, request: ModelRequest, _steering: Steering) -> ModelStream {
+            let sink = self.sink.clone();
+            Box::pin(futures::stream::once(async move {
+                let sink = sink.lock().await.take().expect("fact sink bound");
+                let schema = artist_core::PluginEventSchema {
+                    schema_id: artist_core::EventSchemaId::from("emit-v1"),
+                    plugin_id: artist_core::PluginId::from("example.emitter"),
+                    event_type: "example.emitter.noticed".into(),
+                    version: "1".into(),
+                    payload_schema: serde_json::json!({"type": "object"}),
+                    presentation_schema: serde_json::json!({"type": "object"}),
+                    schema_digest: String::new(),
+                    presentation: serde_json::json!({}),
+                };
+                let mut schema = schema;
+                schema.schema_digest = schema.canonical_digest().unwrap();
+                let event = artist_core::PluginEvent {
+                    plugin_id: schema.plugin_id.clone(),
+                    schema_id: schema.schema_id.clone(),
+                    event_type: schema.event_type.clone(),
+                    schema_version: schema.version.clone(),
+                    schema_digest: schema.schema_digest.clone(),
+                    scope: artist_core::InvocationScope {
+                        session_id: request.session_id.clone(),
+                        run_id: Some(request.run_id.clone()),
+                        call_id: None,
+                        correlation_id: artist_core::CorrelationId::new("mid-run"),
+                        parent_correlation_id: None,
+                    },
+                    payload: serde_json::json!({}),
+                    presentation: serde_json::json!({}),
+                };
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                sink.send(crate::FactEnvelope {
+                    session_id: request.session_id.clone(),
+                    facts: vec![
+                        artist_core::PluginFact::SchemaRegistered { schema },
+                        artist_core::PluginFact::Event { event },
+                    ],
+                    receipt: tx,
+                })
+                .await
+                .unwrap();
+                // The receipt only resolves after the canonical append; a
+                // success here therefore proves durable-before-output.
+                rx.await.unwrap().unwrap();
+                Ok(ModelEvent::Finished {
+                    output: Some("done".into()),
+                })
+            }))
+        }
+    }
+
+    struct SinkCapture(Arc<tokio::sync::Mutex<Option<crate::FactSink>>>);
+
+    #[async_trait]
+    impl ExecutionExtensions for SinkCapture {
+        fn bind_fact_sink(&self, _: &SessionId, sink: crate::FactSink) {
+            self.0.try_lock().unwrap().replace(sink);
+        }
+    }
+
+    #[tokio::test]
+    async fn emissions_commit_durably_before_the_emitter_is_released() {
+        let store = Arc::new(MemoryStore::default());
+        let captured = Arc::new(tokio::sync::Mutex::new(None));
+        let extensions = Arc::new(SinkCapture(captured.clone()));
+        let dependencies = SessionDependencies {
+            store: store.clone(),
+            model: Arc::new(EmittingModel {
+                sink: captured.clone(),
+            }),
+            profiles: None,
+            slash_commands: None,
+            extensions,
+            resume_queued_work: true,
+        };
+        let session = SessionHandle::create(
+            CreateSession {
+                session_id: SessionId::from("session"),
+                metadata: SessionMetadata::root(0, None),
+                context: InitialContext { fragments: vec![] },
+                initial_profile: None,
+            },
+            dependencies,
+        )
+        .await
+        .unwrap();
+        let mut events = session.subscribe();
+        session.input(Source::User, "hello").await.unwrap();
+        wait_for(&mut events, |event| {
+            matches!(event, StreamEventKind::Completed { .. })
+        })
+        .await;
+
+        let record = store.load(&SessionId::from("session")).await.unwrap();
+        let kinds: Vec<_> = record.entries().iter().map(|e| e.kind.clone()).collect();
+        let run_started = kinds
+            .iter()
+            .position(|k| matches!(k, TranscriptEntryKind::RunStarted { .. }))
+            .unwrap();
+        let schema_at = kinds
+            .iter()
+            .position(|k| matches!(k, TranscriptEntryKind::PluginEventSchemaRegistered { .. }))
+            .unwrap();
+        let event_at = kinds
+            .iter()
+            .position(|k| matches!(k, TranscriptEntryKind::PluginEvent { .. }))
+            .unwrap();
+        let finished_at = kinds
+            .iter()
+            .position(|k| matches!(k, TranscriptEntryKind::RunFinished { .. }))
+            .unwrap();
+        assert!(run_started < schema_at && schema_at < event_at && event_at < finished_at);
     }
 
     #[tokio::test]
@@ -1546,9 +2049,9 @@ mod tests {
         assert_eq!(
             messages,
             vec![
-                crate::ModelMessage::User("first".into()),
+                crate::ModelMessage::User(text("first")),
                 crate::ModelMessage::Assistant(vec![artist_core::ContentPart::text("one")]),
-                crate::ModelMessage::User("second".into()),
+                crate::ModelMessage::User(text("second")),
                 crate::ModelMessage::Assistant(vec![artist_core::ContentPart::text("two")]),
             ]
         );
@@ -1616,7 +2119,7 @@ mod tests {
             TranscriptEntryKind::Input {
                 message_id: input.clone(),
                 source: Source::User,
-                content: "hello".into(),
+                content: text("hello"),
             },
             TranscriptEntryKind::RunStarted {
                 run_id: RunId::from("unfinished"),
@@ -1662,7 +2165,7 @@ mod tests {
             TranscriptEntryKind::Input {
                 message_id: MessageId::from("input"),
                 source: Source::User,
-                content: "hello".into(),
+                content: text("hello"),
             },
             TranscriptEntryKind::RunStarted {
                 run_id: RunId::from("unfinished"),
@@ -1713,22 +2216,22 @@ mod tests {
             TranscriptEntryKind::Input {
                 message_id: MessageId::from("first"),
                 source: Source::User,
-                content: "first pending".into(),
+                content: text("first pending"),
             },
             TranscriptEntryKind::SteeringQueued {
                 message_id: MessageId::from("notice-1"),
                 source: Source::Harness,
-                content: "first notice".into(),
+                content: text("first notice"),
             },
             TranscriptEntryKind::SteeringQueued {
                 message_id: MessageId::from("notice-2"),
                 source: Source::User,
-                content: "second notice".into(),
+                content: text("second notice"),
             },
             TranscriptEntryKind::Input {
                 message_id: MessageId::from("second"),
                 source: Source::User,
-                content: "second pending".into(),
+                content: text("second pending"),
             },
         ]);
         record.append_batch(&entries).unwrap();
@@ -1748,16 +2251,22 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(requests_rx.recv().await.unwrap().prompt, "first pending");
+        assert_eq!(
+            requests_rx.recv().await.unwrap().prompt,
+            text("first pending")
+        );
         let notices = steering_rx.recv().await.unwrap();
         assert_eq!(
             notices
                 .iter()
-                .map(|notice| notice.content.as_str())
+                .map(|notice| notice.content.clone())
                 .collect::<Vec<_>>(),
-            ["first notice", "second notice"]
+            [text("first notice"), text("second notice")]
         );
-        assert_eq!(requests_rx.recv().await.unwrap().prompt, "second pending");
+        assert_eq!(
+            requests_rx.recv().await.unwrap().prompt,
+            text("second pending")
+        );
         assert!(steering_rx.recv().await.unwrap().is_empty());
 
         tokio::task::yield_now().await;
@@ -1792,16 +2301,15 @@ mod tests {
             "worker".into(),
             test_profile("worker", &["worker"]),
         )])));
-        let session = SessionHandle::create(
-            SessionId::from("yield-session"),
-            InitialContext { fragments: vec![] },
+        let session = create_profiled(
+            "yield-session",
             "worker",
             profiles,
+            None,
             store.clone(),
             model,
         )
-        .await
-        .unwrap();
+        .await;
         let mut events = session.subscribe();
         session.input(Source::User, "work").await.unwrap();
         wait_for(&mut events, |event| {
@@ -1862,16 +2370,15 @@ mod tests {
                 test_profile("worker", &["planner", "worker"]),
             ),
         ])));
-        let session = SessionHandle::create(
-            SessionId::from("handoff-session"),
-            InitialContext { fragments: vec![] },
+        let session = create_profiled(
+            "handoff-session",
             "planner",
             profiles,
+            None,
             store.clone(),
             model,
         )
-        .await
-        .unwrap();
+        .await;
         let mut events = session.subscribe();
         session.input(Source::User, "old task").await.unwrap();
         wait_for(&mut events, |event| {
@@ -1931,11 +2438,19 @@ mod tests {
         assert!(record.entries().iter().any(|entry| matches!(
             &entry.kind,
             TranscriptEntryKind::ProfileActivated { brief: Some(brief), steering_message_ids, .. }
-                if brief == "implement it\n\nqueued correction" && steering_message_ids.len() == 1
+                if brief == &vec![
+                    ContentPart::text("implement it"),
+                    ContentPart::text("\n\n"),
+                    ContentPart::text("queued correction"),
+                ] && steering_message_ids.len() == 1
         )));
         assert_eq!(
             project(&record).1.last().unwrap().message,
-            crate::ModelMessage::User("implement it\n\nqueued correction".into())
+            crate::ModelMessage::User(vec![
+                ContentPart::text("implement it"),
+                ContentPart::text("\n\n"),
+                ContentPart::text("queued correction"),
+            ])
         );
     }
 
@@ -1953,17 +2468,15 @@ mod tests {
                 actions: Vec::new(),
             },
         )])));
-        let session = SessionHandle::create_with_commands(
-            SessionId::from("slash-output"),
-            InitialContext { fragments: vec![] },
+        let session = create_profiled(
+            "slash-output",
             "locked",
             profiles,
-            commands,
+            Some(commands),
             store.clone(),
             model,
         )
-        .await
-        .unwrap();
+        .await;
 
         let result = session.slash("status", "verbose please").await.unwrap();
         assert_eq!(result.output.as_deref(), Some("ready"));
@@ -1989,21 +2502,19 @@ mod tests {
             SlashCommandResult {
                 output: None,
                 actions: vec![SlashCommandAction::Input {
-                    content: "generated prompt".into(),
+                    content: text("generated prompt"),
                 }],
             },
         )])));
-        let session = SessionHandle::create_with_commands(
-            SessionId::from("slash-action"),
-            InitialContext { fragments: vec![] },
+        let session = create_profiled(
+            "slash-action",
             "default",
             profiles,
-            commands,
+            Some(commands),
             store.clone(),
             model,
         )
-        .await
-        .unwrap();
+        .await;
         let mut events = session.subscribe();
 
         session.slash("ask", "").await.unwrap();
@@ -2015,7 +2526,7 @@ mod tests {
         assert!(record.entries().iter().any(|entry| matches!(
             &entry.kind,
             TranscriptEntryKind::Input { source: Source::Harness, content, .. }
-                if content == "generated prompt"
+                if content == &text("generated prompt")
         )));
     }
 
@@ -2043,24 +2554,22 @@ mod tests {
                 }],
             },
         )])));
-        let session = SessionHandle::create_with_commands(
-            SessionId::from("slash-profile"),
-            InitialContext { fragments: vec![] },
+        let session = create_profiled(
+            "slash-profile",
             "planner",
             profiles,
-            commands,
+            Some(commands),
             store.clone(),
             model,
         )
-        .await
-        .unwrap();
+        .await;
 
         session.slash("work", "").await.unwrap();
         let record = store.load(&SessionId::from("slash-profile")).await.unwrap();
         assert_eq!(record.current_profile().unwrap().name, "worker");
         assert_eq!(
             project(&record).1.last().unwrap().message,
-            crate::ModelMessage::User("build it".into())
+            crate::ModelMessage::User(text("build it"))
         );
     }
 }

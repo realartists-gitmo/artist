@@ -57,6 +57,42 @@ v1 contract that resolves each one.
 - Full replay validation and successful incremental append use the same state
   transition reducer.
 
+### Rich and binary content
+
+- Ordered content (`ContentPart`) is the single representation for user input,
+  steering, assistant messages, tool results, and resource replies. Exact
+  interleaving (for example `[text, image, text]`) is preserved.
+- Binary content lives in content-addressed blob stores. Canonical entries
+  store `BlobRef`s — digest algorithm/value, byte length, media type, optional
+  logical name — never base64 or provider upload handles. Provider adapters
+  resolve references to provider-native parts only while constructing a
+  request, so cache prefixes stay stable.
+- Compaction artifacts record provenance: source digests, transformation
+  identity/version, output digest, earliest changed sequence, and projection
+  scope.
+
+### Generic plugin events
+
+- `plugin-event-schema-registered` entries snapshot each event schema and its
+  digest into a durable catalog; replay never depends on the emitting plugin
+  still being installed.
+- `plugin-event` entries carry the generic envelope `(plugin id, schema id,
+  namespaced event type, version, digest, invocation scope, JSON payload,
+  namespaced presentation)`. No feature-specific variants exist.
+- Validation rejects unregistered schemas, schema-invalid payloads, foreign
+  session/run/call scopes, and events citing finished runs (post-terminal).
+- Emission is durable-before-success: the owning session actor appends facts
+  and publishes stream events before the emitter's call returns; a bounded
+  per-session channel applies backpressure. Runtime-only diagnostics
+  (`durable: false`) bypass the transcript entirely.
+
+### Session lineage
+
+- Session metadata records immutable creation lineage: parent session plus
+  parent run/call correlation, creator identity, relationship kind, initial
+  profile, explicit attachment mode, and recovery policy. The kernel/store
+  boundary rejects missing parents and self-parenting before a record exists.
+
 ## Store contract
 
 `append(session, expected-sequence, entries)` is an optimistic transaction.

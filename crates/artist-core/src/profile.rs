@@ -59,7 +59,10 @@ pub struct ProfilePolicyRule {
 #[serde(deny_unknown_fields)]
 pub struct ModelRoute {
     pub provider: String,
+    pub account: Option<String>,
+    pub api_variant: Option<String>,
     pub model: String,
+    pub reasoning: Option<String>,
     #[serde(default = "empty_object")]
     pub parameters: Value,
 }

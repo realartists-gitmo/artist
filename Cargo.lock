@@ -77,8 +77,10 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 name = "artist-core"
 version = "0.1.0"
 dependencies = [
+ "jsonschema",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
 ]
 
@@ -91,6 +93,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "futures",
+ "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -112,9 +115,14 @@ dependencies = [
  "artist-core",
  "artist-kernel",
  "artist-resource",
+ "artist-rig",
+ "artist-store",
+ "async-stream",
  "async-trait",
  "percent-encoding",
  "regex",
+ "rig-agent",
+ "rig-core",
  "serde",
  "serde_json",
  "sha2",
@@ -127,12 +135,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "artist-provider"
+version = "0.1.0"
+dependencies = [
+ "artist-core",
+ "artist-kernel",
+ "artist-resource",
+ "artist-store",
+ "async-stream",
+ "async-trait",
+ "fs2",
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "artist-resource"
 version = "0.1.0"
 dependencies = [
  "artist-core",
+ "artist-kernel",
  "async-trait",
  "fff-search",
+ "fs2",
  "fuser",
  "globset",
  "jsonschema",
@@ -162,11 +193,31 @@ dependencies = [
  "artist-store",
  "async-stream",
  "async-trait",
+ "base64",
  "futures",
  "rig-agent",
  "rig-core",
  "rig-memory",
  "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "artist-runtime"
+version = "0.1.0"
+dependencies = [
+ "artist-core",
+ "artist-kernel",
+ "artist-plugin",
+ "artist-provider",
+ "artist-store",
+ "async-trait",
+ "fs2",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "tokio",
 ]
 

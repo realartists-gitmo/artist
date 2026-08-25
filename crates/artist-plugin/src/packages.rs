@@ -14,7 +14,7 @@ use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const PACKAGE_FORMAT: u32 = 2;
+pub const PACKAGE_FORMAT: u32 = 3;
 pub const MANIFEST_FILE: &str = "plugin.json";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -771,7 +771,7 @@ mod tests {
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
             package.join(MANIFEST_FILE),
-            r#"{"format": 2,"id":"example.foreign","component":"plugin.wasm"}"#,
+            r#"{"format": 3,"id":"example.foreign","component":"plugin.wasm"}"#,
         )
         .unwrap();
         std::fs::write(package.join("plugin.wasm"), b"component bytes").unwrap();
@@ -789,7 +789,7 @@ mod tests {
         std::fs::create_dir_all(package.join("src")).unwrap();
         std::fs::write(
             package.join(MANIFEST_FILE),
-            r#"{"format": 2,"id":"artist.tool.read","build": {"adapter": "cargo", "package": "artist-tool-read"},"component":"artist_tool_read.wasm"}"#,
+            r#"{"format": 3,"id":"artist.tool.read","build": {"adapter": "cargo", "package": "artist-tool-read"},"component":"artist_tool_read.wasm"}"#,
         )
         .unwrap();
         std::fs::write(package.join("src/lib.rs"), "old\n").unwrap();
@@ -833,7 +833,7 @@ mod tests {
         std::fs::create_dir_all(package.join(".artist")).unwrap();
         std::fs::write(
             package.join(MANIFEST_FILE),
-            r#"{"format": 2,"id":"artist.tool.read","build": {"adapter": "cargo", "package": "artist-tool-read"},"component":"artist_tool_read.wasm"}"#,
+            r#"{"format": 3,"id":"artist.tool.read","build": {"adapter": "cargo", "package": "artist-tool-read"},"component":"artist_tool_read.wasm"}"#,
         )
         .unwrap();
         std::fs::write(package.join(".artist/candidate.wasm"), b"candidate").unwrap();
@@ -872,7 +872,7 @@ mod tests {
         std::fs::create_dir_all(package.join(".artist")).unwrap();
         std::fs::write(
             package.join(MANIFEST_FILE),
-            r#"{"format": 2,"id":"artist.tool.read","build": {"adapter": "cargo", "package": "artist-tool-read"},"component":"artist_tool_read.wasm"}"#,
+            r#"{"format": 3,"id":"artist.tool.read","build": {"adapter": "cargo", "package": "artist-tool-read"},"component":"artist_tool_read.wasm"}"#,
         )
         .unwrap();
         std::fs::write(package.join("src/lib.rs"), "before\n").unwrap();
@@ -916,7 +916,7 @@ mod tests {
         std::fs::create_dir_all(package.join(".artist")).unwrap();
         std::fs::write(
             package.join(MANIFEST_FILE),
-            r#"{"format": 2,"id":"artist.tool.read","component":"artist_tool_read.wasm"}"#,
+            r#"{"format": 3,"id":"artist.tool.read","component":"artist_tool_read.wasm"}"#,
         )
         .unwrap();
         std::fs::write(package.join("src/lib.rs"), "before\n").unwrap();

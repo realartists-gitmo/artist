@@ -11,7 +11,11 @@ use artist_core::{
     ContextFragment as CoreContextFragment, ContextRole as CoreContextRole, InitialContext,
     ToolControl,
 };
-use artist_plugin::{ContextFragment, ContextRole, HookEvent, Message, ModelConfig, PluginHost};
+use artist_plugin::artist::plugin::types::{HookPhase, InvocationScope};
+use artist_plugin::{
+    ContextFragment, ContextRole, HookEvent, ModelConfig, ModelContext, ModelHistoryItem,
+    PluginHost,
+};
 use artist_resource::{
     InvocationContext, ResourceError, ResourceOperation, ResourceProvider, ResourceReply,
     ResourceRequest, ResourceRoute, ResourceUri, TextReplacement, sha256,
@@ -19,7 +23,7 @@ use artist_resource::{
 use async_trait::async_trait;
 use tokio::sync::Notify;
 
-const COMPONENT_IDS: [&str; 29] = [
+const COMPONENT_IDS: [&str; 30] = [
     "artist.prompt",
     "artist.context",
     "artist.hooks",
@@ -49,6 +53,7 @@ const COMPONENT_IDS: [&str; 29] = [
     "artist.tool.signal",
     "artist.tool.yield",
     "artist.tool.handoff",
+    "artist.notes",
 ];
 
 struct TwoCallBarrier {
@@ -89,7 +94,7 @@ async fn verify_concurrent_resource_instances(
     std::fs::write(
         package.join("plugin.json"),
         serde_json::json!({
-            "format": 2,
+            "format": 3,
             "id": "artist.test.concurrent-resource",
             "component": "fixture.wasm"
         })
@@ -165,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(directory.join("profile.json"), "{}")?;
     }
     let empty_plugins = tempfile::tempdir()?;
-    let mut empty_host = PluginHost::new_with_roots(profiles.path(), empty_plugins.path()).await?;
+    let empty_host = PluginHost::new_with_roots(profiles.path(), empty_plugins.path()).await?;
     let untouched = empty_host
         .compose_prompt(vec![ContextFragment {
             source: "empty".into(),
@@ -177,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     verify_concurrent_resource_instances(profiles.path()).await?;
 
-    let mut host = PluginHost::new_with_profiles(profiles.path()).await?;
+    let host = PluginHost::new_with_profiles(profiles.path()).await?;
 
     let packages = host.packages();
     for package in packages.package_names()? {
@@ -239,7 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(composed.fragments.len(), 1);
 
     let definitions = host.tools().await?;
-    assert_eq!(definitions.len(), 11);
+    assert_eq!(definitions.len(), 12);
     for definition in definitions {
         let schema: serde_json::Value = serde_json::from_str(&definition.input_schema)?;
         assert_eq!(
@@ -263,15 +268,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let routes = host.router().routes();
-    assert_eq!(routes.len(), 13);
+    assert_eq!(routes.len(), 14);
     for (owner, route) in routes {
         assert!(
             owner.starts_with("artist.file.")
                 || owner.starts_with("artist.profiles.")
-                || owner.starts_with("artist.plugins."),
+                || owner.starts_with("artist.plugins.")
+                || owner == "artist.host.storage",
             "unexpected route owner: {owner}"
         );
-        assert_eq!(route.operations.len(), 1, "{owner} aggregates operations");
+        assert_eq!(
+            route.operations.len(),
+            if owner == "artist.host.storage" { 4 } else { 1 },
+            "{owner} aggregates operations"
+        );
         if owner == "artist.plugins.signal" {
             assert_eq!(route.signals.len(), 3);
         } else {
@@ -303,7 +313,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             line_count: None,
         })
         .await?,
-        ResourceReply::Text { text } if text.contains("package artist:plugin@0.7.0")
+        ResourceReply::Text { text } if text.contains("package artist:plugin@0.8.0")
     ));
     assert!(matches!(
         host.handle_resource(ResourceRequest::Children {
@@ -502,15 +512,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?
     .expect("remove tool");
 
-    let messages = vec![Message {
-        role: "user".into(),
-        content: "hello".into(),
-    }];
-    assert_eq!(host.transform_context(messages).await?.len(), 1);
+    let context = ModelContext {
+        context: "system".into(),
+        prompt: vec![artist_plugin::ContentPart::Text("current".into())],
+        history: vec![ModelHistoryItem {
+            sequence: 0,
+            message: serde_json::to_string(&artist_kernel::ModelMessage::User(vec![
+                artist_core::ContentPart::text("hello"),
+            ]))?,
+        }],
+    };
+    assert_eq!(host.transform_context(context).await?.history.len(), 1);
     assert_eq!(
         host.observe_hook(&HookEvent {
-            kind: "run.started".into(),
-            payload: "{}".into(),
+            phase: HookPhase::BeforeModelRequest,
+            scope: InvocationScope {
+                session_id: "session".into(),
+                run_id: Some("run".into()),
+                call_id: None,
+                correlation_id: "correlation".into(),
+                parent_correlation_id: None,
+            },
+            payload: serde_json::json!({"context": "system", "history_items": 0}).to_string(),
         })
         .await?
         .len(),
@@ -542,9 +565,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert!(error.contains("unsupported"), "{error}");
     }
 
+    // Durable domain state without provider-state: the notes tool persists a
+    // document through the `store:///` resource route and emits a generic,
+    // durable plugin event per add.
+    let _ = host
+        .handle_resource(ResourceRequest::Move {
+            from: ResourceUri::resolve("store:///global/notes-state", std::path::Path::new("/"))?,
+            to: None,
+        })
+        .await;
+    for text in ["first note", "second note"] {
+        let output = host
+            .call_tool(
+                "notes",
+                &serde_json::json!({"op": "add", "value": text}).to_string(),
+            )
+            .await?
+            .expect("notes add");
+        assert!(output.contains("\"added\""), "{output}");
+    }
+    let listed = host
+        .call_tool("notes", r#"{"op":"list"}"#)
+        .await?
+        .expect("notes list");
+    assert!(listed.contains("first note"), "{listed}");
+    assert!(listed.contains("second note"), "{listed}");
+    let stored = match host
+        .handle_resource(ResourceRequest::Read {
+            uri: ResourceUri::resolve("store:///global/notes-state", std::path::Path::new("/"))?,
+            start_line: None,
+            line_count: None,
+        })
+        .await?
+    {
+        ResourceReply::Text { text } => text,
+        other => panic!("unexpected notes reply: {other:?}"),
+    };
+    assert!(stored.contains("first note") && stored.contains("second note"));
+    // The durable emissions landed in the legacy outbox keyed by the guest's
+    // scope; in real sessions the kernel sink commits them synchronously.
+    let facts = artist_kernel::ExecutionExtensions::drain_plugin_facts(
+        &host,
+        &artist_core::SessionId::from("unknown"),
+    )
+    .await;
+    let emitted = facts.iter().any(|fact| {
+        matches!(
+            fact,
+            artist_core::PluginFact::Event { event }
+                if event.event_type == "artist.notes.added"
+                    && event.payload.get("text").and_then(|v| v.as_str()) == Some("second note")
+        )
+    });
+    assert!(emitted, "durable notes event missing: {facts:?}");
+
     let restored = PluginHost::new_with_roots(profiles.path(), "plugins").await?;
     let restored_descriptors = restored.descriptors().await;
     assert_eq!(restored_descriptors.len(), COMPONENT_IDS.len());
-    assert_eq!(restored.registry().definitions().len(), 11);
+    assert_eq!(restored.registry().definitions().len(), 12);
+    let survived = match restored
+        .handle_resource(ResourceRequest::Read {
+            uri: ResourceUri::resolve("store:///global/notes-state", std::path::Path::new("/"))?,
+            start_line: None,
+            line_count: None,
+        })
+        .await?
+    {
+        ResourceReply::Text { text } => text,
+        other => panic!("unexpected restart reply: {other:?}"),
+    };
+    assert!(survived.contains("first note"), "state lost across restart");
     Ok(())
 }

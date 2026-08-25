@@ -1,6 +1,6 @@
 // PRE-PRODUCTION POLICY: bump this ABI directly when it changes. Do not add
 // compatibility worlds, legacy interfaces, or migration adapters.
-package artist:plugin@0.7.0;
+package artist:plugin@0.8.0;
 
 interface types {
     enum capability {
@@ -9,7 +9,8 @@ interface types {
         resources,
         context,
         hooks,
-        model,
+        model-config,
+        model-provider,
         events,
         commands,
     }
@@ -29,17 +30,74 @@ interface types {
         role: context-role,
     }
 
-    record message {
+    record blob-ref {
+        algorithm: string,
+        digest: string,
+        byte-length: u64,
+        media-type: string,
+        logical-name: option<string>,
+    }
+    record metadata-entry { key: string, value: string }
+    record attachment {
+        blob: blob-ref,
         role: string,
-        content: string,
+        alternate-text: option<string>,
+        metadata: list<metadata-entry>,
+    }
+    record opaque-content { kind: string, value: string }
+    variant content-part {
+        text(string),
+        json(string),
+        attachment(attachment),
+        reasoning(string),
+        opaque(opaque-content),
+    }
+    record model-history-item {
+        sequence: u64,
+        message: string,
+    }
+    record model-context {
+        context: string,
+        prompt: list<content-part>,
+        history: list<model-history-item>,
+    }
+    record compaction-artifact {
+        content: list<content-part>,
+        derivations: string,
+        projection-digest: string,
+        earliest-changed-sequence: u64,
     }
 
     enum tool-effect { observe, mutate, execute, session-control, unknown }
+    record tool-annotations {
+        read-only: bool,
+        destructive: bool,
+        idempotent: bool,
+        open-world: bool,
+    }
     record tool-definition {
         name: string,
         description: string,
+        category: string,
         input-schema: string,
+        output-schema: string,
         effects: list<tool-effect>,
+        annotations: tool-annotations,
+    }
+    record next-action-hint { kind: string, label: string, payload: string }
+    record field-violation { path: string, message: string }
+    record tool-success {
+        value: string,
+        content: list<content-part>,
+        next-actions: list<next-action-hint>,
+    }
+    record tool-failure {
+        code: string,
+        message: string,
+        retriable: bool,
+        details: string,
+        violations: list<field-violation>,
+        next-actions: list<next-action-hint>,
     }
 
     record slash-command-definition {
@@ -67,8 +125,25 @@ interface types {
         parameters: string,
     }
 
+    enum hook-phase {
+        before-model-request,
+        after-model-response,
+        before-tool-execution,
+        after-tool-result,
+        run-completed,
+        run-interrupted,
+        run-failed,
+    }
+    record invocation-scope {
+        session-id: string,
+        run-id: option<string>,
+        call-id: option<string>,
+        correlation-id: string,
+        parent-correlation-id: option<string>,
+    }
     record hook-event {
-        kind: string,
+        phase: hook-phase,
+        scope: invocation-scope,
         payload: string,
     }
 
@@ -176,6 +251,7 @@ interface types {
     record edited-reply { revision: string }
     variant resource-reply {
         text(string),
+        content(list<content-part>),
         children(list<string>),
         written,
         edited(edited-reply),
@@ -196,20 +272,21 @@ interface types {
 }
 
 interface lifecycle {
-    use types.{context-fragment, hook-decision, hook-event, message, model-config, plugin-descriptor};
+    use types.{compaction-artifact, context-fragment, hook-decision, hook-event, model-config, model-context, plugin-descriptor};
 
     descriptor: func() -> plugin-descriptor;
     compose-prompt: func(fragments: list<context-fragment>) -> result<list<context-fragment>, string>;
-    transform-context: func(messages: list<message>) -> result<list<message>, string>;
+    transform-context: func(context: model-context) -> result<model-context, string>;
+    compact-context: func(context: model-context) -> result<option<compaction-artifact>, string>;
     observe-hook: func(event: hook-event) -> result<hook-decision, string>;
     configure-model: func(config: model-config) -> result<model-config, string>;
     observe-event: func(event: string) -> result<_, string>;
 }
 
 interface tool-provider {
-    use types.{tool-definition};
+    use types.{tool-definition, tool-failure, tool-success};
     definitions: func() -> result<list<tool-definition>, string>;
-    invoke: func(name: string, arguments: string) -> result<string, string>;
+    invoke: func(name: string, arguments: string) -> result<tool-success, tool-failure>;
 }
 
 interface resource-provider {
@@ -228,9 +305,9 @@ interface slash-command-provider {
 }
 
 interface host-tools {
-    use types.{tool-definition};
+    use types.{tool-definition, tool-failure, tool-success};
     list-tools: func() -> result<list<tool-definition>, string>;
-    call-tool: func(name: string, arguments: string) -> result<string, string>;
+    call-tool: func(name: string, arguments: string) -> result<tool-success, tool-failure>;
 }
 
 // Terminal session-control capabilities. Components define the model-facing
@@ -256,6 +333,87 @@ interface host-resources {
 // Provider-lifetime state for one logical component provider. Resource calls may run
 // in separate component instances, so guest memory is request-local; this
 // host-owned namespace is shared by every concurrent call from the same plugin.
+interface model-provider {
+    use types.{tool-failure};
+    record provider-descriptor {
+        provider-id: string,
+        revision: string,
+        model-patterns: list<string>,
+        capabilities: list<string>,
+        auth-kinds: list<string>,
+        api-variants: list<string>,
+        parameter-schema: string,
+    }
+    variant stream-item {
+        event(string),
+        finished,
+        failed(tool-failure),
+    }
+    descriptors: func() -> result<list<provider-descriptor>, string>;
+    start: func(request: string) -> result<string, tool-failure>;
+    poll: func(handle: string) -> result<stream-item, tool-failure>;
+    cancel: func(handle: string) -> result<_, tool-failure>;
+}
+
+interface host-progress {
+    use types.{invocation-scope};
+    record progress {
+        scope: invocation-scope,
+        sequence: u64,
+        fraction: option<f64>,
+        message: option<string>,
+        detail: string,
+    }
+    emit: func(progress: progress) -> result<_, string>;
+}
+
+interface host-events {
+    use types.{invocation-scope};
+    record event-schema {
+        schema-id: string,
+        event-type: string,
+        version: string,
+        payload-schema: string,
+        presentation-schema: string,
+        presentation: string,
+    }
+    record event-request {
+        schema-id: string,
+        event-type: string,
+        schema-version: string,
+        schema-digest: string,
+        scope: invocation-scope,
+        payload: string,
+        presentation: string,
+        durable: bool,
+    }
+    register-schema: func(schema: event-schema) -> result<string, string>;
+    emit: func(event: event-request) -> result<_, string>;
+}
+
+interface host-sessions {
+    use types.{content-part};
+    enum attachment { attached, detached }
+    enum recovery-policy { remain-interrupted, resume-queued-work, plugin-resolved }
+    record create-request {
+        request-id: string,
+        session-id: string,
+        profile: string,
+        content: list<content-part>,
+        attachment: attachment,
+        recovery: recovery-policy,
+        relationship: string,
+    }
+    record event-page { events: list<string>, next-cursor: u64 }
+    create: func(request: create-request) -> result<string, string>;
+    send: func(session-id: string, content: list<content-part>) -> result<_, string>;
+    steer: func(session-id: string, content: list<content-part>) -> result<_, string>;
+    snapshot: func(session-id: string) -> result<string, string>;
+    events: func(session-id: string, cursor: u64, limit: u32) -> result<event-page, string>;
+    stop: func(session-id: string, reason: string) -> result<_, string>;
+    await-terminal: func(session-id: string) -> result<string, string>;
+}
+
 interface provider-state {
     get: func(key: string) -> result<option<string>, string>;
     set: func(key: string, value: string) -> result<_, string>;
@@ -293,11 +451,15 @@ world artist-plugin {
     import host-tools;
     import host-control;
     import host-resources;
+    import host-events;
+    import host-progress;
+    import host-sessions;
     import provider-state;
     import native-filesystem;
     import native-profiles;
     import native-plugins;
     export lifecycle;
+    export model-provider;
     export tool-provider;
     export resource-provider;
     export slash-command-provider;

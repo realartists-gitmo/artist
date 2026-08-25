@@ -33,4 +33,5 @@ artist_plugin_sdk::unadvertised_lifecycle!(
 );
 artist_plugin_sdk::unadvertised_tools!(PluginsRead);
 artist_plugin_sdk::unadvertised_slash_commands!(PluginsRead);
+artist_plugin_sdk::unadvertised_model_provider!(PluginsRead);
 artist_plugin_sdk::export!(PluginsRead with_types_in artist_plugin_sdk);

@@ -29,4 +29,5 @@ artist_plugin_sdk::unadvertised_lifecycle!(
 );
 artist_plugin_sdk::unadvertised_tools!(ProfilesChildren);
 artist_plugin_sdk::unadvertised_slash_commands!(ProfilesChildren);
+artist_plugin_sdk::unadvertised_model_provider!(ProfilesChildren);
 artist_plugin_sdk::export!(ProfilesChildren with_types_in artist_plugin_sdk);

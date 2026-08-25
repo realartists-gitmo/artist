@@ -12,7 +12,7 @@ Every loadable directory directly below the catalog root contains
 
 ```json
 {
-  "format": 2,
+  "format": 3,
   "id": "artist.tool.read",
   "build": {"adapter": "cargo", "package": "artist-tool-read"},
   "component": "artist_tool_read.wasm"
@@ -41,11 +41,40 @@ plugins:///tool-read/
 artifacts are intentionally omitted from the UTF-8 resource tree. Models edit
 source and manifests, never forge build status or active artifacts.
 
-Package format `2` is the only accepted format. Artist is pre-production: bump
+Package format `3` is the only accepted format. Artist is pre-production: bump
 the format directly and discard stale packages; do not add migrations or legacy
 package decoders.
 
 ## Lifecycle
+
+### Durable state and events
+
+Plugins persist domain state through the `store:///` resource route — never
+through `provider-state`, which is process-lifetime scratch:
+
+- `store:///<scope>/<key>` with scope one of `global`,
+  `session/<id>`, `account/<owner>`, `identity/<owner>`,
+  `workspace/<owner>`, or `profile/<owner>`; keys are single path segments.
+- Operations: `read` (UTF-8 text), `write`, `move` (rename or delete when
+  `to: null`), and `children` at scope roots.
+- The backend is content-revisioned and file-backed under
+  `.artist/durable-store`, so documents survive host restarts.
+
+`plugins/sdk::durable_get/durable_put/durable_delete` wrap these requests.
+
+Plugins publish domain facts as generic, durable plugin events: register a
+versioned schema (`register_event_schema`), then `emit_event(..,
+durable: true)`. Emissions are validated against the registered schema,
+namespaced by the activated plugin identity, and committed to the canonical
+transcript by the owning session actor **before** the emitter's call returns;
+a bounded per-session channel applies backpressure. Runtime-only diagnostics
+(`durable: false`) bypass the transcript and take the separate observation
+path. Presentation metadata keys must be namespaced (`namespace.key`; the bare
+`render` hint is reserved). Emitting while observing events is rejected.
+
+`plugins/notes` is the reference implementation of both behaviors.
+
+## Package lifecycle
 
 The package root advertises three signals:
 

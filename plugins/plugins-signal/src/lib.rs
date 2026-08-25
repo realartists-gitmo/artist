@@ -41,4 +41,5 @@ artist_plugin_sdk::unadvertised_lifecycle!(
 );
 artist_plugin_sdk::unadvertised_tools!(PluginsSignal);
 artist_plugin_sdk::unadvertised_slash_commands!(PluginsSignal);
+artist_plugin_sdk::unadvertised_model_provider!(PluginsSignal);
 artist_plugin_sdk::export!(PluginsSignal with_types_in artist_plugin_sdk);

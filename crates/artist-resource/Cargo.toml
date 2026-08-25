@@ -12,8 +12,10 @@ winfsp-system = ["winfsp/system"]
 
 [dependencies]
 artist-core = { path = "../artist-core" }
+artist-kernel = { path = "../artist-kernel" }
 async-trait.workspace = true
 fff-search.workspace = true
+fs2.workspace = true
 globset.workspace = true
 jsonschema.workspace = true
 percent-encoding.workspace = true

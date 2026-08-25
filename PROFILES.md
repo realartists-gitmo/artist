@@ -91,6 +91,21 @@ an implementation registered in `ProfileModelRouter`; its `parameters` object
 is applied to every provider request on that route. A successful route is sticky
 for the session/profile epoch.
 
+Routes are keyed by `(provider, account, api-variant, model)`. Resolution goes
+through an installed provider source — the activated provider-plugin registry
+or a host registry — never through application-constructed model objects.
+Production runtimes build sessions with
+`SessionRuntime::from_provider_source`; the router selects an account for the
+provider deterministically (explicit `account`, else the single candidate or
+the one marked `default`), fetches credentials by opaque reference from the
+credential store, and asks the provider driver to open the streaming model.
+Account descriptors persist in durable scoped storage; secrets never appear in
+profiles, routes, errors, transcripts, or events.
+
+Provider drivers must pass the shared conformance battery
+(`artist_provider::conformance`) before shipping: plain completion,
+streaming-event ordering, and mid-run cancellation to a typed `Interrupted`.
+
 Fallback occurs only after an error and only before any tool activity. Partial
 text from a failed side-effect-free attempt is cleared with `TextReset` before
 the next route. Once a tool call or result is visible, the failure is terminal,

@@ -6,7 +6,9 @@ use artist_core::{
     InitialContext, ProfilePolicy, ProfileSnapshot, SessionId, Source, StreamEventKind,
     default_yield_schema,
 };
-use artist_kernel::{ProfileSource, SessionHandle};
+use artist_kernel::{
+    CreateSession, ProfileSource, SessionDependencies, SessionHandle, no_extensions,
+};
 use artist_rig::RigModel;
 use artist_store::MemoryStore;
 use rig_core::{
@@ -38,12 +40,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = openai::Client::from_env()?;
     let model = Arc::new(RigModel::new(client.completion_model(&model_name)));
     let session = SessionHandle::create(
-        SessionId::from("live-smoke"),
-        InitialContext { fragments: vec![] },
-        "smoke",
-        Arc::new(SmokeProfile),
-        Arc::new(MemoryStore::default()),
-        model,
+        CreateSession {
+            session_id: SessionId::from("live-smoke"),
+            metadata: artist_core::SessionMetadata::root(0, None),
+            context: InitialContext { fragments: vec![] },
+            initial_profile: Some("smoke".into()),
+        },
+        SessionDependencies {
+            store: Arc::new(MemoryStore::default()),
+            model,
+            profiles: Some(Arc::new(SmokeProfile)),
+            slash_commands: None,
+            extensions: no_extensions(),
+            resume_queued_work: true,
+        },
     )
     .await?;
     let mut events = session.subscribe();

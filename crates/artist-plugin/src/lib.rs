@@ -1,4 +1,4 @@
-//! Wasmtime component host for the Artist 0.7 plugin contracts.
+//! Wasmtime component host for the Artist 0.8 plugin contracts.
 
 mod packages;
 
@@ -16,24 +16,29 @@ use std::{
 };
 
 use artist_core::{
-    ContextFragment as CoreContextFragment, ContextRole as CoreContextRole, InitialContext,
-    PluginCapability, PluginDescriptor, PluginId, ProfileManifest, ProfileSnapshot,
+    ContentPart as CoreContentPart, ContextFragment as CoreContextFragment,
+    ContextRole as CoreContextRole, InitialContext, InvocationScope, ModelRoute, PluginCapability,
+    PluginDescriptor, PluginId, ProfileManifest, ProfileSnapshot,
     SlashCommandAction as CoreSlashAction, SlashCommandDefinition as CoreSlashDefinition,
     SlashCommandResult as CoreSlashResult, ToolControl, ToolEffect as CoreToolEffect,
     validate_profile_name,
 };
 use artist_resource::{
     AnchoredDocument, AnchoredEditOperation, EnvironmentEntry, FilesystemProvider, GrepPage,
-    IndexedGrepMatch, InvocationContext, ProfilesProvider, ResourceError, ResourceOperation,
-    ResourceProvider, ResourceReply as CoreReply, ResourceRequest as CoreRequest,
-    ResourceRoute as CoreRoute, ResourceRouter, ResourceUri, SearchEngine, SignalDefinition,
-    TextReplacement, ToolDefinition as CoreTool, ToolError, ToolHandler,
+    IndexedGrepMatch, InvocationContext, NextActionHint as CoreNextAction, ProfilesProvider,
+    ResourceError, ResourceOperation, ResourceProvider, ResourceReply as CoreReply,
+    ResourceRequest as CoreRequest, ResourceRoute as CoreRoute, ResourceRouter, ResourceUri,
+    SearchEngine, SignalDefinition, TextReplacement, ToolAnnotations as CoreToolAnnotations,
+    ToolDefinition as CoreTool, ToolError, ToolFailure as CoreToolFailure, ToolHandler,
     ToolOutput as CoreToolOutput, ToolRegistry, validate_schema,
 };
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{Mutex, mpsc},
+};
 use wasmtime::{
     Engine, Store,
     component::{Component, HasSelf, Linker, ResourceTable},
@@ -48,8 +53,8 @@ wasmtime::component::bindgen!({
 });
 
 pub use artist::plugin::types::{
-    ContextFragment, ContextRole, HookDecision, HookEvent, Message, ModelConfig, ResourceRoute,
-    ToolDefinition, ToolEffect,
+    ContentPart, ContextFragment, ContextRole, HookDecision, HookEvent, ModelConfig, ModelContext,
+    ModelHistoryItem, ResourceRoute, ToolAnnotations, ToolDefinition, ToolEffect,
 };
 
 #[derive(Debug, Error)]
@@ -70,6 +75,43 @@ pub enum PluginError {
     Resource(#[from] ResourceError),
 }
 
+pub struct PluginSessionCreate {
+    pub request_id: String,
+    pub session_id: artist_core::SessionId,
+    pub profile: String,
+    pub content: Vec<CoreContentPart>,
+    pub attached: bool,
+    pub recovery: String,
+    pub relationship: String,
+    pub creator_plugin_id: PluginId,
+    pub parent_scope: Option<InvocationScope>,
+}
+
+#[async_trait]
+pub trait PluginSessionService: Send + Sync + 'static {
+    async fn create(&self, request: PluginSessionCreate) -> Result<artist_core::SessionId, String>;
+    async fn send(
+        &self,
+        session_id: &artist_core::SessionId,
+        content: Vec<CoreContentPart>,
+    ) -> Result<(), String>;
+    async fn steer(
+        &self,
+        session_id: &artist_core::SessionId,
+        content: Vec<CoreContentPart>,
+    ) -> Result<(), String>;
+    async fn snapshot(&self, session_id: &artist_core::SessionId) -> Result<Value, String>;
+    async fn events(
+        &self,
+        session_id: &artist_core::SessionId,
+        cursor: u64,
+        limit: u32,
+    ) -> Result<(Vec<Value>, u64), String>;
+    async fn stop(&self, session_id: &artist_core::SessionId, reason: String)
+    -> Result<(), String>;
+    async fn await_terminal(&self, session_id: &artist_core::SessionId) -> Result<Value, String>;
+}
+
 pub struct PluginHost {
     plugins: Arc<RwLock<Vec<LoadedPluginSlot>>>,
     registry: ToolRegistry,
@@ -78,6 +120,11 @@ pub struct PluginHost {
     working_directory: PathBuf,
     packages: Arc<PluginPackages>,
     slash_commands: Arc<RwLock<HashMap<String, RegisteredSlashCommand>>>,
+    event_outbox: Arc<Mutex<HashMap<String, Vec<artist_core::PluginFact>>>>,
+    fact_sinks: Arc<std::sync::Mutex<HashMap<String, artist_kernel::FactSink>>>,
+    observer_events: mpsc::UnboundedSender<String>,
+    observer_deliveries: Arc<RwLock<HashMap<String, u64>>>,
+    session_service: Arc<RwLock<Option<Arc<dyn PluginSessionService>>>>,
     _provider_state: ProviderState,
     _activator: Arc<HostActivation>,
 }
@@ -141,6 +188,34 @@ impl PluginHost {
     ) -> Result<Self, PluginError> {
         let registry = ToolRegistry::new();
         let router = ResourceRouter::new();
+        // Durable scoped storage is mounted as an ordinary resource route so
+        // plugins persist domain state through resource semantics instead of
+        // a generic key/value import or ephemeral provider-state.
+        let durable_store = artist_resource::storage_provider::StorageProvider::open(
+            working_directory.join(".artist/durable-store"),
+        )
+        .map_err(|error| {
+            PluginError::Resource(artist_resource::ResourceError::Provider(format!(
+                "durable store failed to open: {error}"
+            )))
+        })?;
+        router
+            .register(
+                "artist.host.storage",
+                artist_resource::ResourceRoute::new(
+                    "store:///**",
+                    None::<String>,
+                    [
+                        artist_resource::ResourceOperation::Read,
+                        artist_resource::ResourceOperation::Children,
+                        artist_resource::ResourceOperation::Write,
+                        artist_resource::ResourceOperation::Move,
+                    ],
+                ),
+                Arc::new(durable_store),
+            )
+            .await
+            .map_err(PluginError::Resource)?;
         let search = Arc::new(RwLock::new(None));
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
@@ -154,6 +229,20 @@ impl PluginHost {
         let linker = Arc::new(linker);
         let plugins = Arc::new(RwLock::new(Vec::new()));
         let slash_commands = Arc::new(RwLock::new(HashMap::new()));
+        let event_schemas = Arc::new(RwLock::new(HashMap::new()));
+        let event_outbox = Arc::new(Mutex::new(HashMap::new()));
+        let fact_sinks = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (runtime_events, runtime_receiver) = mpsc::unbounded_channel();
+        let (observer_events, observer_receiver) = mpsc::unbounded_channel();
+        let observer_deliveries = Arc::new(RwLock::new(HashMap::new()));
+        tokio::spawn(observe_event_loop(
+            plugins.clone(),
+            observer_receiver,
+            runtime_receiver,
+            observer_deliveries.clone(),
+            working_directory.join(".artist/plugin-observer-deadletters.jsonl"),
+        ));
+        let session_service = Arc::new(RwLock::new(None));
         let provider_state = ProviderState::default();
         let activator = Arc::new(HostActivation {
             engine: engine.clone(),
@@ -166,6 +255,11 @@ impl PluginHost {
             profiles: profiles.clone(),
             packages: packages.clone(),
             slash_commands: slash_commands.clone(),
+            event_schemas: event_schemas.clone(),
+            event_outbox: event_outbox.clone(),
+            fact_sinks: fact_sinks.clone(),
+            runtime_events: runtime_events.clone(),
+            session_service: session_service.clone(),
             provider_state: provider_state.clone(),
             activation: Mutex::new(()),
         });
@@ -179,11 +273,32 @@ impl PluginHost {
             working_directory,
             packages,
             slash_commands,
+            event_outbox,
+            fact_sinks,
+            observer_events,
+            observer_deliveries,
+            session_service,
             _provider_state: provider_state,
             _activator: activator,
         };
         host.load_active_packages().await?;
         Ok(host)
+    }
+
+    pub fn observer_deliveries(&self, plugin_id: &str) -> u64 {
+        self.observer_deliveries
+            .read()
+            .expect("observer delivery lock poisoned")
+            .get(plugin_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn set_session_service(&self, service: Arc<dyn PluginSessionService>) {
+        *self
+            .session_service
+            .write()
+            .expect("session service lock poisoned") = Some(service);
     }
 
     pub fn registry(&self) -> ToolRegistry {
@@ -240,10 +355,14 @@ impl PluginHost {
         Some(plugin.lock().await.descriptor.clone())
     }
 
-    pub async fn mount_fabric(&self) -> Result<PluginFabric, PluginError> {
+    pub async fn mount_fabric(
+        &self,
+        view: artist_resource::ResourceView,
+    ) -> Result<PluginFabric, PluginError> {
         let fabric = artist_resource::ResourceFabric::mount(
             self.router.clone(),
             self.working_directory.clone(),
+            view,
             tokio::runtime::Handle::current(),
         )
         .await
@@ -341,7 +460,7 @@ impl PluginHost {
     }
 
     pub async fn compose_initial_context(
-        &mut self,
+        &self,
         context: InitialContext,
     ) -> Result<InitialContext, PluginError> {
         Ok(InitialContext {
@@ -443,7 +562,7 @@ impl PluginHost {
     /// Compose as a deterministic pipeline ordered by `(priority, plugin id)`.
     /// Each provider receives the complete output of its predecessor.
     pub async fn compose_prompt(
-        &mut self,
+        &self,
         mut fragments: Vec<ContextFragment>,
     ) -> Result<Vec<ContextFragment>, PluginError> {
         for plugin in self.with(PluginCapability::Prompt).await {
@@ -469,12 +588,7 @@ impl PluginHost {
             .registry
             .definitions()
             .into_iter()
-            .map(|d| ToolDefinition {
-                name: d.name,
-                description: d.description,
-                input_schema: d.input_schema.to_string(),
-                effects: d.effects.into_iter().map(from_core_tool_effect).collect(),
-            })
+            .map(core_tool_to_wit)
             .collect())
     }
     pub async fn call_tool(
@@ -499,50 +613,62 @@ impl PluginHost {
     /// Transform context sequentially in lifecycle order; later transforms see
     /// the complete result of earlier transforms.
     pub async fn transform_context(
-        &mut self,
-        mut messages: Vec<Message>,
-    ) -> Result<Vec<Message>, PluginError> {
+        &self,
+        context: ModelContext,
+    ) -> Result<ModelContext, PluginError> {
+        self.transform_context_scoped(context, None).await
+    }
+
+    async fn transform_context_scoped(
+        &self,
+        mut context: ModelContext,
+        scope: Option<&InvocationScope>,
+    ) -> Result<ModelContext, PluginError> {
         for plugin in self.with(PluginCapability::Context).await {
             let mut p = plugin.lock().await;
             let id = p.descriptor.id.to_string();
-            let LoadedPlugin {
-                store, bindings, ..
-            } = &mut *p;
-            messages = bindings
-                .artist_plugin_lifecycle()
-                .call_transform_context(store, &messages)
-                .await?
-                .map_err(|message| PluginError::Socket {
-                    plugin: id,
-                    socket: "transform-context",
-                    message,
-                })?;
-        }
-        Ok(messages)
-    }
-    /// Observe hooks in lifecycle order. Rewrites are retained in that order;
-    /// the first Stop is terminal and lower-precedence hooks are not invoked.
-    pub async fn observe_hook(
-        &mut self,
-        event: &HookEvent,
-    ) -> Result<Vec<HookDecision>, PluginError> {
-        let mut decisions = Vec::new();
-        for plugin in self.with(PluginCapability::Hooks).await {
-            let decision = {
-                let mut p = plugin.lock().await;
-                let id = p.descriptor.id.to_string();
+            p.store.data_mut().invocation = scope.cloned().map(invocation_for_scope);
+            let result = {
                 let LoadedPlugin {
                     store, bindings, ..
                 } = &mut *p;
                 bindings
                     .artist_plugin_lifecycle()
-                    .call_observe_hook(store, event)
-                    .await?
-                    .map_err(|message| PluginError::Socket {
-                        plugin: id,
-                        socket: "observe-hook",
-                        message,
-                    })?
+                    .call_transform_context(store, &context)
+                    .await
+            };
+            p.store.data_mut().invocation = None;
+            context = result?.map_err(|message| PluginError::Socket {
+                plugin: id,
+                socket: "transform-context",
+                message,
+            })?;
+        }
+        Ok(context)
+    }
+    /// Observe hooks in lifecycle order. Rewrites are retained in that order;
+    /// the first Stop is terminal and lower-precedence hooks are not invoked.
+    pub async fn observe_hook(&self, event: &HookEvent) -> Result<Vec<HookDecision>, PluginError> {
+        let mut decisions = Vec::new();
+        for plugin in self.with(PluginCapability::Hooks).await {
+            let decision = {
+                let mut p = plugin.lock().await;
+                let id = p.descriptor.id.to_string();
+                p.store.data_mut().invocation =
+                    Some(invocation_for_scope(wit_scope_to_core(event.scope.clone())));
+                let LoadedPlugin {
+                    store, bindings, ..
+                } = &mut *p;
+                let result = bindings
+                    .artist_plugin_lifecycle()
+                    .call_observe_hook(&mut *store, event)
+                    .await?;
+                store.data_mut().invocation = None;
+                result.map_err(|message| PluginError::Socket {
+                    plugin: id,
+                    socket: "observe-hook",
+                    message,
+                })?
             };
             let terminal = hook_is_terminal(&decision);
             decisions.push(decision);
@@ -553,31 +679,40 @@ impl PluginHost {
         Ok(decisions)
     }
     /// Configure the model as a deterministic pipeline in lifecycle order.
-    pub async fn configure_model(
-        &mut self,
+    pub async fn configure_model(&self, config: ModelConfig) -> Result<ModelConfig, PluginError> {
+        self.configure_model_scoped(config, None).await
+    }
+
+    async fn configure_model_scoped(
+        &self,
         mut config: ModelConfig,
+        scope: Option<&InvocationScope>,
     ) -> Result<ModelConfig, PluginError> {
-        for plugin in self.with(PluginCapability::Model).await {
+        for plugin in self.with(PluginCapability::ModelConfig).await {
             let mut p = plugin.lock().await;
             let id = p.descriptor.id.to_string();
-            let LoadedPlugin {
-                store, bindings, ..
-            } = &mut *p;
-            config = bindings
-                .artist_plugin_lifecycle()
-                .call_configure_model(store, &config)
-                .await?
-                .map_err(|message| PluginError::Socket {
-                    plugin: id,
-                    socket: "configure-model",
-                    message,
-                })?;
+            p.store.data_mut().invocation = scope.cloned().map(invocation_for_scope);
+            let result = {
+                let LoadedPlugin {
+                    store, bindings, ..
+                } = &mut *p;
+                bindings
+                    .artist_plugin_lifecycle()
+                    .call_configure_model(store, &config)
+                    .await
+            };
+            p.store.data_mut().invocation = None;
+            config = result?.map_err(|message| PluginError::Socket {
+                plugin: id,
+                socket: "configure-model",
+                message,
+            })?;
         }
         Ok(config)
     }
     /// Deliver events in lifecycle order, failing fast on the first observer
     /// error so lower-precedence observers never see a partially failed event.
-    pub async fn observe_event(&mut self, event: &str) -> Result<(), PluginError> {
+    pub async fn observe_event(&self, event: &str) -> Result<(), PluginError> {
         for plugin in self.with(PluginCapability::Events).await {
             let mut p = plugin.lock().await;
             let id = p.descriptor.id.to_string();
@@ -656,6 +791,539 @@ impl artist_kernel::SlashCommandSource for PluginHost {
     }
 }
 
+#[async_trait]
+impl artist_kernel::ModelProviderSource for PluginHost {
+    async fn resolve(
+        &self,
+        route: &ModelRoute,
+        _session_id: &artist_core::SessionId,
+        _profile_epoch: Option<u64>,
+    ) -> Result<Arc<dyn artist_kernel::StreamingModel>, String> {
+        for plugin in self.with(PluginCapability::ModelProvider).await {
+            let descriptors = {
+                let mut plugin = plugin.lock().await;
+                let LoadedPlugin {
+                    store, bindings, ..
+                } = &mut *plugin;
+                bindings
+                    .artist_plugin_model_provider()
+                    .call_descriptors(store)
+                    .await
+                    .map_err(|error| error.to_string())??
+            };
+            if descriptors.iter().any(|descriptor| {
+                descriptor.provider_id == route.provider
+                    && descriptor.model_patterns.iter().any(|pattern| {
+                        pattern == "*"
+                            || pattern == &route.model
+                            || pattern
+                                .strip_suffix('*')
+                                .is_some_and(|prefix| route.model.starts_with(prefix))
+                    })
+            }) {
+                return Ok(Arc::new(WasmProviderModel {
+                    plugin,
+                    route: route.clone(),
+                }));
+            }
+        }
+        Err(format!(
+            "no activated WASM provider supplies {}/{}",
+            route.provider, route.model
+        ))
+    }
+}
+
+struct WasmProviderModel {
+    plugin: Arc<Mutex<LoadedPlugin>>,
+    route: ModelRoute,
+}
+
+impl artist_kernel::StreamingModel for WasmProviderModel {
+    fn stream(
+        &self,
+        request: artist_kernel::ModelRequest,
+        _steering: artist_kernel::Steering,
+    ) -> artist_kernel::ModelStream {
+        let plugin = self.plugin.clone();
+        let route = self.route.clone();
+        Box::pin(async_stream::stream! {
+            let encoded = serde_json::json!({
+                "session_id": request.session_id,
+                "run_id": request.run_id,
+                "context": request.context,
+                "prompt": request.prompt,
+                "history": request.history,
+                "profile_epoch": request.profile_epoch,
+                "route": route,
+            })
+            .to_string();
+            let handle = {
+                let mut loaded = plugin.lock().await;
+                let LoadedPlugin { store, bindings, .. } = &mut *loaded;
+                match bindings
+                    .artist_plugin_model_provider()
+                    .call_start(store, &encoded)
+                    .await
+                {
+                    Ok(Ok(handle)) => handle,
+                    Ok(Err(failure)) => {
+                        yield Err(model_failure(failure));
+                        return;
+                    }
+                    Err(error) => {
+                        yield Err(artist_kernel::ModelError::new(error.to_string()));
+                        return;
+                    }
+                }
+            };
+            let mut cancellation = WasmProviderCancellation {
+                plugin: plugin.clone(),
+                handle: Some(handle.clone()),
+            };
+            loop {
+                let item = {
+                    let mut loaded = plugin.lock().await;
+                    let LoadedPlugin { store, bindings, .. } = &mut *loaded;
+                    bindings
+                        .artist_plugin_model_provider()
+                        .call_poll(store, &handle)
+                        .await
+                };
+                match item {
+                    Ok(Ok(exports::artist::plugin::model_provider::StreamItem::Event(event))) => {
+                        match serde_json::from_str::<artist_kernel::ModelEvent>(&event) {
+                            Ok(event) => yield Ok(event),
+                            Err(error) => {
+                                yield Err(artist_kernel::ModelError::new(format!(
+                                    "WASM provider emitted an invalid model event: {error}"
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                    Ok(Ok(exports::artist::plugin::model_provider::StreamItem::Finished)) => {
+                        cancellation.handle = None;
+                        return;
+                    }
+                    Ok(Ok(exports::artist::plugin::model_provider::StreamItem::Failed(failure)))
+                    | Ok(Err(failure)) => {
+                        cancellation.handle = None;
+                        yield Err(model_failure(failure));
+                        return;
+                    }
+                    Err(error) => {
+                        yield Err(artist_kernel::ModelError::new(error.to_string()));
+                        return;
+                    }
+                }
+            }
+        })
+    }
+}
+
+struct WasmProviderCancellation {
+    plugin: Arc<Mutex<LoadedPlugin>>,
+    handle: Option<String>,
+}
+
+impl Drop for WasmProviderCancellation {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let plugin = self.plugin.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let mut loaded = plugin.lock().await;
+                let LoadedPlugin {
+                    store, bindings, ..
+                } = &mut *loaded;
+                let _ = bindings
+                    .artist_plugin_model_provider()
+                    .call_cancel(store, &handle)
+                    .await;
+            });
+        }
+    }
+}
+
+fn model_failure(failure: artist::plugin::types::ToolFailure) -> artist_kernel::ModelError {
+    artist_kernel::ModelError(artist_core::ModelFailure {
+        message: failure.message,
+        class: artist_core::FailureClass::Provider,
+        retriable: failure.retriable,
+        provider_code: Some(failure.code),
+        http_status: None,
+        provider_request_id: None,
+    })
+}
+
+#[async_trait]
+impl artist_kernel::ExecutionExtensions for PluginHost {
+    async fn compose_initial_context(
+        &self,
+        context: InitialContext,
+    ) -> Result<InitialContext, artist_kernel::ExecutionExtensionError> {
+        PluginHost::compose_initial_context(self, context)
+            .await
+            .map_err(|error| {
+                artist_kernel::ExecutionExtensionError::new("compose-prompt", error.to_string())
+            })
+    }
+
+    async fn prepare_model_request(
+        &self,
+        request: &mut artist_kernel::ModelRequest,
+    ) -> Result<(), artist_kernel::ExecutionExtensionError> {
+        let scope = InvocationScope {
+            session_id: request.session_id.clone(),
+            run_id: Some(request.run_id.clone()),
+            call_id: None,
+            correlation_id: artist_core::CorrelationId::new(format!("{}:context", request.run_id)),
+            parent_correlation_id: None,
+        };
+        let transformed = self
+            .transform_context_scoped(
+                ModelContext {
+                    context: request.context.clone(),
+                    prompt: request
+                        .prompt
+                        .iter()
+                        .cloned()
+                        .map(core_content_to_wit)
+                        .collect::<Result<_, _>>()
+                        .map_err(|message| {
+                            artist_kernel::ExecutionExtensionError::new(
+                                "transform-context",
+                                message,
+                            )
+                        })?,
+                    history: request
+                        .history
+                        .iter()
+                        .map(|item| ModelHistoryItem {
+                            sequence: item.sequence,
+                            message: serde_json::to_string(&item.message)
+                                .expect("model history is serializable"),
+                        })
+                        .collect(),
+                },
+                Some(&scope),
+            )
+            .await
+            .map_err(|error| {
+                artist_kernel::ExecutionExtensionError::new("transform-context", error.to_string())
+            })?;
+        if transformed.prompt.is_empty() {
+            return Err(artist_kernel::ExecutionExtensionError::new(
+                "transform-context",
+                "plugin removed the current prompt",
+            ));
+        }
+        request.context = transformed.context;
+        request.prompt = transformed
+            .prompt
+            .into_iter()
+            .map(wit_content_to_core)
+            .collect::<Result<_, _>>()
+            .map_err(|message| {
+                artist_kernel::ExecutionExtensionError::new("transform-context", message)
+            })?;
+        request.history = transformed
+            .history
+            .into_iter()
+            .map(|item| {
+                Ok(artist_kernel::ModelHistoryItem {
+                    sequence: item.sequence,
+                    message: serde_json::from_str(&item.message).map_err(|error| {
+                        artist_kernel::ExecutionExtensionError::new(
+                            "transform-context",
+                            format!("plugin returned invalid typed history: {error}"),
+                        )
+                    })?,
+                })
+            })
+            .collect::<Result<_, artist_kernel::ExecutionExtensionError>>()?;
+        Ok(())
+    }
+
+    async fn configure_model(
+        &self,
+        _scope: &InvocationScope,
+        route: ModelRoute,
+    ) -> Result<ModelRoute, artist_kernel::ExecutionExtensionError> {
+        let configured = self
+            .configure_model_scoped(
+                ModelConfig {
+                    provider: route.provider,
+                    model: route.model,
+                    parameters: route.parameters.to_string(),
+                },
+                Some(_scope),
+            )
+            .await
+            .map_err(|error| {
+                artist_kernel::ExecutionExtensionError::new("configure-model", error.to_string())
+            })?;
+        let parameters = serde_json::from_str(&configured.parameters).map_err(|error| {
+            artist_kernel::ExecutionExtensionError::new(
+                "configure-model",
+                format!("plugin returned invalid model parameters: {error}"),
+            )
+        })?;
+        Ok(ModelRoute {
+            provider: configured.provider,
+            account: route.account,
+            api_variant: route.api_variant,
+            model: configured.model,
+            reasoning: route.reasoning,
+            parameters,
+        })
+    }
+
+    async fn compact_context(
+        &self,
+        scope: &InvocationScope,
+        history: &[artist_kernel::ModelHistoryItem],
+    ) -> Result<Option<artist_core::ProjectionArtifact>, artist_kernel::ExecutionExtensionError>
+    {
+        let context = ModelContext {
+            context: String::new(),
+            prompt: Vec::new(),
+            history: history
+                .iter()
+                .map(|item| ModelHistoryItem {
+                    sequence: item.sequence,
+                    message: serde_json::to_string(&item.message)
+                        .expect("model history is serializable"),
+                })
+                .collect(),
+        };
+        for plugin in self.with(PluginCapability::Context).await {
+            let mut plugin = plugin.lock().await;
+            let id = plugin.descriptor.id.to_string();
+            plugin.store.data_mut().invocation = Some(invocation_for_scope(scope.clone()));
+            let result = {
+                let LoadedPlugin {
+                    store, bindings, ..
+                } = &mut *plugin;
+                bindings
+                    .artist_plugin_lifecycle()
+                    .call_compact_context(store, &context)
+                    .await
+            };
+            plugin.store.data_mut().invocation = None;
+            let result = result
+                .map_err(|error| {
+                    artist_kernel::ExecutionExtensionError::new(
+                        "compact-context",
+                        error.to_string(),
+                    )
+                })?
+                .map_err(|message| {
+                    artist_kernel::ExecutionExtensionError::new(
+                        "compact-context",
+                        format!("{id}: {message}"),
+                    )
+                })?;
+            if let Some(artifact) = result {
+                let content = artifact
+                    .content
+                    .into_iter()
+                    .map(wit_content_to_core)
+                    .collect::<Result<_, _>>()
+                    .map_err(|message| {
+                        artist_kernel::ExecutionExtensionError::new("compact-context", message)
+                    })?;
+                let derivations = serde_json::from_str(&artifact.derivations).map_err(|error| {
+                    artist_kernel::ExecutionExtensionError::new(
+                        "compact-context",
+                        format!("invalid derivation metadata: {error}"),
+                    )
+                })?;
+                return Ok(Some(artist_core::ProjectionArtifact {
+                    content,
+                    derivations,
+                    projection_digest: artifact.projection_digest,
+                    earliest_changed_sequence: artifact.earliest_changed_sequence,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn hook(
+        &self,
+        event: artist_kernel::LifecycleHookEvent,
+    ) -> Result<Vec<artist_kernel::LifecycleHookDecision>, artist_kernel::ExecutionExtensionError>
+    {
+        let decisions = self
+            .observe_hook(&HookEvent {
+                phase: hook_phase_to_wit(event.phase),
+                scope: invocation_scope_to_wit(&event.scope),
+                payload: serde_json::to_string(&event.payload)
+                    .expect("hook payload is serializable"),
+            })
+            .await
+            .map_err(|error| {
+                artist_kernel::ExecutionExtensionError::new("observe-hook", error.to_string())
+            })?;
+        Ok(decisions
+            .into_iter()
+            .map(|decision| match decision {
+                HookDecision::Proceed => artist_kernel::LifecycleHookDecision::Proceed,
+                HookDecision::Stop(reason) => artist_kernel::LifecycleHookDecision::Stop { reason },
+                HookDecision::Rewrite(value) => artist_kernel::LifecycleHookDecision::Rewrite {
+                    value: serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value)),
+                },
+            })
+            .collect())
+    }
+
+    async fn drain_plugin_facts(
+        &self,
+        session_id: &artist_core::SessionId,
+    ) -> Vec<artist_core::PluginFact> {
+        self.event_outbox
+            .lock()
+            .await
+            .remove(session_id.as_str())
+            .unwrap_or_default()
+    }
+
+    fn observe_committed(&self, event: artist_core::StreamEvent) {
+        let encoded = serde_json::to_string(&event).expect("stream events are serializable");
+        let _ = self.observer_events.send(encoded);
+    }
+
+    fn bind_fact_sink(&self, session_id: &artist_core::SessionId, sink: artist_kernel::FactSink) {
+        self.fact_sinks
+            .lock()
+            .expect("fact sink lock poisoned")
+            .insert(session_id.to_string(), sink);
+    }
+
+    fn unbind_fact_sink(&self, session_id: &artist_core::SessionId) {
+        self.fact_sinks
+            .lock()
+            .expect("fact sink lock poisoned")
+            .remove(session_id.as_str());
+    }
+}
+
+async fn observe_event_loop(
+    plugins: Arc<RwLock<Vec<LoadedPluginSlot>>>,
+    mut committed: mpsc::UnboundedReceiver<String>,
+    mut runtime: mpsc::UnboundedReceiver<String>,
+    deliveries: Arc<RwLock<HashMap<String, u64>>>,
+    deadletters: PathBuf,
+) {
+    loop {
+        let event = tokio::select! {
+            committed = committed.recv() => match committed {
+                Some(event) => event,
+                None => match runtime.recv().await {
+                    Some(event) => event,
+                    None => break,
+                },
+            },
+            runtime = runtime.recv() => match runtime {
+                Some(event) => event,
+                None => match committed.recv().await {
+                    Some(event) => event,
+                    None => break,
+                },
+            },
+        };
+        deliver_observed_event(&plugins, &event, &deliveries, &deadletters).await;
+    }
+}
+
+async fn deliver_observed_event(
+    plugins: &Arc<RwLock<Vec<LoadedPluginSlot>>>,
+    event: &str,
+    deliveries: &Arc<RwLock<HashMap<String, u64>>>,
+    deadletters: &PathBuf,
+) {
+    let mut slots = plugins.read().expect("loaded plugin lock poisoned").clone();
+    slots
+        .sort_by(|left, right| lifecycle_order(left.priority, &left.id, right.priority, &right.id));
+    for slot in slots {
+        let advertised = slot
+            .plugin
+            .lock()
+            .await
+            .descriptor
+            .capabilities
+            .contains(&PluginCapability::Events);
+        if !advertised {
+            continue;
+        }
+        let mut last_error = None;
+        for attempt in 0..3 {
+            let result = {
+                let mut plugin = slot.plugin.lock().await;
+                // Observation deliveries must not recurse: a guest that emits
+                // while observing would re-enter the canonical path and loop.
+                plugin.store.data_mut().observing = true;
+                let id = plugin.descriptor.id.to_string();
+                let LoadedPlugin {
+                    store, bindings, ..
+                } = &mut *plugin;
+                let result = bindings
+                    .artist_plugin_lifecycle()
+                    .call_observe_event(&mut *store, event)
+                    .await;
+                store.data_mut().observing = false;
+                result.map_err(PluginError::Runtime).and_then(|result| {
+                    result.map_err(|message| PluginError::Socket {
+                        plugin: id,
+                        socket: "observe-event",
+                        message,
+                    })
+                })
+            };
+            match result {
+                Ok(()) => {
+                    *deliveries
+                        .write()
+                        .expect("observer delivery lock poisoned")
+                        .entry(slot.id.clone())
+                        .or_default() += 1;
+                    last_error = None;
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    tokio::time::sleep(Duration::from_millis(10 * (attempt + 1))).await;
+                }
+            }
+        }
+        let Some(error) = last_error else {
+            continue;
+        };
+        if let Some(parent) = deadletters.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let record = serde_json::json!({
+            "plugin_id": slot.id,
+            "event": serde_json::from_str::<Value>(event)
+                .unwrap_or_else(|_| Value::String(event.to_string())),
+            "error": error,
+        });
+        if let Ok(mut file) = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(deadletters)
+            .await
+        {
+            let _ = file.write_all(format!("{record}\n").as_bytes()).await;
+            let _ = file.flush().await;
+        }
+    }
+}
+
 #[derive(Clone)]
 struct RegisteredSlashCommand {
     owner: String,
@@ -687,6 +1355,11 @@ struct HostActivation {
     profiles: Arc<ProfilesProvider>,
     packages: Arc<PluginPackages>,
     slash_commands: Arc<RwLock<HashMap<String, RegisteredSlashCommand>>>,
+    event_schemas: Arc<RwLock<HashMap<(String, String), artist_core::PluginEventSchema>>>,
+    event_outbox: Arc<Mutex<HashMap<String, Vec<artist_core::PluginFact>>>>,
+    fact_sinks: Arc<std::sync::Mutex<HashMap<String, artist_kernel::FactSink>>>,
+    runtime_events: mpsc::UnboundedSender<String>,
+    session_service: Arc<RwLock<Option<Arc<dyn PluginSessionService>>>>,
     provider_state: ProviderState,
     activation: Mutex<()>,
 }
@@ -704,15 +1377,20 @@ impl PluginActivator for HostActivation {
             .map_err(|error| error.to_string())?;
         let mut store = Store::new(
             &self.engine,
-            HostState::new(
-                self.registry.clone(),
-                self.router.clone(),
-                self.search.clone(),
-                self.working_directory.clone(),
-                self.profiles.clone(),
-                self.packages.clone(),
-                self.provider_state.clone(),
-            )
+            HostState::new(HostServices {
+                registry: self.registry.clone(),
+                router: self.router.clone(),
+                search: self.search.clone(),
+                working_directory: self.working_directory.clone(),
+                profiles: self.profiles.clone(),
+                packages: self.packages.clone(),
+                provider_state: self.provider_state.clone(),
+                event_schemas: self.event_schemas.clone(),
+                event_outbox: self.event_outbox.clone(),
+                fact_sinks: self.fact_sinks.clone(),
+                runtime_events: self.runtime_events.clone(),
+                session_service: self.session_service.clone(),
+            })
             .map_err(|error| error.to_string())?,
         );
         let bindings = ArtistPlugin::instantiate_async(&mut store, &component, &self.linker)
@@ -763,6 +1441,16 @@ impl PluginActivator for HostActivation {
         } else {
             Vec::new()
         };
+        let model_descriptors = if descriptor.capabilities == [PluginCapability::ModelProvider] {
+            bindings
+                .artist_plugin_model_provider()
+                .call_descriptors(&mut store)
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|message| format!("model-provider descriptors failed: {message}"))?
+        } else {
+            Vec::new()
+        };
         let slash_definitions = if descriptor.capabilities == [PluginCapability::Commands] {
             bindings
                 .artist_plugin_slash_command_provider()
@@ -783,7 +1471,26 @@ impl PluginActivator for HostActivation {
             PluginCapability::Commands if slash_definitions.len() != 1 => {
                 return Err("a slash-command component must define exactly one command".into());
             }
+            PluginCapability::ModelProvider if model_descriptors.is_empty() => {
+                return Err("a model-provider component must define at least one provider".into());
+            }
             _ => {}
+        }
+        let mut provider_ids = std::collections::BTreeSet::new();
+        for provider in &model_descriptors {
+            if provider.provider_id.trim().is_empty()
+                || provider.revision.trim().is_empty()
+                || provider.model_patterns.is_empty()
+                || !provider_ids.insert(provider.provider_id.clone())
+            {
+                return Err(
+                    "model-provider descriptors require unique IDs, revisions, and model patterns"
+                        .into(),
+                );
+            }
+            let schema: Value = serde_json::from_str(&provider.parameter_schema)
+                .map_err(|error| format!("invalid provider parameter schema: {error}"))?;
+            validate_schema(&schema).map_err(|error| error.to_string())?;
         }
 
         let plugin = Arc::new(Mutex::new(LoadedPlugin {
@@ -794,9 +1501,15 @@ impl PluginActivator for HostActivation {
         let owner = descriptor.id.to_string();
         let mut tools = Vec::<(CoreTool, Arc<dyn ToolHandler>)>::new();
         for definition in tool_definitions {
-            let schema = serde_json::from_str(&definition.input_schema)
-                .map_err(|error| format!("invalid schema for {}: {error}", definition.name))?;
-            validate_schema(&schema).map_err(|error| error.to_string())?;
+            let input_schema = serde_json::from_str(&definition.input_schema).map_err(|error| {
+                format!("invalid input schema for {}: {error}", definition.name)
+            })?;
+            let output_schema =
+                serde_json::from_str(&definition.output_schema).map_err(|error| {
+                    format!("invalid output schema for {}: {error}", definition.name)
+                })?;
+            validate_schema(&input_schema).map_err(|error| error.to_string())?;
+            validate_schema(&output_schema).map_err(|error| error.to_string())?;
             if self
                 .registry
                 .owner(&definition.name)
@@ -812,8 +1525,16 @@ impl PluginActivator for HostActivation {
                 CoreTool {
                     name: name.clone(),
                     description: definition.description,
-                    input_schema: schema,
+                    category: definition.category,
+                    input_schema,
+                    output_schema,
                     effects: definition.effects.into_iter().map(tool_effect).collect(),
+                    annotations: CoreToolAnnotations {
+                        read_only: definition.annotations.read_only,
+                        destructive: definition.annotations.destructive,
+                        idempotent: definition.annotations.idempotent,
+                        open_world: definition.annotations.open_world,
+                    },
                 },
                 Arc::new(WasmTool {
                     plugin: plugin.clone(),
@@ -836,6 +1557,11 @@ impl PluginActivator for HostActivation {
             profiles: self.profiles.clone(),
             packages: self.packages.clone(),
             provider_state: self.provider_state.clone(),
+            event_schemas: self.event_schemas.clone(),
+            event_outbox: self.event_outbox.clone(),
+            fact_sinks: self.fact_sinks.clone(),
+            runtime_events: self.runtime_events.clone(),
+            session_service: self.session_service.clone(),
             plugin_id: owner.clone(),
         });
         let mut resource_routes = Vec::new();
@@ -950,11 +1676,25 @@ impl ToolHandler for WasmTool {
         let control = plugin.store.data_mut().pending_control.take();
         plugin.store.data_mut().invocation = None;
         let result = result
-            .map_err(|e| ToolError::Failed(e.to_string()))?
-            .map_err(ToolError::Failed)?;
+            .map_err(|error| ToolError::failed("component-runtime", error.to_string()))?
+            .map_err(|failure| ToolError::Failed(Box::new(wit_failure_to_core(failure))))?;
         Ok(CoreToolOutput {
-            value: serde_json::from_str(&result).unwrap_or(Value::String(result)),
+            value: serde_json::from_str(&result.value).map_err(|error| {
+                ToolError::Output(format!("plugin returned invalid JSON value: {error}"))
+            })?,
+            content: result
+                .content
+                .into_iter()
+                .map(wit_content_to_core)
+                .collect::<Result<_, _>>()
+                .map_err(|error| ToolError::Output(format!("invalid rich tool output: {error}")))?,
             control,
+            next_actions: result
+                .next_actions
+                .into_iter()
+                .map(wit_next_action_to_core)
+                .collect::<Result<_, _>>()
+                .map_err(ToolError::Output)?,
         })
     }
 }
@@ -970,6 +1710,11 @@ struct WasmResource {
     profiles: Arc<ProfilesProvider>,
     packages: Arc<PluginPackages>,
     provider_state: ProviderState,
+    event_schemas: Arc<RwLock<HashMap<(String, String), artist_core::PluginEventSchema>>>,
+    event_outbox: Arc<Mutex<HashMap<String, Vec<artist_core::PluginFact>>>>,
+    fact_sinks: Arc<std::sync::Mutex<HashMap<String, artist_kernel::FactSink>>>,
+    runtime_events: mpsc::UnboundedSender<String>,
+    session_service: Arc<RwLock<Option<Arc<dyn PluginSessionService>>>>,
     plugin_id: String,
 }
 
@@ -1061,15 +1806,20 @@ impl ProviderState {
 #[async_trait]
 impl ResourceProvider for WasmResource {
     async fn handle(&self, request: CoreRequest) -> Result<CoreReply, ResourceError> {
-        let mut state = HostState::new(
-            self.registry.clone(),
-            self.router.clone(),
-            self.search.clone(),
-            self.working_directory.clone(),
-            self.profiles.clone(),
-            self.packages.clone(),
-            self.provider_state.clone(),
-        )
+        let mut state = HostState::new(HostServices {
+            registry: self.registry.clone(),
+            router: self.router.clone(),
+            search: self.search.clone(),
+            working_directory: self.working_directory.clone(),
+            profiles: self.profiles.clone(),
+            packages: self.packages.clone(),
+            provider_state: self.provider_state.clone(),
+            event_schemas: self.event_schemas.clone(),
+            event_outbox: self.event_outbox.clone(),
+            fact_sinks: self.fact_sinks.clone(),
+            runtime_events: self.runtime_events.clone(),
+            session_service: self.session_service.clone(),
+        })
         .map_err(|error| ResourceError::Provider(error.to_string()))?;
         state.plugin_id = Some(self.plugin_id.clone());
         let mut store = Store::new(&self.engine, state);
@@ -1097,21 +1847,50 @@ struct HostState {
     profiles: Arc<ProfilesProvider>,
     packages: Arc<PluginPackages>,
     provider_state: ProviderState,
+    event_schemas: Arc<RwLock<HashMap<(String, String), artist_core::PluginEventSchema>>>,
+    event_outbox: Arc<Mutex<HashMap<String, Vec<artist_core::PluginFact>>>>,
+    fact_sinks: Arc<std::sync::Mutex<HashMap<String, artist_kernel::FactSink>>>,
+    runtime_events: mpsc::UnboundedSender<String>,
+    session_service: Arc<RwLock<Option<Arc<dyn PluginSessionService>>>>,
     working_directory: PathBuf,
     invocation: Option<InvocationContext>,
     plugin_id: Option<String>,
     pending_control: Option<ToolControl>,
+    observing: bool,
 }
+
+/// Per-instantiation host services shared by every WASM store.
+struct HostServices {
+    registry: ToolRegistry,
+    router: ResourceRouter,
+    search: Arc<RwLock<Option<Arc<SearchEngine>>>>,
+    working_directory: PathBuf,
+    profiles: Arc<ProfilesProvider>,
+    packages: Arc<PluginPackages>,
+    provider_state: ProviderState,
+    event_schemas: Arc<RwLock<HashMap<(String, String), artist_core::PluginEventSchema>>>,
+    event_outbox: Arc<Mutex<HashMap<String, Vec<artist_core::PluginFact>>>>,
+    fact_sinks: Arc<std::sync::Mutex<HashMap<String, artist_kernel::FactSink>>>,
+    runtime_events: mpsc::UnboundedSender<String>,
+    session_service: Arc<RwLock<Option<Arc<dyn PluginSessionService>>>>,
+}
+
 impl HostState {
-    fn new(
-        registry: ToolRegistry,
-        router: ResourceRouter,
-        search: Arc<RwLock<Option<Arc<SearchEngine>>>>,
-        working_directory: PathBuf,
-        profiles: Arc<ProfilesProvider>,
-        packages: Arc<PluginPackages>,
-        provider_state: ProviderState,
-    ) -> Result<Self, std::io::Error> {
+    fn new(services: HostServices) -> Result<Self, std::io::Error> {
+        let HostServices {
+            registry,
+            router,
+            search,
+            working_directory,
+            profiles,
+            packages,
+            provider_state,
+            event_schemas,
+            event_outbox,
+            fact_sinks,
+            runtime_events,
+            session_service,
+        } = services;
         Ok(Self {
             table: ResourceTable::new(),
             wasi: WasiCtx::builder().build(),
@@ -1122,10 +1901,16 @@ impl HostState {
             profiles,
             packages,
             provider_state,
+            event_schemas,
+            event_outbox,
+            fact_sinks,
+            runtime_events,
+            session_service,
             working_directory,
             invocation: None,
             plugin_id: None,
             pending_control: None,
+            observing: false,
         })
     }
     fn uri(&self, text: &str) -> Result<ResourceUri, String> {
@@ -1322,16 +2107,17 @@ impl artist::plugin::host_tools::Host for HostState {
         Ok(definitions
             .unwrap_or_else(|| self.registry.definitions())
             .into_iter()
-            .map(|d| artist::plugin::types::ToolDefinition {
-                name: d.name,
-                description: d.description,
-                input_schema: d.input_schema.to_string(),
-                effects: d.effects.into_iter().map(from_core_tool_effect).collect(),
-            })
+            .map(core_tool_to_wit)
             .collect())
     }
-    async fn call_tool(&mut self, name: String, arguments: String) -> Result<String, String> {
-        let args = serde_json::from_str(&arguments).map_err(|e| e.to_string())?;
+
+    async fn call_tool(
+        &mut self,
+        name: String,
+        arguments: String,
+    ) -> Result<artist::plugin::types::ToolSuccess, artist::plugin::types::ToolFailure> {
+        let args = serde_json::from_str(&arguments)
+            .map_err(|error| wit_failure("invalid-arguments", error.to_string(), false))?;
         let ctx = self
             .invocation
             .clone()
@@ -1339,23 +2125,325 @@ impl artist::plugin::host_tools::Host for HostState {
         if self.plugin_id.as_deref() == self.registry.owner(&name).as_deref() {
             let mut cycle = ctx.stack.clone();
             cycle.push(name.clone());
-            return Err(ToolError::Recursive {
-                cycle: cycle.join(" -> "),
-            }
-            .to_string());
+            return Err(wit_failure(
+                "recursive-tool-invocation",
+                ToolError::Recursive {
+                    cycle: cycle.join(" -> "),
+                }
+                .to_string(),
+                false,
+            ));
         }
         let output = self
             .registry
             .call_output_with_context(&name, args, ctx)
             .await
-            .map_err(|error| error.to_string())?;
-        if let Some(control) = output.control {
+            .map_err(core_failure_to_wit)?;
+        if let Some(control) = output.control.clone() {
             if self.pending_control.is_some() {
-                return Err("an invocation may request only one terminal control".into());
+                return Err(wit_failure(
+                    "multiple-terminal-controls",
+                    "an invocation may request only one terminal control",
+                    false,
+                ));
             }
             self.pending_control = Some(control);
         }
-        Ok(output.value.to_string())
+        core_output_to_wit(output)
+    }
+}
+
+impl artist::plugin::host_events::Host for HostState {
+    async fn register_schema(
+        &mut self,
+        schema: artist::plugin::host_events::EventSchema,
+    ) -> Result<String, String> {
+        let plugin_id = PluginId::new(self.plugin_id.clone().ok_or_else(|| {
+            "event schema registration requires an activated plugin identity".to_owned()
+        })?);
+        let mut core = artist_core::PluginEventSchema {
+            schema_id: artist_core::EventSchemaId::new(schema.schema_id.clone()),
+            plugin_id,
+            event_type: schema.event_type,
+            version: schema.version,
+            payload_schema: serde_json::from_str(&schema.payload_schema)
+                .map_err(|error| format!("invalid event payload schema: {error}"))?,
+            presentation_schema: serde_json::from_str(&schema.presentation_schema)
+                .map_err(|error| format!("invalid event presentation schema: {error}"))?,
+            schema_digest: String::new(),
+            presentation: serde_json::from_str(&schema.presentation)
+                .map_err(|error| format!("invalid event presentation: {error}"))?,
+        };
+        core.schema_digest = core.canonical_digest()?;
+        core.validate()?;
+        let key = (core.plugin_id.to_string(), schema.schema_id);
+        let mut schemas = self
+            .event_schemas
+            .write()
+            .expect("event schema lock poisoned");
+        if let Some(existing) = schemas.get(&key) {
+            if existing != &core {
+                return Err("event schema ID changed for an activated plugin".into());
+            }
+        } else {
+            schemas.insert(key, core.clone());
+        }
+        Ok(core.schema_digest)
+    }
+
+    async fn emit(
+        &mut self,
+        event: artist::plugin::host_events::EventRequest,
+    ) -> Result<(), String> {
+        let plugin_id =
+            PluginId::new(self.plugin_id.clone().ok_or_else(|| {
+                "event emission requires an activated plugin identity".to_owned()
+            })?);
+        let schema = self
+            .event_schemas
+            .read()
+            .expect("event schema lock poisoned")
+            .get(&(plugin_id.to_string(), event.schema_id.clone()))
+            .cloned()
+            .ok_or_else(|| "event emission refers to an unregistered schema".to_owned())?;
+        let requested_scope = wit_scope_to_core(event.scope);
+        let scope = self
+            .invocation
+            .as_ref()
+            .and_then(|invocation| invocation.scope.clone())
+            .unwrap_or(requested_scope);
+        let core = artist_core::PluginEvent {
+            plugin_id,
+            schema_id: artist_core::EventSchemaId::new(event.schema_id),
+            event_type: event.event_type,
+            schema_version: event.schema_version,
+            schema_digest: event.schema_digest,
+            scope,
+            payload: serde_json::from_str(&event.payload)
+                .map_err(|error| format!("invalid event payload: {error}"))?,
+            presentation: serde_json::from_str(&event.presentation)
+                .map_err(|error| format!("invalid event presentation: {error}"))?,
+        };
+        core.validate_against(&schema)?;
+        if self.observing {
+            return Err(
+                "plugins may not emit events while observing events; delivery loops are forbidden"
+                    .into(),
+            );
+        }
+        if !event.durable {
+            // Runtime-only diagnostics never enter the canonical transcript;
+            // they take the separate observation path only.
+            let encoded = serde_json::to_string(&serde_json::json!({
+                "runtime_plugin_event": core,
+            }))
+            .map_err(|error| format!("runtime event is not serializable: {error}"))?;
+            let _ = self.runtime_events.send(encoded);
+            return Ok(());
+        }
+        // Durable emission: success is returned only after the owning session
+        // actor durably appends the facts and publishes their stream events.
+        // The bounded channel applies backpressure to fast emitters.
+        let sink = self
+            .fact_sinks
+            .lock()
+            .expect("fact sink lock poisoned")
+            .get(core.scope.session_id.as_str())
+            .cloned();
+        if let Some(sink) = sink {
+            let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
+            let envelope = artist_kernel::FactEnvelope {
+                session_id: core.scope.session_id.clone(),
+                facts: vec![
+                    artist_core::PluginFact::SchemaRegistered { schema },
+                    artist_core::PluginFact::Event { event: core },
+                ],
+                receipt: receipt_tx,
+            };
+            sink.send(envelope)
+                .await
+                .map_err(|_| "the session fact channel is closed".to_owned())?;
+            return match receipt_rx.await {
+                Ok(result) => result,
+                Err(_) => Err("the session did not acknowledge the emission".into()),
+            };
+        }
+        // Legacy fallback for hosts without a bound session actor: facts are
+        // drained and appended at run boundaries.
+        let mut outbox = self.event_outbox.lock().await;
+        let facts = outbox.entry(core.scope.session_id.to_string()).or_default();
+        facts.push(artist_core::PluginFact::SchemaRegistered { schema });
+        facts.push(artist_core::PluginFact::Event { event: core });
+        Ok(())
+    }
+}
+
+impl artist::plugin::host_progress::Host for HostState {
+    async fn emit(
+        &mut self,
+        progress: artist::plugin::host_progress::Progress,
+    ) -> Result<(), String> {
+        if progress
+            .fraction
+            .is_some_and(|fraction| !fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
+        {
+            return Err("tool progress fraction must be finite and between zero and one".into());
+        }
+        let invocation = self
+            .invocation
+            .as_ref()
+            .ok_or_else(|| "tool progress requires an active invocation".to_owned())?;
+        let sink = invocation
+            .progress
+            .as_ref()
+            .ok_or_else(|| "tool progress sink is unavailable".to_owned())?;
+        let scope = invocation
+            .scope
+            .clone()
+            .unwrap_or_else(|| wit_scope_to_core(progress.scope));
+        sink.emit(artist_core::ToolProgress {
+            scope,
+            sequence: progress.sequence,
+            fraction: progress.fraction,
+            message: progress.message,
+            detail: serde_json::from_str(&progress.detail)
+                .map_err(|error| format!("invalid progress detail: {error}"))?,
+        });
+        Ok(())
+    }
+}
+
+impl artist::plugin::host_sessions::Host for HostState {
+    async fn create(
+        &mut self,
+        request: artist::plugin::host_sessions::CreateRequest,
+    ) -> Result<String, String> {
+        let service = self
+            .session_service
+            .read()
+            .expect("session service lock poisoned")
+            .clone()
+            .ok_or_else(|| "host session service is unavailable".to_owned())?;
+        let plugin_id =
+            PluginId::new(self.plugin_id.clone().ok_or_else(|| {
+                "session creation requires an activated plugin identity".to_owned()
+            })?);
+        let content = request
+            .content
+            .into_iter()
+            .map(wit_content_to_core)
+            .collect::<Result<_, _>>()?;
+        let attached = matches!(
+            request.attachment,
+            artist::plugin::host_sessions::Attachment::Attached
+        );
+        let recovery = match request.recovery {
+            artist::plugin::host_sessions::RecoveryPolicy::RemainInterrupted => {
+                "remain-interrupted"
+            }
+            artist::plugin::host_sessions::RecoveryPolicy::ResumeQueuedWork => "resume-queued-work",
+            artist::plugin::host_sessions::RecoveryPolicy::PluginResolved => "plugin-resolved",
+        };
+        service
+            .create(PluginSessionCreate {
+                request_id: request.request_id,
+                session_id: artist_core::SessionId::new(request.session_id),
+                profile: request.profile,
+                content,
+                attached,
+                recovery: recovery.into(),
+                relationship: request.relationship,
+                creator_plugin_id: plugin_id,
+                parent_scope: self
+                    .invocation
+                    .as_ref()
+                    .and_then(|invocation| invocation.scope.clone()),
+            })
+            .await
+            .map(|id| id.to_string())
+    }
+
+    async fn send(
+        &mut self,
+        session_id: String,
+        content: Vec<artist::plugin::types::ContentPart>,
+    ) -> Result<(), String> {
+        let service = self.session_service()?;
+        service
+            .send(
+                &artist_core::SessionId::new(session_id),
+                content
+                    .into_iter()
+                    .map(wit_content_to_core)
+                    .collect::<Result<_, _>>()?,
+            )
+            .await
+    }
+
+    async fn steer(
+        &mut self,
+        session_id: String,
+        content: Vec<artist::plugin::types::ContentPart>,
+    ) -> Result<(), String> {
+        let service = self.session_service()?;
+        service
+            .steer(
+                &artist_core::SessionId::new(session_id),
+                content
+                    .into_iter()
+                    .map(wit_content_to_core)
+                    .collect::<Result<_, _>>()?,
+            )
+            .await
+    }
+
+    async fn snapshot(&mut self, session_id: String) -> Result<String, String> {
+        self.session_service()?
+            .snapshot(&artist_core::SessionId::new(session_id))
+            .await
+            .map(|snapshot| snapshot.to_string())
+    }
+
+    async fn events(
+        &mut self,
+        session_id: String,
+        cursor: u64,
+        limit: u32,
+    ) -> Result<artist::plugin::host_sessions::EventPage, String> {
+        if limit == 0 || limit > 1_000 {
+            return Err("session event page limit must be in 1..=1000".into());
+        }
+        let (events, next_cursor) = self
+            .session_service()?
+            .events(&artist_core::SessionId::new(session_id), cursor, limit)
+            .await?;
+        Ok(artist::plugin::host_sessions::EventPage {
+            events: events.into_iter().map(|event| event.to_string()).collect(),
+            next_cursor,
+        })
+    }
+
+    async fn stop(&mut self, session_id: String, reason: String) -> Result<(), String> {
+        self.session_service()?
+            .stop(&artist_core::SessionId::new(session_id), reason)
+            .await
+    }
+
+    async fn await_terminal(&mut self, session_id: String) -> Result<String, String> {
+        self.session_service()?
+            .await_terminal(&artist_core::SessionId::new(session_id))
+            .await
+            .map(|outcome| outcome.to_string())
+    }
+}
+
+impl HostState {
+    fn session_service(&self) -> Result<Arc<dyn PluginSessionService>, String> {
+        self.session_service
+            .read()
+            .expect("session service lock poisoned")
+            .clone()
+            .ok_or_else(|| "host session service is unavailable".into())
     }
 }
 
@@ -1883,7 +2971,8 @@ fn capability(value: artist::plugin::types::Capability) -> PluginCapability {
         W::Resources => PluginCapability::Resources,
         W::Context => PluginCapability::Context,
         W::Hooks => PluginCapability::Hooks,
-        W::Model => PluginCapability::Model,
+        W::ModelConfig => PluginCapability::ModelConfig,
+        W::ModelProvider => PluginCapability::ModelProvider,
         W::Events => PluginCapability::Events,
         W::Commands => PluginCapability::Commands,
     }
@@ -1892,8 +2981,12 @@ fn capability(value: artist::plugin::types::Capability) -> PluginCapability {
 fn slash_action(value: artist::plugin::types::SlashCommandAction) -> CoreSlashAction {
     use artist::plugin::types::SlashCommandAction as W;
     match value {
-        W::Input(content) => CoreSlashAction::Input { content },
-        W::Steer(content) => CoreSlashAction::Steer { content },
+        W::Input(content) => CoreSlashAction::Input {
+            content: vec![artist_core::ContentPart::text(content)],
+        },
+        W::Steer(content) => CoreSlashAction::Steer {
+            content: vec![artist_core::ContentPart::text(content)],
+        },
         W::Abort(reason) => CoreSlashAction::Abort { reason },
         W::ActivateProfile(activation) => CoreSlashAction::ActivateProfile {
             profile: activation.profile,
@@ -1927,6 +3020,130 @@ fn validate_slash_definitions<'a>(
         }
     }
     Ok(())
+}
+
+fn core_tool_to_wit(tool: CoreTool) -> artist::plugin::types::ToolDefinition {
+    artist::plugin::types::ToolDefinition {
+        name: tool.name,
+        description: tool.description,
+        category: tool.category,
+        input_schema: tool.input_schema.to_string(),
+        output_schema: tool.output_schema.to_string(),
+        effects: tool
+            .effects
+            .into_iter()
+            .map(from_core_tool_effect)
+            .collect(),
+        annotations: artist::plugin::types::ToolAnnotations {
+            read_only: tool.annotations.read_only,
+            destructive: tool.annotations.destructive,
+            idempotent: tool.annotations.idempotent,
+            open_world: tool.annotations.open_world,
+        },
+    }
+}
+
+fn wit_next_action_to_core(
+    hint: artist::plugin::types::NextActionHint,
+) -> Result<CoreNextAction, String> {
+    Ok(CoreNextAction {
+        kind: hint.kind,
+        label: hint.label,
+        payload: serde_json::from_str(&hint.payload).map_err(|error| error.to_string())?,
+    })
+}
+
+fn core_next_action_to_wit(hint: CoreNextAction) -> artist::plugin::types::NextActionHint {
+    artist::plugin::types::NextActionHint {
+        kind: hint.kind,
+        label: hint.label,
+        payload: hint.payload.to_string(),
+    }
+}
+
+fn wit_failure_to_core(failure: artist::plugin::types::ToolFailure) -> CoreToolFailure {
+    CoreToolFailure {
+        code: failure.code,
+        message: failure.message,
+        retriable: failure.retriable,
+        details: serde_json::from_str(&failure.details).unwrap_or(Value::String(failure.details)),
+        violations: failure
+            .violations
+            .into_iter()
+            .map(|violation| artist_resource::FieldViolation {
+                path: violation.path,
+                message: violation.message,
+            })
+            .collect(),
+        next_actions: failure
+            .next_actions
+            .into_iter()
+            .filter_map(|hint| wit_next_action_to_core(hint).ok())
+            .collect(),
+    }
+}
+
+fn wit_failure(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    retriable: bool,
+) -> artist::plugin::types::ToolFailure {
+    artist::plugin::types::ToolFailure {
+        code: code.into(),
+        message: message.into(),
+        retriable,
+        details: "null".into(),
+        violations: Vec::new(),
+        next_actions: Vec::new(),
+    }
+}
+
+fn core_failure_to_wit(error: ToolError) -> artist::plugin::types::ToolFailure {
+    match error {
+        ToolError::Failed(failure) => {
+            let failure = *failure;
+            artist::plugin::types::ToolFailure {
+                code: failure.code,
+                message: failure.message,
+                retriable: failure.retriable,
+                details: failure.details.to_string(),
+                violations: failure
+                    .violations
+                    .into_iter()
+                    .map(|violation| artist::plugin::types::FieldViolation {
+                        path: violation.path,
+                        message: violation.message,
+                    })
+                    .collect(),
+                next_actions: failure
+                    .next_actions
+                    .into_iter()
+                    .map(core_next_action_to_wit)
+                    .collect(),
+            }
+        }
+        other => wit_failure("host-tool-error", other.to_string(), false),
+    }
+}
+
+#[allow(clippy::result_large_err)] // the WIT-generated failure record is the ABI shape; boxing would diverge from the component contract
+fn core_output_to_wit(
+    output: CoreToolOutput,
+) -> Result<artist::plugin::types::ToolSuccess, artist::plugin::types::ToolFailure> {
+    Ok(artist::plugin::types::ToolSuccess {
+        value: output.value.to_string(),
+        content: output
+            .content
+            .into_iter()
+            .map(core_content_to_wit)
+            .collect::<Result<_, _>>()
+            .map_err(|message| wit_failure("invalid-rich-content", message, false))?,
+        next_actions: output
+            .next_actions
+            .into_iter()
+            .map(core_next_action_to_wit)
+            .collect(),
+    })
 }
 
 fn tool_effect(value: artist::plugin::types::ToolEffect) -> CoreToolEffect {
@@ -1972,6 +3189,131 @@ fn from_core_context_role(value: CoreContextRole) -> artist::plugin::types::Cont
         CoreContextRole::Other => W::Other,
     }
 }
+fn core_content_to_wit(
+    part: CoreContentPart,
+) -> Result<artist::plugin::types::ContentPart, String> {
+    use artist::plugin::types as w;
+    Ok(match part {
+        CoreContentPart::Text { text } => w::ContentPart::Text(text),
+        CoreContentPart::Json { value } => w::ContentPart::Json(value.to_string()),
+        CoreContentPart::Attachment { attachment } => w::ContentPart::Attachment(w::Attachment {
+            blob: w::BlobRef {
+                algorithm: attachment.blob.algorithm,
+                digest: attachment.blob.digest,
+                byte_length: attachment.blob.byte_length,
+                media_type: attachment.blob.media_type,
+                logical_name: attachment.blob.logical_name,
+            },
+            role: attachment.role,
+            alternate_text: attachment.alternate_text,
+            metadata: attachment
+                .metadata
+                .into_iter()
+                .map(|(key, value)| w::MetadataEntry {
+                    key,
+                    value: value.to_string(),
+                })
+                .collect(),
+        }),
+        CoreContentPart::Reasoning { value } => w::ContentPart::Reasoning(value.to_string()),
+        CoreContentPart::Opaque { kind, value } => w::ContentPart::Opaque(w::OpaqueContent {
+            kind,
+            value: value.to_string(),
+        }),
+    })
+}
+
+fn wit_content_to_core(
+    part: artist::plugin::types::ContentPart,
+) -> Result<CoreContentPart, String> {
+    use artist::plugin::types::ContentPart as w;
+    Ok(match part {
+        w::Text(text) => CoreContentPart::Text { text },
+        w::Json(value) => CoreContentPart::Json {
+            value: serde_json::from_str(&value).map_err(|error| error.to_string())?,
+        },
+        w::Attachment(attachment) => {
+            let metadata = attachment
+                .metadata
+                .into_iter()
+                .map(|entry| {
+                    Ok((
+                        entry.key,
+                        serde_json::from_str(&entry.value).map_err(|error| error.to_string())?,
+                    ))
+                })
+                .collect::<Result<_, String>>()?;
+            let blob = artist_core::BlobRef {
+                algorithm: attachment.blob.algorithm,
+                digest: attachment.blob.digest,
+                byte_length: attachment.blob.byte_length,
+                media_type: attachment.blob.media_type,
+                logical_name: attachment.blob.logical_name,
+            };
+            blob.validate()?;
+            CoreContentPart::Attachment {
+                attachment: artist_core::Attachment {
+                    blob,
+                    role: attachment.role,
+                    alternate_text: attachment.alternate_text,
+                    metadata,
+                },
+            }
+        }
+        w::Reasoning(value) => CoreContentPart::Reasoning {
+            value: serde_json::from_str(&value).map_err(|error| error.to_string())?,
+        },
+        w::Opaque(value) => CoreContentPart::Opaque {
+            kind: value.kind,
+            value: serde_json::from_str(&value.value).map_err(|error| error.to_string())?,
+        },
+    })
+}
+
+fn hook_phase_to_wit(phase: artist_kernel::HookPhase) -> artist::plugin::types::HookPhase {
+    use artist::plugin::types::HookPhase as w;
+    match phase {
+        artist_kernel::HookPhase::BeforeModelRequest => w::BeforeModelRequest,
+        artist_kernel::HookPhase::AfterModelResponse => w::AfterModelResponse,
+        artist_kernel::HookPhase::BeforeToolExecution => w::BeforeToolExecution,
+        artist_kernel::HookPhase::AfterToolResult => w::AfterToolResult,
+        artist_kernel::HookPhase::RunCompleted => w::RunCompleted,
+        artist_kernel::HookPhase::RunInterrupted => w::RunInterrupted,
+        artist_kernel::HookPhase::RunFailed => w::RunFailed,
+    }
+}
+
+fn invocation_for_scope(scope: InvocationScope) -> InvocationContext {
+    let mut invocation = InvocationContext::root();
+    invocation.scope = Some(scope);
+    invocation
+}
+
+fn invocation_scope_to_wit(scope: &InvocationScope) -> artist::plugin::types::InvocationScope {
+    artist::plugin::types::InvocationScope {
+        session_id: scope.session_id.to_string(),
+        run_id: scope.run_id.as_ref().map(ToString::to_string),
+        call_id: scope.call_id.as_ref().map(ToString::to_string),
+        correlation_id: scope.correlation_id.to_string(),
+        parent_correlation_id: scope
+            .parent_correlation_id
+            .as_ref()
+            .map(ToString::to_string),
+    }
+}
+
+fn wit_scope_to_core(scope: artist::plugin::types::InvocationScope) -> InvocationScope {
+    InvocationScope {
+        session_id: artist_core::SessionId::new(scope.session_id),
+        run_id: scope.run_id.map(artist_core::RunId::new),
+        call_id: scope.call_id.map(artist_core::CallId::new),
+        correlation_id: artist_core::CorrelationId::new(scope.correlation_id),
+        parent_correlation_id: scope
+            .parent_correlation_id
+            .map(artist_core::CorrelationId::new),
+    }
+}
+
 fn resource_operation(value: artist::plugin::types::ResourceOperation) -> ResourceOperation {
     use artist::plugin::types::ResourceOperation as W;
     match value {
@@ -2080,6 +3422,13 @@ fn from_wit_reply(reply: artist::plugin::types::ResourceReply) -> Result<CoreRep
     use artist::plugin::types::{PollOutcome as W, ResourceReply as R};
     Ok(match reply {
         R::Text(text) => CoreReply::Text { text },
+        R::Content(content) => CoreReply::Content {
+            content: content
+                .into_iter()
+                .map(wit_content_to_core)
+                .collect::<Result<_, _>>()
+                .map_err(ResourceError::Provider)?,
+        },
         R::Children(children) => CoreReply::Children {
             children: children
                 .into_iter()
@@ -2115,6 +3464,13 @@ fn core_to_wit_reply(reply: CoreReply) -> artist::plugin::types::ResourceReply {
     use artist::plugin::types::{PollOutcome as W, ResourceReply as R};
     match reply {
         CoreReply::Text { text } => R::Text(text),
+        CoreReply::Content { content } => R::Content(
+            content
+                .into_iter()
+                .map(core_content_to_wit)
+                .collect::<Result<_, _>>()
+                .expect("canonical content always converts to WIT"),
+        ),
         CoreReply::Children { children } => {
             R::Children(children.into_iter().map(|uri| uri.to_string()).collect())
         }

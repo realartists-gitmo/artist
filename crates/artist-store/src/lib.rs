@@ -11,14 +11,16 @@ use std::{
     },
 };
 
-use artist_core::{InitialContext, RECORD_VERSION, SessionId, SessionRecord, TranscriptEntry};
+use artist_core::{
+    InitialContext, RECORD_VERSION, SessionId, SessionMetadata, SessionRecord, TranscriptEntry,
+};
 use async_trait::async_trait;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-pub const FILE_FORMAT_VERSION: u32 = 2;
+pub const FILE_FORMAT_VERSION: u32 = 3;
 // PRE-PRODUCTION POLICY: only this exact physical format and the current
 // RECORD_VERSION are readable. Do not add migrations or legacy decoders.
 
@@ -311,6 +313,7 @@ enum Frame {
         format_version: u32,
         record_version: u32,
         session_id: SessionId,
+        metadata: SessionMetadata,
         initial_context: InitialContext,
         hash: String,
     },
@@ -327,6 +330,7 @@ struct HeaderPayload {
     format_version: u32,
     record_version: u32,
     session_id: SessionId,
+    metadata: SessionMetadata,
     initial_context: InitialContext,
 }
 
@@ -342,6 +346,7 @@ fn encode_full(record: &SessionRecord) -> Result<(Vec<u8>, String), StoreError> 
         format_version: FILE_FORMAT_VERSION,
         record_version: RECORD_VERSION,
         session_id: record.session_id().clone(),
+        metadata: record.metadata().clone(),
         initial_context: record.initial_context().clone(),
     };
     let header_hash = hash(&header)?;
@@ -349,6 +354,7 @@ fn encode_full(record: &SessionRecord) -> Result<(Vec<u8>, String), StoreError> 
         format_version: header.format_version,
         record_version: header.record_version,
         session_id: header.session_id,
+        metadata: header.metadata,
         initial_context: header.initial_context,
         hash: header_hash.clone(),
     })?;
@@ -399,6 +405,7 @@ fn decode_current(
         format_version,
         record_version,
         session_id,
+        metadata,
         initial_context,
         hash: stored_hash,
     }) = lines.next().map(serde_json::from_slice).transpose()?
@@ -419,12 +426,13 @@ fn decode_current(
         format_version,
         record_version,
         session_id: session_id.clone(),
+        metadata: metadata.clone(),
         initial_context: initial_context.clone(),
     })?;
     if stored_hash != expected_hash {
         return Err(StoreError::Corrupt("header hash mismatch".into()));
     }
-    let mut record = SessionRecord::new(session_id, initial_context);
+    let mut record = SessionRecord::new_with_metadata(session_id, metadata, initial_context);
     let mut last_hash = stored_hash;
     for bytes in lines {
         let Frame::Batch {
@@ -492,7 +500,7 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artist_core::{MessageId, RunId, Source, TranscriptEntryKind};
+    use artist_core::{ContentPart, MessageId, RunId, Source, TranscriptEntryKind};
 
     fn empty(id: &str) -> SessionRecord {
         SessionRecord::new(SessionId::from(id), InitialContext { fragments: vec![] })
@@ -502,7 +510,7 @@ mod tests {
         record.entry(TranscriptEntryKind::Input {
             message_id: MessageId::from(id),
             source: Source::User,
-            content: "hello".into(),
+            content: vec![ContentPart::text("hello")],
         })
     }
 
@@ -514,7 +522,7 @@ mod tests {
             TranscriptEntryKind::Input {
                 message_id: MessageId::from("input"),
                 source: Source::User,
-                content: "hello".into(),
+                content: vec![ContentPart::text("hello")],
             },
             TranscriptEntryKind::RunStarted {
                 run_id: RunId::from("run"),
@@ -542,21 +550,31 @@ mod tests {
     async fn rejects_every_stale_file_or_record_version() {
         let temporary = tempfile::tempdir().unwrap();
         let store = FileStore::new(temporary.path()).await.unwrap();
-        for (format_version, record_version) in
-            [(2, 1), (2, 2), (2, 3), (2, 4), (2, 6), (1, 5), (3, 5)]
-        {
+        for (format_version, record_version) in [
+            (3, 1),
+            (3, 2),
+            (3, 3),
+            (3, 4),
+            (3, 5),
+            (3, 7),
+            (2, 6),
+            (4, 6),
+        ] {
             let session_id = SessionId::new(format!("framed-f{format_version}-r{record_version}"));
             let initial_context = InitialContext { fragments: vec![] };
+            let metadata = SessionMetadata::root(0, None);
             let payload = HeaderPayload {
                 format_version,
                 record_version,
                 session_id: session_id.clone(),
+                metadata: metadata.clone(),
                 initial_context: initial_context.clone(),
             };
             let bytes = line(&Frame::Header {
                 format_version,
                 record_version,
                 session_id: session_id.clone(),
+                metadata,
                 initial_context,
                 hash: hash(&payload).unwrap(),
             })
@@ -680,7 +698,7 @@ mod tests {
             TranscriptEntryKind::Input {
                 message_id: MessageId::from("input"),
                 source: Source::User,
-                content: "hello".into(),
+                content: vec![ContentPart::text("hello")],
             },
             TranscriptEntryKind::RunStarted {
                 run_id: RunId::from("run"),
@@ -723,7 +741,7 @@ mod tests {
         let original = std::fs::read_to_string(&path).unwrap();
         let mut lines: Vec<_> = original.lines().map(str::to_owned).collect();
         let mut first_batch: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
-        first_batch["entries"][0]["kind"]["content"] = "tampered".into();
+        first_batch["entries"][0]["kind"]["content"][0]["text"] = "tampered".into();
         lines[1] = serde_json::to_string(&first_batch).unwrap();
         std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
         let fresh = FileStore::new(temporary.path()).await.unwrap();

@@ -29,6 +29,7 @@ members = [
     "tool-run",
     "tool-signal",
     "tool-yield",
+    "notes",
     "tool-handoff",
     "concurrent-resource-fixture",
 ]

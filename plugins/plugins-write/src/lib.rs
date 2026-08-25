@@ -29,4 +29,5 @@ artist_plugin_sdk::unadvertised_lifecycle!(
 );
 artist_plugin_sdk::unadvertised_tools!(PluginsWrite);
 artist_plugin_sdk::unadvertised_slash_commands!(PluginsWrite);
+artist_plugin_sdk::unadvertised_model_provider!(PluginsWrite);
 artist_plugin_sdk::export!(PluginsWrite with_types_in artist_plugin_sdk);

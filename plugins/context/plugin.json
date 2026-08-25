@@ -1,5 +1,5 @@
 {
-  "format": 2,
+  "format": 3,
   "id": "artist.context",
   "build": {"adapter": "cargo", "package": "artist-context"},
   "component": "artist_context.wasm"

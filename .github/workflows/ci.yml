@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: fmt + wasm + clippy + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - name: Install FUSE headers (fuse-test target)
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev fuse3
+      - name: make test
+        run: make test
+      - name: fuse-test
+        run: make fuse-test

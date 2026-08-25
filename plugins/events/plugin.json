@@ -1,5 +1,5 @@
 {
-  "format": 2,
+  "format": 3,
   "id": "artist.events",
   "build": {"adapter": "cargo", "package": "artist-events"},
   "component": "artist_events.wasm"

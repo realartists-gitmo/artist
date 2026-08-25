@@ -1,5 +1,5 @@
 {
-  "format": 2,
+  "format": 3,
   "id": "artist.plugins.move",
   "build": {"adapter": "cargo", "package": "artist-plugins-move"},
   "component": "artist_plugins_move.wasm"
