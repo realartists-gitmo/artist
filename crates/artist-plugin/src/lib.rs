@@ -3722,6 +3722,84 @@ fn optional_usize(value: Option<u64>, field: &str) -> Result<Option<usize>, Stri
 mod tests {
     use super::*;
 
+    /// Emissions made while observing events are rejected: the guard breaks
+    /// observer -> emit -> observe loops before they can start.
+    #[tokio::test]
+    async fn emitting_while_observing_is_rejected() {
+        let profiles = tempfile::tempdir().unwrap();
+        let plugins = tempfile::tempdir().unwrap();
+        let host = PluginHost::new_with_roots(profiles.path(), plugins.path())
+            .await
+            .unwrap();
+        let (runtime_tx, _runtime_rx) = tokio::sync::mpsc::unbounded_channel();
+        let services = HostServices {
+            registry: host.registry(),
+            router: artist_resource::ResourceRouter::new(),
+            search: Arc::new(RwLock::new(None)),
+            working_directory: std::path::PathBuf::from("."),
+            profiles: Arc::new(ProfilesProvider::new(profiles.path())),
+            packages: host.packages(),
+            provider_state: ProviderState::default(),
+            event_schemas: Arc::new(RwLock::new(HashMap::new())),
+            event_outbox: Arc::new(Mutex::new(HashMap::new())),
+            fact_sinks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            runtime_events: runtime_tx,
+            session_service: Arc::new(RwLock::new(None)),
+        };
+        let mut state = HostState::new(services).unwrap();
+        state.plugin_id = Some("artist.observer".into());
+
+        // Register a valid schema while NOT observing.
+        let schema = artist::plugin::host_events::EventSchema {
+            schema_id: "obs-v1".into(),
+            event_type: "artist.observer.ping".into(),
+            version: "1".into(),
+            payload_schema: r#"{"type":"object"}"#.into(),
+            presentation_schema: r#"{"type":"object"}"#.into(),
+            presentation: "{}".into(),
+        };
+        artist::plugin::host_events::Host::register_schema(&mut state, schema)
+            .await
+            .unwrap();
+
+        let request = |digest: &str| artist::plugin::host_events::EventRequest {
+            schema_id: "obs-v1".into(),
+            event_type: "artist.observer.ping".into(),
+            schema_version: "1".into(),
+            schema_digest: digest.to_string(),
+            scope: artist::plugin::types::InvocationScope {
+                session_id: "s".into(),
+                run_id: None,
+                call_id: None,
+                correlation_id: "c".into(),
+                parent_correlation_id: None,
+            },
+            payload: "{}".into(),
+            presentation: "{}".into(),
+            durable: false,
+        };
+
+        // Normal emission passes validation and reaches the runtime path.
+        let digest = {
+            let schemas = state.event_schemas.read().unwrap();
+            schemas
+                .get(&("artist.observer".into(), "obs-v1".into()))
+                .unwrap()
+                .schema_digest
+                .clone()
+        };
+        artist::plugin::host_events::Host::emit(&mut state, request(&digest))
+            .await
+            .unwrap();
+
+        // Flip into observation mode; the same emission must be rejected.
+        state.observing = true;
+        let error = artist::plugin::host_events::Host::emit(&mut state, request(&digest))
+            .await
+            .unwrap_err();
+        assert!(error.contains("while observing"), "{error}");
+    }
+
     #[test]
     fn wasm_resource_provider_is_shareable_across_concurrent_router_calls() {
         fn assert_send_sync<T: Send + Sync>() {}

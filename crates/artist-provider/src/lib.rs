@@ -296,7 +296,7 @@ impl ProviderStateStore for FileStateStore {
             .map_err(|x| ProviderError::State(x.to_string()))
     }
 }
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Secret(String);
 
 impl Secret {
@@ -315,7 +315,7 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Credential {
     pub kind: String,
     pub secret: Secret,
@@ -360,6 +360,68 @@ impl CredentialStore for MemoryCredentialStore {
         Ok(())
     }
 }
+/// File-backed credential store. Each credential reference maps to one
+/// atomically-replaced JSON document under the store root; secret material
+/// never appears in logs, errors, or transcripts. The directory itself holds
+/// plaintext secrets — protect it like a keychain, or use an external-vault
+/// implementation of `CredentialStore` in production.
+pub struct FileCredentialStore {
+    root: PathBuf,
+    lock: Arc<std::sync::Mutex<()>>,
+}
+impl FileCredentialStore {
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self, ProviderError> {
+        let root = root.into();
+        std::fs::create_dir_all(&root)
+            .map_err(|error| ProviderError::Credential(error.to_string()))?;
+        Ok(Self {
+            root,
+            lock: Arc::default(),
+        })
+    }
+    fn path(&self, k: &str) -> PathBuf {
+        // Reference names are hashed into object names so odd key shapes
+        // cannot escape the root.
+        let mut hasher = Sha256::new();
+        hasher.update(k.as_bytes());
+        let name: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        self.root.join(format!("{name}.json"))
+    }
+}
+#[async_trait]
+impl CredentialStore for FileCredentialStore {
+    async fn put(&self, k: &str, v: Credential) -> Result<(), ProviderError> {
+        let bytes =
+            serde_json::to_vec(&v).map_err(|error| ProviderError::Credential(error.to_string()))?;
+        let path = self.path(k);
+        let tmp = path.with_extension("tmp");
+        let _guard = self.lock.lock().unwrap();
+        std::fs::write(&tmp, &bytes).map_err(|e| ProviderError::Credential(e.to_string()))?;
+        std::fs::rename(&tmp, &path).map_err(|e| ProviderError::Credential(e.to_string()))?;
+        Ok(())
+    }
+    async fn get(&self, k: &str) -> Result<Option<Credential>, ProviderError> {
+        match std::fs::read(self.path(k)) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).map_err(|error| {
+                ProviderError::Credential(format!("stored credential is invalid: {error}"))
+            })?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ProviderError::Credential(error.to_string())),
+        }
+    }
+    async fn delete(&self, k: &str) -> Result<(), ProviderError> {
+        match std::fs::remove_file(self.path(k)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ProviderError::Credential(error.to_string())),
+        }
+    }
+}
+
 #[async_trait]
 pub trait ProviderDriver: Send + Sync {
     async fn open(
@@ -1076,6 +1138,104 @@ mod tests {
                 descriptor.id.0
             );
         }
+    }
+
+    #[tokio::test]
+    async fn file_credentials_survive_restart_and_delete_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = "keychain:restart-check";
+        {
+            let store = FileCredentialStore::open(dir.path()).unwrap();
+            store
+                .put(
+                    reference,
+                    Credential {
+                        kind: "api-key".into(),
+                        secret: Secret::new("material-1"),
+                        expires_at: None,
+                        refresh: Some(Secret::new("refresh-1")),
+                        private: BTreeMap::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let reopened = FileCredentialStore::open(dir.path()).unwrap();
+        let credential = reopened.get(reference).await.unwrap().expect("persisted");
+        assert_eq!(credential.secret.expose(), "material-1");
+        assert_eq!(
+            credential.refresh.as_ref().map(|r| r.expose().to_string()),
+            Some("refresh-1".into())
+        );
+        reopened.delete(reference).await.unwrap();
+        assert!(reopened.get(reference).await.unwrap().is_none());
+        reopened.delete("never-existed").await.unwrap(); // idempotent
+    }
+
+    /// The catalog must stay in lockstep with RIG_PROVIDER_MATRIX.md: every
+    /// documented Rig provider is registered with the auth kinds its row
+    /// declares. This is the provider-specific half of the conformance gate.
+    #[test]
+    fn catalog_matches_the_documented_rig_provider_matrix() {
+        let matrix_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../RIG_PROVIDER_MATRIX.md");
+        let text = std::fs::read_to_string(matrix_path).expect("provider matrix present");
+        let catalog = rig_provider_catalog();
+        let mut matched_rows = 0;
+        for line in text
+            .lines()
+            .filter(|l| l.starts_with("| ") && !l.contains("Rig module"))
+        {
+            let cells: Vec<&str> = line.split('|').collect();
+            if cells.len() < 6 {
+                continue;
+            }
+            let module = cells[1].trim();
+            if module == "---" || module.is_empty() {
+                continue;
+            }
+            let descriptor = catalog
+                .iter()
+                .find(|d| d.id.0 == module)
+                .unwrap_or_else(|| {
+                    panic!("matrix row `{module}` missing from the installed catalog")
+                });
+            // Auth column names at least one flow; descriptors must declare
+            // a non-empty, matching-shape auth list.
+            assert!(
+                !descriptor.auth_kinds.is_empty(),
+                "`{module}` documents authentication but declares none"
+            );
+            let streams = cells[2].trim().eq_ignore_ascii_case("yes");
+            if streams {
+                assert!(
+                    !descriptor.models.is_empty(),
+                    "`{module}` streams completions but registers no model patterns"
+                );
+                assert!(
+                    descriptor
+                        .capabilities
+                        .iter()
+                        .any(|c| c.name == "streaming"),
+                    "`{module}` documents streaming but lacks the capability"
+                );
+            } else {
+                // Embedding/rerank-only providers must not claim streaming.
+                assert!(
+                    !descriptor
+                        .capabilities
+                        .iter()
+                        .any(|c| c.name == "streaming"),
+                    "`{module}` does not stream but claims the capability"
+                );
+            }
+            matched_rows += 1;
+        }
+        assert!(
+            matched_rows >= 26,
+            "expected the full 26-row matrix, parsed {matched_rows}"
+        );
+        // And nothing exists in the catalog that the matrix does not document.
+        assert_eq!(catalog.len(), matched_rows, "catalog and matrix diverged");
     }
 
     #[tokio::test]

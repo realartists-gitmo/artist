@@ -132,3 +132,18 @@ superseded by the async resource-fabric and rich lifecycle contract.
 - Bodies are UTF-8 text; vision and binary resources need a future model-aware path.
 - MCP, `skill://`, action-node invocation, and the edit instruction language are deferred.
 - Frontend/UI is deferred. Permissions, sandboxing, security policy, and isolation are anti-features and remain out of scope.
+
+## Implemented additions (post-plan)
+
+- **Durable scoped storage** is mounted at `store:///{scope}/{key}` with scopes
+  `global`, `session/<id>`, `account/<owner>`, `identity/<owner>`,
+  `workspace/<owner>`, and `profile/<owner>`. The backend is revisioned,
+  file-backed under `.artist/durable-store/`, and shared by all plugins
+  through ordinary resource semantics — there is no generic key/value import.
+  See `crates/artist-resource/src/storage_provider.rs` and
+  `PLUGINS.md` ("Durable state and events").
+- The per-session resource *view* types (`ViewIdentity`, `ResourceLayer`,
+  `ResourceView`) exist in `storage.rs`; wiring distinct views per live
+  session into the FUSE projection remains future work.
+- Blob bodies are content-addressed with roots + leases + quarantine GC in
+  `storage.rs`; canonical transcripts reference blobs by digest.

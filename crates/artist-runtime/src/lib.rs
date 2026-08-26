@@ -1397,6 +1397,82 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn slow_subscribers_observe_lag_markers_and_stay_connected() {
+                let (runtime, _, release, _) = make_runtime().await;
+                let id: SessionId = "lagging".into();
+                runtime
+                    .create(CreateRequest {
+                        request_id: "r1".into(),
+                        session_id: id.clone(),
+                        context: InitialContext { fragments: vec![] },
+                        metadata: metadata_of(&id),
+                    })
+                    .await
+                    .unwrap();
+
+                // Subscribe, then flood far past the broadcast capacity
+                // without reading.
+                let mut events = runtime.subscribe();
+                for i in 0..400 {
+                    runtime
+                        .send_content(
+                            &id,
+                            Source::User,
+                            vec![ContentPart::text(format!("msg-{i}"))],
+                        )
+                        .await
+                        .unwrap();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+                // Draining must surface a Lagged signal rather than silence:
+                // either a bridged marker event or the receiver's own
+                // Lagged error after skipping.
+                use tokio::sync::broadcast::error::TryRecvError;
+                let mut saw_lagged = false;
+                let mut drained = 0usize;
+                loop {
+                    match events.try_recv() {
+                        Ok(RuntimeEvent::Lagged { .. }) => saw_lagged = true,
+                        Ok(_) => drained += 1,
+                        Err(TryRecvError::Lagged(_)) => saw_lagged = true,
+                        Err(_) => break,
+                    }
+                    if drained > 600 {
+                        break;
+                    }
+                }
+                assert!(drained > 0, "expected buffered events after the flood");
+                assert!(saw_lagged, "expected a Lagged signal after the flood");
+
+                // ...and the bridge is still alive: new events flow.
+                runtime
+                    .send_content(&id, Source::User, vec![ContentPart::text("after")])
+                    .await
+                    .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let mut alive = false;
+                loop {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "bridge died after lag"
+                    );
+                    match events.try_recv() {
+                        Ok(RuntimeEvent::Stream(_)) | Ok(RuntimeEvent::Lagged { .. }) => {
+                            alive = true;
+                            break;
+                        }
+                        Ok(RuntimeEvent::Replay { .. }) => continue,
+                        Err(_) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+                    }
+                }
+                assert!(alive);
+                for _ in 0..4 {
+                    release.notify_one();
+                }
+            }
+
+            #[tokio::test]
             async fn shutdown_drains_the_registry_and_aborts_live_sessions() {
                 let (runtime, _, _, _) = make_runtime().await;
                 let first = spawn_session(&runtime, "r1", "one", None, Attachment::Detached)

@@ -189,7 +189,9 @@ version = "0.1.0"
 dependencies = [
  "artist-core",
  "artist-kernel",
+ "artist-provider",
  "artist-resource",
+ "artist-runtime",
  "artist-store",
  "async-stream",
  "async-trait",

@@ -1275,6 +1275,30 @@ impl Session {
     /// the emitter's receipt. The emitter's success therefore implies the
     /// facts are canonical and their stream events are published.
     async fn commit_facts(&mut self, envelope: FactEnvelope) -> Result<(), SessionError> {
+        // Validate the whole envelope before touching durable state so an
+        // invalid emission cannot leave half of itself in the transcript.
+        for fact in &envelope.facts {
+            if let PluginFact::Event { event } = fact {
+                let registered = envelope.facts.iter().find_map(|f| match f {
+                    PluginFact::SchemaRegistered { schema }
+                        if schema.schema_id == event.schema_id =>
+                    {
+                        Some(schema)
+                    }
+                    _ => None,
+                });
+                let validated = match registered
+                    .or_else(|| self.record.plugin_event_schema(&event.schema_id))
+                {
+                    Some(schema) => event.validate_against(schema),
+                    None => Err("event refers to an unregistered schema".into()),
+                };
+                if let Err(message) = validated {
+                    let _ = envelope.receipt.send(Err(message));
+                    return Ok(());
+                }
+            }
+        }
         let mut outcome = Ok(());
         for fact in envelope.facts {
             if let Err(error) = self.persist_fact(fact).await {
@@ -1694,6 +1718,124 @@ mod tests {
             !kinds
                 .iter()
                 .any(|k| matches!(k, TranscriptEntryKind::RunFinished { .. }))
+        );
+    }
+
+    /// Payload limits are enforced before any durable append: an oversized
+    /// event fails its receipt and leaves the canonical transcript untouched.
+    #[tokio::test]
+    async fn oversized_emissions_are_rejected_before_the_append() {
+        struct OversizeModel;
+        impl StreamingModel for OversizeModel {
+            fn stream(&self, request: ModelRequest, _: Steering) -> ModelStream {
+                Box::pin(futures::stream::once(async move {
+                    let captured = CAPTURED_SINK.with(|c| c.borrow().as_ref().map(|s| s.clone()));
+                    let sink = captured.expect("fact sink bound");
+                    let schema = artist_core::PluginEventSchema {
+                        schema_id: artist_core::EventSchemaId::from("big-v1"),
+                        plugin_id: artist_core::PluginId::from("example.big"),
+                        event_type: "example.big.payload".into(),
+                        version: "1".into(),
+                        payload_schema: serde_json::json!({"type": "object"}),
+                        presentation_schema: serde_json::json!({"type": "object"}),
+                        schema_digest: String::new(),
+                        presentation: serde_json::json!({}),
+                    };
+                    let mut schema = schema;
+                    schema.schema_digest = schema.canonical_digest().unwrap();
+                    let mut event = artist_core::PluginEvent {
+                        plugin_id: schema.plugin_id.clone(),
+                        schema_id: schema.schema_id.clone(),
+                        event_type: schema.event_type.clone(),
+                        schema_version: schema.version.clone(),
+                        schema_digest: schema.schema_digest.clone(),
+                        scope: artist_core::InvocationScope {
+                            session_id: request.session_id.clone(),
+                            run_id: Some(request.run_id.clone()),
+                            call_id: None,
+                            correlation_id: artist_core::CorrelationId::new("big"),
+                            parent_correlation_id: None,
+                        },
+                        payload: serde_json::json!({}),
+                        presentation: serde_json::json!({}),
+                    };
+                    // One byte past the 1 MiB event limit.
+                    event.payload = serde_json::json!({
+                        "blob": "x".repeat(artist_core::MAX_PLUGIN_EVENT_BYTES)
+                    });
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    sink.send(crate::FactEnvelope {
+                        session_id: request.session_id,
+                        facts: vec![
+                            artist_core::PluginFact::SchemaRegistered { schema },
+                            artist_core::PluginFact::Event { event },
+                        ],
+                        receipt: tx,
+                    })
+                    .await
+                    .unwrap();
+                    // The emitter learns of the rejection through its receipt.
+                    let receipt = rx.await.unwrap();
+                    assert!(receipt.is_err(), "oversized emission must be rejected");
+                    Ok(ModelEvent::Finished {
+                        output: Some("done".into()),
+                    })
+                }))
+            }
+        }
+
+        thread_local! {
+            static CAPTURED_SINK: std::cell::RefCell<Option<crate::FactSink>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        struct SinkCapture;
+        #[async_trait]
+        impl ExecutionExtensions for SinkCapture {
+            fn bind_fact_sink(&self, _: &SessionId, sink: crate::FactSink) {
+                CAPTURED_SINK.with(|c| *c.borrow_mut() = Some(sink));
+            }
+        }
+
+        let store = Arc::new(MemoryStore::default());
+        let dependencies = SessionDependencies {
+            store: store.clone(),
+            model: Arc::new(OversizeModel),
+            profiles: None,
+            slash_commands: None,
+            extensions: Arc::new(SinkCapture),
+            resume_queued_work: true,
+        };
+        let session = SessionHandle::create(
+            CreateSession {
+                session_id: SessionId::from("session"),
+                metadata: SessionMetadata::root(0, None),
+                context: InitialContext { fragments: vec![] },
+                initial_profile: None,
+            },
+            dependencies,
+        )
+        .await
+        .unwrap();
+        session.input(Source::User, "hello").await.unwrap();
+        // Rejection is graceful: the emitter got Err via its receipt and the
+        // session keeps serving commands.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        session
+            .input(Source::User, "again")
+            .await
+            .expect("rejection must not close the session");
+
+        // The transcript contains no trace of the rejected emission.
+        let record = store.load(&SessionId::from("session")).await.unwrap();
+        assert!(!record.entries().iter().any(|entry| matches!(
+            entry.kind,
+            TranscriptEntryKind::PluginEventSchemaRegistered { .. }
+        )));
+        assert!(
+            !record
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry.kind, TranscriptEntryKind::PluginEvent { .. }))
         );
     }
 
