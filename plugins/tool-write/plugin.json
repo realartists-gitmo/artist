@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.tool.write",
-  "build": {"adapter": "cargo", "package": "artist-tool-write"},
-  "component": "artist_tool_write.wasm"
-}

@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.tool.handoff",
-  "build": {"adapter": "cargo", "package": "artist-tool-handoff"},
-  "component": "artist_tool_handoff.wasm"
-}

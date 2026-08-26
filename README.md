@@ -1,99 +1,80 @@
 # Artist
 
-Artist is a small persistent, streaming agent harness. Rig owns model execution; the Artist kernel owns the durable session protocol; Wasmtime components supply behavior that should vary.
+Artist is a small, durable agent runtime built around two objects:
 
-Artist deliberately provides no permission, security, sandbox, confinement, or
-isolation boundary. Resource scopes organize routing; they do not restrict
-access. Deployments that need a boundary must provide it outside Artist.
+- A **Node** is an immutable, versioned recipe for an agent.
+- A **Run** is one append-only execution of a Node.
 
-## Crates
+Runs can spawn other nodes, fork their exact model-context prefix, wait for typed results, or replace themselves. Python memory is temporary; events and shared workspace files are durable.
 
-- `artist-core`: stable IDs, commands, stream events, and append-only transcript types
-- `artist-store`: in-memory and JSONL session stores behind one narrow trait
-- `artist-kernel`: the single-owner session actor, streaming state machine, and transcript projection
-- `artist-rig`: thin Rig streaming adapter and `rig-memory` policies
-- `artist-resource`: canonical URI tree, deterministic routing, platform mount adapters, FFF search, durable scoped storage (`store:///`), content-addressed blobs with roots+leases+GC
-- `artist-plugin`: versioned WIT component host and ordered capability chains; per-session plugin-event sinks commit emissions durably before the emitter is released
-- `artist-provider`: provider/account contracts, credential boundaries, provider-private state, and the reusable driver conformance battery (`artist_provider::conformance`)
-- `artist-runtime`: host-managed session registry (create/resume/steer/replay/cancel), explicit attachment + recovery policies, idempotent creates, graceful shutdown; production sessions resolve models through a `ModelProviderSource` via `SessionRuntime::from_provider_source`
-- `artist-observe`: backend-neutral observations projected from public stream events
-- `plugins/{prompt,context,hooks,model,events}`: one lifecycle capability per WASM component
-- `plugins/file-{read,children,write,edit,move}`: one `file:///**` operation per WASM component
-- `plugins/profiles-{read,children}`: one `profiles:///**` operation per WASM component
-- `plugins/plugins-{read,children,write,edit,move,signal}`: one `plugins:///**` package operation per WASM component
-- `plugins/tool-{read,find,grep,write,edit,move,run,signal,poll,yield,handoff}`: one model-facing tool per WASM component
-- `plugins/notes`: reference domain plugin — persists state through `store:///global/...` (no `provider-state`) and emits a generic durable `artist.notes.added` event
-- `plugins/sdk`: shared WIT boilerplate; this library is not a plugin component
+## What currently works
 
-The canonical transcript is the memory boundary. The kernel projects it into Rig messages for every request instead of letting Rig keep a second conversation log. This is intentional: Rig's automatic memory append only sees successful turns, while Artist must also preserve partial output and typed interruptions. `rig-memory` policies shape the projection without rewriting the transcript. The permanent record and physical-log contracts are specified in [`TRANSCRIPT_V1.md`](TRANSCRIPT_V1.md).
+- SQLite event storage and complete run reconstruction
+- JSON Schema validation for node inputs and yielded results
+- Dynamic `spawn`, `fork`, `join`, and `replace` operations
+- Exact cached-context prefix inheritance for forks
+- Durable Ask/Answer and typed Yield state transitions
+- One separate, persistent Python process per active REPL session
+- Python-to-Rust graph calls through the `artist` object
+- PyO3 native bridge, with a source-tree Python fallback
+- `fff-search` bindings preinstalled and exposed as `fff`
+- Rig completion-model adapter with a fixed Python/Ask/Yield tool surface
+- Wasmtime async WASI 0.3 component validation and capability checks
+- Crash recovery for unfinished model/Python actions
+- A CLI for inspecting and exercising every core operation
 
-Initial prompt composition is also component-owned. The host supplies ordered
-fragments to the WIT prompt socket of each component advertising that
-capability, and freezes the composed result into the session record before the
-first input. With no prompt component loaded, the host leaves fragments
-untouched.
+The frontend and a production model-provider service are intentionally not included yet.
 
-## Control semantics
+## Set up
 
-- `input` queues a normal turn.
-- `steer` queues a gentle notification. A Rig hook takes it immediately before the next model request; it never cancels the current request.
-- `abort` cancels the active stream and appends its partial assistant content followed by a typed interruption.
-- `yield` validates the active profile's result schema and ends the run with a typed payload.
-- `handoff` snapshots another profile, starts a fresh projection epoch with the same identity, and queues its brief plus pending steering as the first input.
+Requirements: current Rust, Python 3.10+, and [`uv`](https://docs.astral.sh/uv/).
 
-Replacement is explicitly `abort`, then `input`.
-
-## Build and test
-
-```sh
-make test
+```bash
+cargo build
+cargo run -- init
 ```
 
-This formats and lints the Rust workspace, builds every `wasm32-wasip2`
-component, verifies that each advertises exactly one capability, invokes the
-production sockets through Wasmtime, and runs deterministic tests.
+`init` creates the workspace `.artist/` directory and `.artist/artist.db`. It also creates a global `.artist/` inside the platform config directory (for example `~/.config/.artist/` on Linux), seeds its `SYSTEM.md`, and runs `uv sync` for the managed Python environment.
 
-With a usable native mount driver (FUSE, macFUSE, or WinFsp), the full filesystem projection and shared FFF
-index smoke test is:
+Configuration uses the same layout at both levels. A file in the workspace `.artist/` replaces the matching global file; a global file replaces the built-in default. The built-in system prompt is the real `prompts/SYSTEM.md` in this repository and is compiled into the binary. Edit the global `.artist/SYSTEM.md`, or create a workspace `.artist/SYSTEM.md`, to replace it without rebuilding Artist. `init` never overwrites existing user files.
 
-```sh
-make fuse-test
+## Minimal example
+
+Create node instructions:
+
+```bash
+printf 'Solve the given task and yield {"answer": "..."}.\n' > NODE.md
 ```
 
-Windows builds either place the matching WinFsp DLL beside the executable or
-enable `artist-resource/winfsp-system` to discover a system installation.
+Create the node:
 
-An opt-in real-provider smoke test is available without becoming a product path:
-
-```sh
-OPENAI_API_KEY=... cargo run -p artist-rig --example openai -- <streaming-model-name>
+```bash
+cargo run -- node create worker NODE.md \
+  --input-schema '{"type":"object","required":["task"]}' \
+  --output-schema '{"type":"object","required":["answer"]}'
 ```
 
-## Stable contracts
+Use the printed node ID:
 
-- Canonical snapshots use `artist-core::RECORD_VERSION = 5` and deserialize only
-  through the validating record reducer. Every other record version is rejected.
-- File-backed sessions use `artist-store::FILE_FORMAT_VERSION = 2`: a frozen
-  header followed by SHA-256-chained, atomic JSON batch frames. Every other
-  physical format or embedded record version is rejected. Artist is
-  pre-production: never add migration support; discard stale development data.
-- The public command and stream protocol consists only of `artist-core` values.
-- With locked Rig 0.42, `AgentRunner` stream errors are terminal; Artist
-  preserves partial output and closes the run instead of expecting a later
-  recovery item from that stream.
-- The plugin ABI is `artist:plugin@0.8.0` in `wit/plugin.wit`; tool, resource,
-  and slash-command providers are separate interoperable contracts. Slash
-  commands have globally unique names, receive raw trailing arguments, return
-  harness-facing output plus typed kernel actions, and are never profile-gated.
-  The host has no native model-facing tools: every tool registers from its own
-  WASM component into the shared registry below Rig.
-- Telemetry is derived from stream events and is never required to load or resume a session.
+```bash
+cargo run -- run start NODE_ID '{"task":"test the runtime"}'
+cargo run -- run show RUN_ID
+cargo run -- python RUN_ID 'fff is not None; 20 + 22'
+cargo run -- run yield RUN_ID '{"answer":"done"}'
+```
 
-The base resource-fabric contract lives in
-[`URI_RESOURCE_FABRIC_PLAN.md`](URI_RESOURCE_FABRIC_PLAN.md). Kernel metadata,
-execution-neutral control, and TECA line-anchor editing are specified in
-[`RESOURCE_CAPABILITIES_IMPLEMENTATION_PLAN.md`](RESOURCE_CAPABILITIES_IMPLEMENTATION_PLAN.md).
-Profile layout, policy, yield, handoff, and model routing are specified in
-[`PROFILES.md`](PROFILES.md).
-Inspectable source packages, candidate builds, validation, and live activation
-are specified in [`PLUGINS.md`](PLUGINS.md).
+JSON arguments can be loaded from files by prefixing the path with `@`.
+
+## Core source files
+
+- `src/domain.rs` — Node, Run, and event types
+- `src/store.rs` — transactional SQLite event store
+- `src/runtime.rs` — graph operations and state rules
+- `src/context.rs` — append-only prompt construction and fork prefixes
+- `src/scheduler.rs` — joins and crash recovery
+- `src/python.rs` / `python/worker.py` — isolated persistent REPL
+- `crates/artist-python` — native PyO3 RPC bridge
+- `src/rig_driver.rs` — stable Rig provider boundary
+- `src/plugin.rs` — Wasmtime WASI 0.3 plugin host
+
+See `harnessplan.md` for the architectural contract.

@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.tool.find",
-  "build": {"adapter": "cargo", "package": "artist-tool-find"},
-  "component": "artist_tool_find.wasm"
-}

@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.file.write",
-  "build": {"adapter": "cargo", "package": "artist-file-write"},
-  "component": "artist_file_write.wasm"
-}

@@ -1,37 +1,31 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/artist-python"]
 resolver = "3"
 
-[workspace.package]
+[package]
+name = "artist"
+version = "0.1.0"
 edition = "2024"
+description = "A durable, append-only agent harness"
 license = "MIT"
-rust-version = "1.89"
 
-[workspace.dependencies]
-async-stream = "0.3.6"
-async-trait = "0.1.89"
-base64 = "0.22.1"
-fff-search = "=0.10.5"
-fuser = { version = "0.17", default-features = false }
-fs2 = "0.4.3"
-futures = "0.3.31"
-globset = "0.4.16"
-jsonschema = { version = "0.50.0", default-features = false }
-libc = "0.2.175"
-percent-encoding = "2.3.2"
-regex = "1.11.2"
-rig-agent = { version = "0.42.0", default-features = false }
-rig-core = { version = "0.42.0", default-features = false }
-rig-memory = "0.42.0"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.143"
-sha2 = "0.10.9"
-similar = "2.7.0"
-teca = "=1.0.0"
-thiserror = "2.0.16"
-tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
-url = { version = "2.5.7", features = ["serde"] }
-uuid = { version = "1.18.1", features = ["v4", "serde"] }
-tempfile = "3.21.0"
-wasmtime = { version = "38.0.4", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
-wasmtime-wasi = { version = "38.0.4", default-features = false, features = ["p2"] }
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+usage = { package = "usage-rs", version = "6" }
+dirs = "6"
+jsonschema = "0.51"
+parking_lot = "0.12"
+rig-core = "0.42"
+rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = { version = "1", features = ["uuid1", "chrono04"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+wasmtime = { version = "48", default-features = false, features = ["async", "component-model", "component-model-async", "cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "48", default-features = false, features = ["p3"] }
+
+[dev-dependencies]
+tempfile = "3"

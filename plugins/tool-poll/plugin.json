@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.tool.poll",
-  "build": {"adapter": "cargo", "package": "artist-tool-poll"},
-  "component": "artist_tool_poll.wasm"
-}

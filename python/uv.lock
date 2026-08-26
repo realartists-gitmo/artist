@@ -1,0 +1,27 @@
+version = 1
+revision = 3
+requires-python = ">=3.10"
+
+[[package]]
+name = "artist-repl"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "fff-search" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "fff-search", specifier = ">=0.10.5" }]
+
+[[package]]
+name = "fff-search"
+version = "0.10.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b5/73/381c5447daa624cade3c59089f6ec2d020a2ab90c141f9976ff2a056a5e7/fff_search-0.10.5.tar.gz", hash = "sha256:c24937452841ddd91049043855b9b6e1b964e09967cba283a05b69c4b7d50377", size = 2141749, upload-time = "2026-08-16T16:24:02.686Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/18/ea/d04926da9051c447e8251733a48bd448a6d259361dc2d54677347e66513e/fff_search-0.10.5-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:ccf2a6dab7ec554604dac6016be995780da8fefed4c054e5391d3fa580bb0eca", size = 4915868, upload-time = "2026-08-16T16:23:53.766Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/ba/4d6be139d8506ecc5de42a87987018ec38b2e1af4105f6b4d1fcb9ba1d82/fff_search-0.10.5-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:77d2d083881aa49ec2b5fd61d0d2d5a0305e029d3202803064954844514ea0d6", size = 3927912, upload-time = "2026-08-16T16:23:55.875Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/ac/bada8ffe613f3ebc6b27860db3c40cb1499fe27dceaf46b0a2eb7a1cd82d/fff_search-0.10.5-cp310-abi3-manylinux_2_38_aarch64.whl", hash = "sha256:9c254909940c4e2a28dbcb49bc2efab5bb0a15bc0873470a448a5c4a3eedefa1", size = 4457133, upload-time = "2026-08-16T16:23:57.798Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/3a/bc83e330df47e56f236141f742701ce79463c6cafe96af7b4d99b4454252/fff_search-0.10.5-cp310-abi3-manylinux_2_38_x86_64.whl", hash = "sha256:db97be0d40704de2934f97a57fd074c58f7c0c01ddedd1b458433ff57890e13e", size = 5342329, upload-time = "2026-08-16T16:23:59.488Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/92/b6ea88da35181396555f9b09015f95583284dff685532e977d7d7c1d1dba/fff_search-0.10.5-cp310-abi3-win_amd64.whl", hash = "sha256:71839d469379bd96b3d01958f7fa7a792a12dec423d30e7fc64882dbfa837e9e", size = 5488015, upload-time = "2026-08-16T16:24:01.107Z" },
+]

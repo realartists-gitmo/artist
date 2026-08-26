@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.plugins.signal",
-  "build": {"adapter": "cargo", "package": "artist-plugins-signal"},
-  "component": "artist_plugins_signal.wasm"
-}

@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.notes",
-  "build": {"adapter": "cargo", "package": "artist-notes"},
-  "component": "artist_notes.wasm"
-}

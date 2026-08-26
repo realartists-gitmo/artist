@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.prompt",
-  "build": {"adapter": "cargo", "package": "artist-prompt"},
-  "component": "artist_prompt.wasm"
-}

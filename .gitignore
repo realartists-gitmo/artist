@@ -1,8 +1,5 @@
-/target/
-**/target/
-plugins/*/.artist/
-
-
-# Added by cargo
-
 /target
+/.artist
+/python/.venv
+**/__pycache__/
+*.pyc

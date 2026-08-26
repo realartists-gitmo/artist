@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.model",
-  "build": {"adapter": "cargo", "package": "artist-model"},
-  "component": "artist_model.wasm"
-}

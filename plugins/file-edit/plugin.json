@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.file.edit",
-  "build": {"adapter": "cargo", "package": "artist-file-edit"},
-  "component": "artist_file_edit.wasm"
-}

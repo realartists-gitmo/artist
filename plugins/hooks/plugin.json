@@ -1,6 +1,0 @@
-{
-  "format": 3,
-  "id": "artist.hooks",
-  "build": {"adapter": "cargo", "package": "artist-hooks"},
-  "component": "artist_hooks.wasm"
-}
